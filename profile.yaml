@@ -1,0 +1,62 @@
+identity:
+  name: Karl-Johan
+  location: Sundsvall, Sweden
+  current_role: Associate Director, Data & Insights (Etraveli Group)
+
+hard_constraints:
+  location:
+    # PASS if any of these hold; otherwise FAIL
+    accept_fully_remote: true            # remote roles workable from Sweden timezone
+    accept_sweden_hybrid: true           # hybrid where the office is in Sweden
+    accept_onsite_locations: [Sundsvall]
+    # FAIL: on-site/hybrid requiring presence outside Sweden, or relocation outside Sweden
+    # When seniority/location is simply UNSTATED, do NOT hard-fail — pass to soft scoring.
+  seniority:
+    min_years_experience: 5
+    # FAIL: roles explicitly entry-level, junior, graduate, internship, or requiring <5 yrs.
+    # When unstated, do NOT hard-fail.
+
+experience_inventory:
+  # Used by Tier 2 to decide what to emphasize vs de-emphasize per role.
+  core_strengths:
+    - Built Evidensia's BI function from scratch; grew team 1 -> 7 over ~5 years
+    - Led multi-country PMS rollout across Nordic markets (Evidensia)
+    - Managing 4 analytics teams across Sweden, India and Greece (Etraveli)
+    - Owner of CRM system and automations, improving customer club membership LTV +10p.p. over 1 year (Evidensia)
+    - Developed and deployed 6-month volume recovery strategy generating +4p.p. incremental revenue YoY (Evidensia)
+    - Business Controller and steering comittee member for 2bSEK IT development portfolio (Scandinavian Airlines)
+    - Stakeholder management and analytics leadership
+    - Breaking down complex problems into addressable datapoints and levers
+  technical:
+    sql: strong
+    power_bi: strong
+    qlik_sense: working
+    excel: advanced
+    python: working
+    ms_office: advanced
+    power_automate: strong
+    power_apps: working
+    databricks: basic
+  domain:
+    - Data leadership
+    - Operational management
+    - Operations analytics
+    - Controlling / FP&A (earlier career)
+  earlier_background:
+    - IT portfolio management (SAS)
+    - Management consulting
+  gaps_to_acknowledge:
+    - Hands-on AI/automation building (actively closing via these projects)
+    - Fundraising-domain analytics depth
+
+values:
+  cause_priorities: [global health and development, EA-aligned impact]
+  signals: [GWWC pledge, HIP IAP completed, effective giving advocacy]
+  dream_orgs: [GiveDirectly]
+
+preferences:
+  comp:
+    # Pension replicability is a real decision factor (EOR employers may not replicate
+    # Swedish tjänstepension). Flag roles where this is unclear.
+    note: flag occupational-pension (tjänstepension) replicability when comp is discussed
+  timezone: prefer EU-overlap; flag (do not hard-fail) roles requiring US-only hours
