@@ -97,14 +97,6 @@ def test_intern_fails(profile):
     result = check(make_posting(seniority="Internship — 6 months"), profile)
     assert not result.seniority_pass
 
-def test_low_years_experience_fails(profile):
-    result = check(make_posting(seniority="2+ years of experience required"), profile)
-    assert not result.seniority_pass
-
-def test_zero_plus_years_fails(profile):
-    result = check(make_posting(seniority="0-2 years experience"), profile)
-    assert not result.seniority_pass
-
 
 # ---------------------------------------------------------------------------
 # Combined gate result

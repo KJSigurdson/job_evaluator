@@ -1,8 +1,6 @@
 """Hard-constraint gate. Binary location + seniority checks against profile hard_constraints."""
 from __future__ import annotations
 
-import re
-
 from src.schemas import HardGateResult, RawPosting
 
 _REMOTE_KEYWORDS = frozenset({
@@ -16,16 +14,13 @@ _SENIORITY_FAIL_KEYWORDS = frozenset({
     "entry level", "entry-level", "junior", "graduate", "intern", "internship",
     "trainee", "apprentice", "new grad", "new graduate",
 })
-# Matches "0–4 years" or "0-4 yrs" patterns that signal required experience below threshold.
-_LOW_EXP_RE = re.compile(r"\b[0-4]\+?\s*(?:year|yr)s?\b", re.IGNORECASE)
 
 
 def check(posting: RawPosting, profile: dict) -> HardGateResult:
     loc_constraints = profile["hard_constraints"]["location"]
-    sen_constraints = profile["hard_constraints"]["seniority"]
 
     location_pass = _check_location(posting.location, loc_constraints)
-    seniority_pass = _check_seniority(posting.seniority, sen_constraints)
+    seniority_pass = _check_seniority(posting.seniority)
     passed = location_pass and seniority_pass
 
     if not passed:
@@ -71,7 +66,7 @@ def _check_location(location: str | None, constraints: dict) -> bool:
     return False
 
 
-def _check_seniority(seniority: str | None, constraints: dict) -> bool:
+def _check_seniority(seniority: str | None) -> bool:
     if not seniority:
         return True  # unstated → pass
 
@@ -80,8 +75,5 @@ def _check_seniority(seniority: str | None, constraints: dict) -> bool:
     for kw in _SENIORITY_FAIL_KEYWORDS:
         if kw in text:
             return False
-
-    if _LOW_EXP_RE.search(text):
-        return False
 
     return True
