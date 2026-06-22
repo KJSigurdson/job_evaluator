@@ -81,7 +81,7 @@ def parse_rows(rows: list[RawRow]) -> list[RawPosting]:
     postings: list[RawPosting] = []
     for row in rows[header_idx + 1:]:
         if _is_empty_row(row):
-            break
+            continue
 
         c = _pad(row, 9)
 
@@ -96,6 +96,8 @@ def parse_rows(rows: list[RawRow]) -> list[RawPosting]:
         # Column I (index 8): date added — included in raw_text for scorer context
 
         if not org or not title or not url:
+            continue
+        if "various" in title.lower():
             continue
 
         raw_text = " | ".join(filter(None, [org, title, location, comp, cause_area]))

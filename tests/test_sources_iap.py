@@ -166,24 +166,25 @@ def test_display_text_without_hyperlink_skips_row():
 # Stopping and skipping rules
 # ---------------------------------------------------------------------------
 
-def test_stops_at_fully_empty_row():
+def test_blank_row_in_middle_is_skipped():
+    # The IAP sheet uses blank/separator rows inside the table; they must not stop parsing.
     empty = row()
     later = row(
-        cell("Org2"), cell("Role2"), cell("https://example.com/job2"),
-        cell(), cell(), cell(), cell(), cell(), cell(),
+        cell("ACE"), cell("Analyst"), cell("https://ace.org/job"),
+        cell("Remote"), cell(), cell("Animal welfare"), cell(), cell(), cell(),
     )
     postings = parse_rows(sheet(_GOOD_ROW, empty, later))
-    assert len(postings) == 1  # later row must not be reached
+    assert len(postings) == 2  # both rows returned despite the blank between them
 
 
-def test_all_blank_cells_counts_as_empty_row():
+def test_all_blank_cells_skipped_not_fatal():
     all_blank = row(cell(""), cell(""), cell(""), cell(""), cell(""))
     later = row(
         cell("Org2"), cell("Role2"), cell("https://example.com/job2"),
         cell(), cell(), cell(), cell(), cell(), cell(),
     )
     postings = parse_rows(sheet(_GOOD_ROW, all_blank, later))
-    assert len(postings) == 1
+    assert len(postings) == 2
 
 
 def test_skips_row_with_no_org():
@@ -200,6 +201,15 @@ def test_skips_row_with_no_title():
         cell(), cell(), cell(), cell(), cell(), cell(),
     )
     assert parse_rows(sheet(r)) == []
+
+
+def test_skips_various_roles_rows():
+    for title in ("Various roles", "VARIOUS ROLES", "Various Roles (see careers page)"):
+        r = row(
+            cell("Org"), cell(title), cell("https://example.com/careers"),
+            cell(), cell(), cell(), cell(), cell(), cell(),
+        )
+        assert parse_rows(sheet(r)) == [], f"Expected {title!r} to be filtered out"
 
 
 def test_skips_row_with_no_url():
