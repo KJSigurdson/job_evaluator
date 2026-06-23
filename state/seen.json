@@ -1,0 +1,150 @@
+{
+  "version": 1,
+  "entries": {
+    "https://jobs.ashbyhq.com/faculty/d2d0ef45-de48-4c48-9781-5c85c9d49f42": {
+      "first_seen": "2026-06-23T07:30:44.434569+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneacrefund.org/vacancies/tupande-mel-manager": {
+      "first_seen": "2026-06-23T07:30:44.434599+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.proveg.org/jobs/7837342-senior-international-people-operations-manager": {
+      "first_seen": "2026-06-23T07:30:44.434611+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.eu.greenhouse.io/aisi/jobs/4899102101": {
+      "first_seen": "2026-06-23T07:30:44.434635+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/coefficientgiving/61ad9392-f397-42a9-85a2-234ed820b39d": {
+      "first_seen": "2026-06-23T07:30:44.434645+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.governance.ai/post/dc-winter-fellowship-2027": {
+      "first_seen": "2026-06-23T07:30:44.434659+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.governance.ai/post/winter-fellowship-2027-research-track": {
+      "first_seen": "2026-06-23T07:30:44.434668+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.1daysooner.org/jobs/": {
+      "first_seen": "2026-06-23T07:30:44.434686+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6175
+    },
+    "https://www.constellation.org/programs/researcher-program": {
+      "first_seen": "2026-06-23T07:30:44.434695+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.eu.greenhouse.io/aisi/jobs/4386112101": {
+      "first_seen": "2026-06-23T07:30:44.434703+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://uchicago.wd5.myworkdayjobs.com/External/job/Hyde-Park-Campus/Executive-Director--Human-Centered-Weather-Forecasts_JR33965": {
+      "first_seen": "2026-06-23T07:30:44.434719+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://tinyurl.com/chiefimpact": {
+      "first_seen": "2026-06-23T07:30:50.680168+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6975
+    },
+    "https://jobs.ashbyhq.com/coefficientgiving/55c0a20f-4cf9-4023-8b99-bb35a6b73f33": {
+      "first_seen": "2026-06-23T07:30:56.344945+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6625
+    },
+    "https://jobs.ashbyhq.com/coefficientgiving/b954a741-6d8a-47d3-85ea-16877369f007": {
+      "first_seen": "2026-06-23T07:31:02.099636+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7025
+    },
+    "https://docs.google.com/document/d/1a0KpgTZ4qSJ8u7XePU-j5GWg4RzSgRbHDQ2o0wzlVLc/edit?tab=t.a60jg49shuyd": {
+      "first_seen": "2026-06-23T07:31:08.067927+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.715
+    },
+    "https://rand.wd5.myworkdayjobs.com/en-US/External_Career_Site/job/Washington-DC-DC-Metro-Area/Research-Lead----AI-Cyber-Testing---Evaluation_R3122?q=cast": {
+      "first_seen": "2026-06-23T07:31:13.873544+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.51
+    },
+    "https://weanimals.org/work-with-us/join-our-team/media-pr-specialist-contract/": {
+      "first_seen": "2026-06-23T07:31:19.151367+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4
+    },
+    "https://job-boards.greenhouse.io/givewell/jobs/5263769008": {
+      "first_seen": "2026-06-23T07:31:36.743261+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.73
+    },
+    "https://mirrorbiologydialoguesfund.applytojob.com/apply/vTPLZaRyu2/Executive-Directors-Associate": {
+      "first_seen": "2026-06-23T07:31:43.103282+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.615
+    },
+    "https://airtable.com/appme7HmPhyhBTODD/pagRcjQtZaQTbuMaC/form": {
+      "first_seen": "2026-06-23T07:31:48.310968+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5
+    },
+    "https://jobs.lever.co/epoch-ai/b71cd010-d3cf-446c-80fa-fa5737573e82": {
+      "first_seen": "2026-06-23T07:31:55.404498+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.61
+    },
+    "https://new-roots-institute.rippling-ats.com/job/1033028/director-of-finance-operations": {
+      "first_seen": "2026-06-23T07:32:09.514523+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.59
+    },
+    "https://steadrise.notion.site/Director-of-Talent-Discovery-36d20e14e1b780a7864bfa5ae04ace93": {
+      "first_seen": "2026-06-23T07:32:15.057112+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.45
+    },
+    "https://steadrise.notion.site/Director-of-Programs-36d20e14e1b780a5baf5d84bc65d1571": {
+      "first_seen": "2026-06-23T07:32:20.863918+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.49
+    },
+    "https://apartresearch.notion.site/technical-project-manager": {
+      "first_seen": "2026-06-23T07:32:35.851167+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.68
+    },
+    "https://apartresearch.notion.site/research-scientist-manipulation-evals": {
+      "first_seen": "2026-06-23T07:32:42.074802+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6775
+    },
+    "https://job-boards.greenhouse.io/givewell/jobs/5263759008": {
+      "first_seen": "2026-06-23T07:33:15.764210+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7675
+    },
+    "https://docs.google.com/document/d/1BhCR1Q35WbKuy5sb_bokfCxl1m_AXYhN3HnD-OEtFcc/edit?tab=t.0": {
+      "first_seen": "2026-06-23T07:33:35.143582+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.81
+    },
+    "https://jobs.ashbyhq.com/coefficientgiving/2458cd52-9dd7-4e10-8af3-999ae3418562": {
+      "first_seen": "2026-06-23T07:34:00.844117+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.78
+    }
+  }
+}

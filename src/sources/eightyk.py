@@ -26,7 +26,15 @@ def fetch() -> list[RawPosting]:
 
 
 def fetch_raw_hits() -> list[dict]:
-    """POST to the Algolia index, paginate through all pages, return all raw hits."""
+    """POST to the Algolia /query endpoint, paginate through all pages, return all raw hits.
+
+    NOTE: Both the 80k and ProbablyGood public API keys lack the 'browse' ACL,
+    so the cursor-based /browse endpoint returns 403. We use /query with page
+    pagination; the effective ceiling is Algolia's paginationLimitedTo (default
+    1000). At 866 hits the 80k index is under that limit today, so all results
+    are returned. If the index grows past 1000, a server-side key upgrade would
+    be needed.
+    """
     app_id = os.environ["ALGOLIA_APP_ID"]
     api_key = os.environ["ALGOLIA_API_KEY"]
     index   = os.environ["ALGOLIA_INDEX_80K"]
@@ -69,8 +77,9 @@ def parse_hits(hits: list[dict]) -> list[RawPosting]:
         org      = (hit.get("company_name") or "").strip()
         location = ", ".join(hit.get("tags_location_80k") or [])
         seniority = ", ".join(hit.get("tags_exp_required") or []) or None
-        comp     = _extract_comp(hit)
-        deadline = _extract_deadline(hit)
+        comp      = _extract_comp(hit)
+        deadline  = _extract_deadline(hit)
+        posted_at = _extract_unix_date(hit, "posted_at_unix")
 
         raw_text = " | ".join(filter(None, [
             title,
@@ -90,6 +99,7 @@ def parse_hits(hits: list[dict]) -> list[RawPosting]:
             seniority=seniority,
             comp=comp,
             deadline=deadline,
+            posted_at=posted_at,
             raw_text=raw_text,
         ))
 
@@ -99,6 +109,16 @@ def parse_hits(hits: list[dict]) -> list[RawPosting]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _extract_unix_date(hit: dict, key: str) -> date | None:
+    val = hit.get(key)
+    if not val or not isinstance(val, (int, float)) or val <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(float(val)).date()
+    except (OSError, OverflowError, ValueError):
+        return None
+
 
 def _extract_comp(hit: dict) -> str | None:
     """Return salary string if present and non-empty; None otherwise.
@@ -113,14 +133,7 @@ def _extract_comp(hit: dict) -> str | None:
 
 
 def _extract_deadline(hit: dict) -> date | None:
-    """closes_at is a Unix timestamp (int); 0 or absent means no deadline."""
-    closes_at = hit.get("closes_at")
-    if not closes_at or not isinstance(closes_at, (int, float)) or closes_at <= 0:
-        return None
-    try:
-        return datetime.fromtimestamp(closes_at).date()
-    except (OSError, OverflowError, ValueError):
-        return None
+    return _extract_unix_date(hit, "closes_at")
 
 
 def _strip_html(text: str) -> str:

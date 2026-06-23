@@ -19,6 +19,7 @@ class RawPosting(BaseModel):
     seniority: str | None = None
     comp: str | None = None
     deadline: date | None = None
+    posted_at: date | None = None  # None → exempt from recency filter (e.g. IAP)
     raw_text: str  # full text fed to the LLM parser / Tier 1 scorer
 
 

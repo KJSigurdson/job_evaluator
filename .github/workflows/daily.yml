@@ -1,27 +1,77 @@
-name: daily-job-eval
+# EA Job Evaluator — daily pipeline
+#
+# Runs automatically at 06:00 UTC every day.
+# Scrapes EA job boards, scores new roles, inserts high-fit ones into Notion,
+# then commits the updated seen-URL cache (state/seen.json) so the next run
+# skips already-processed postings without re-hitting Notion.
+#
+# Manual trigger (Actions → Run workflow):
+#   dry_run = false  →  full run, inserts into Notion, commits cache
+#   dry_run = true   →  scrape + score only, prints would-be inserts, no writes
+
+name: Daily pipeline
 
 on:
   schedule:
-    - cron: "0 7 * * *"   # 07:00 UTC daily (09:00 CEST / 08:00 CET)
-  workflow_dispatch:       # manual trigger for testing
+    - cron: "0 6 * * *"   # 06:00 UTC — off-peak, avoids midnight-UTC drop rate
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run (scrape + score only, no Notion writes or cache commit)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # needed to commit state/seen.json back to the repo
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false   # never cancel a running pipeline; queue instead
 
 jobs:
-  evaluate:
+  run-pipeline:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 20
 
-      - uses: actions/setup-python@v5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+          cache: pip
 
       - name: Install dependencies
         run: pip install -r requirements.txt
 
       - name: Run pipeline
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          ANTHROPIC_API_KEY:           ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_TOKEN:                ${{ secrets.NOTION_TOKEN }}
+          NOTION_DB_ID:                ${{ secrets.NOTION_DB_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: python -m src.pipeline
+          IAP_SHEET_ID:                ${{ secrets.IAP_SHEET_ID }}
+          IAP_SHEET_TAB:               ${{ secrets.IAP_SHEET_TAB }}
+          ALGOLIA_APP_ID:              ${{ secrets.ALGOLIA_APP_ID }}
+          ALGOLIA_API_KEY:             ${{ secrets.ALGOLIA_API_KEY }}
+          ALGOLIA_INDEX_80K:           ${{ secrets.ALGOLIA_INDEX_80K }}
+          TIER1_MODEL:                 ${{ secrets.TIER1_MODEL }}
+          TIER2_MODEL:                 ${{ secrets.TIER2_MODEL }}
+          RECENCY_DAYS:                ${{ secrets.RECENCY_DAYS }}
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            python -m src.pipeline --dry-run
+          else
+            python -m src.pipeline
+          fi
+
+      - name: Commit updated seen cache
+        if: ${{ inputs.dry_run != 'true' }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/seen.json
+          git diff --staged --quiet || git commit -m "Update seen cache [skip ci]"
+          git push
