@@ -104,7 +104,7 @@ def _call_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1ScoreOut
 
     response = Anthropic().messages.create(
         model=model,
-        max_tokens=1024,
+        max_tokens=2048,
         temperature=0,
         tools=[{
             "name": "score_posting",
@@ -119,4 +119,11 @@ def _call_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1ScoreOut
         tool_input = response.content[0].input
         return Tier1ScoreOutput.model_validate(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
+        log.error(
+            "Tier 1 parse failure for %s (stop_reason=%s): %s\nraw response: %s",
+            posting.url,
+            response.stop_reason,
+            exc,
+            response.model_dump_json() if hasattr(response, "model_dump_json") else repr(response),
+        )
         raise ValueError(f"Tier 1 response parse error: {exc}") from exc

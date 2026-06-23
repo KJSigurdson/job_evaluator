@@ -8,6 +8,7 @@
 # Manual trigger (Actions → Run workflow):
 #   dry_run = false  →  full run, inserts into Notion, commits cache
 #   dry_run = true   →  scrape + score only, prints would-be inserts, no writes
+#   limit   = N      →  cap postings processed to N (useful for smoke-testing a manual run)
 
 name: Daily pipeline
 
@@ -20,6 +21,10 @@ on:
         description: "Dry run (scrape + score only, no Notion writes or cache commit)"
         type: boolean
         default: false
+      limit:
+        description: "Cap number of postings processed (leave empty for no cap)"
+        type: string
+        default: ""
 
 permissions:
   contents: write   # needed to commit state/seen.json back to the repo
@@ -61,11 +66,10 @@ jobs:
           TIER2_MODEL:                 ${{ secrets.TIER2_MODEL }}
           RECENCY_DAYS:                ${{ secrets.RECENCY_DAYS }}
         run: |
-          if [ "${{ inputs.dry_run }}" = "true" ]; then
-            python -m src.pipeline --dry-run
-          else
-            python -m src.pipeline
-          fi
+          ARGS=""
+          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ -n "${{ inputs.limit }}" ]          && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          python -m src.pipeline $ARGS
 
       - name: Commit updated seen cache
         if: ${{ inputs.dry_run != 'true' }}
