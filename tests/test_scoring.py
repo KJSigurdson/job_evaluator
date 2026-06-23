@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 
 from src.schemas import HardGateResult
-from src.scoring import score, weighted_sum
+from src.scoring import ScoringError, score, weighted_sum
 from tests.conftest import make_posting, make_tier1
 
 
@@ -83,7 +83,26 @@ def test_score_fit_matches_weighted_sum(profile, rubric):
     expected = weighted_sum(result.scores, rubric)
     assert result.fit_score == pytest.approx(expected)
 
-def test_score_raises_without_llm_fn(profile, rubric):
-    posting = make_posting()
-    with pytest.raises(NotImplementedError):
-        score(posting, _PASSED_GATE, profile, rubric)
+# ---------------------------------------------------------------------------
+# Retry behaviour (offline stubs — no real LLM)
+# ---------------------------------------------------------------------------
+
+def test_score_raises_scoring_error_after_two_failures(profile, rubric):
+    def _always_fails(posting, profile):  # noqa: ARG001
+        raise ValueError("simulated LLM failure")
+
+    with pytest.raises(ScoringError):
+        score(make_posting(), _PASSED_GATE, profile, rubric, _llm_fn=_always_fails)
+
+def test_score_succeeds_on_second_attempt(profile, rubric):
+    calls = []
+
+    def _fails_once(posting, profile):  # noqa: ARG001
+        calls.append(1)
+        if len(calls) == 1:
+            raise ValueError("first attempt failed")
+        return make_tier1()
+
+    result = score(make_posting(), _PASSED_GATE, profile, rubric, _llm_fn=_fails_once)
+    assert len(calls) == 2
+    assert 0.0 <= result.fit_score <= 1.0
