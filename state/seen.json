@@ -2090,6 +2090,1951 @@
       "first_seen": "2026-06-29T12:51:17.557990+00:00",
       "verdict": "inserted",
       "fit_score": 0.775
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5030244008": {
+      "first_seen": "2026-06-29T12:55:17.780795+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4426376479/?alternateChannel=search&refId=QkqCoZEEe7braCU25ZZG3g%3D%3D&trackingId=GoIG4%2BTv0mjDj2y6JvmI6A%3D%3D&trk=d_flagship3_company": {
+      "first_seen": "2026-06-29T12:55:17.780968+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.pureearth.org/wp-content/uploads/2026/06/JD-Social-Media-Video-Intern.pdf": {
+      "first_seen": "2026-06-29T12:55:17.781031+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/aisafety/f0218805-28e2-4da5-a002-dddb8dfce7fd": {
+      "first_seen": "2026-06-29T12:55:17.781079+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4248028009": {
+      "first_seen": "2026-06-29T12:55:17.781123+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/physicist-to-engineer-track/": {
+      "first_seen": "2026-06-29T12:55:17.781166+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/operations-engineer/": {
+      "first_seen": "2026-06-29T12:55:17.781207+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/graduate-electronics-engineer/": {
+      "first_seen": "2026-06-29T12:55:17.781248+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5250063008": {
+      "first_seen": "2026-06-29T12:55:17.781291+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5231205008": {
+      "first_seen": "2026-06-29T12:55:17.781331+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5231200008": {
+      "first_seen": "2026-06-29T12:55:17.781377+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruitment.jrc.ec.europa.eu/vacancy/2931": {
+      "first_seen": "2026-06-29T12:55:17.781410+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://impact-ops.org/jobs/finance-associate-2/": {
+      "first_seen": "2026-06-29T12:55:17.781436+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/systems-software-engineer-security-first-party-hardware-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.781469+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/product-policy-biosecurity-policy-manager-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.781495+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?ccId=19000101_000001&cid=0c68d588-8c9c-408d-9476-64d2fbc7640d&jobId=630292&lang=en_US": {
+      "first_seen": "2026-06-29T12:55:17.781546+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4187500009": {
+      "first_seen": "2026-06-29T12:55:17.781576+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4252456009": {
+      "first_seen": "2026-06-29T12:55:17.781603+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers-cfr.icims.com/jobs/2923/program-assistant%2c-lead-ai/job?in_iframe=1": {
+      "first_seen": "2026-06-29T12:55:17.781636+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/aisafety/e011814b-9a80-43d6-bb0c-cc153ea4bec4": {
+      "first_seen": "2026-06-29T12:55:17.781663+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://biosecurityworld.notion.site/24326cc06be04b34a48076a260482c7b?v=1335ef216bed477f930de7c35d5a36e9": {
+      "first_seen": "2026-06-29T12:55:17.781758+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.carnegiecouncil.org/about/jobs/harry-frank-guggenheim-fellow-for-nuclear-ethics-and-security": {
+      "first_seen": "2026-06-29T12:55:17.781810+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://boards.greenhouse.io/cloudflare/jobs/7577564?gh_jid=7577564": {
+      "first_seen": "2026-06-29T12:55:17.781860+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://academic.careers.columbia.edu/": {
+      "first_seen": "2026-06-29T12:55:17.781893+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?ccId=19000101_000001&cid=9b16364c-5e0e-4e66-be82-8f108b1eb279&jobId=552986&lang=en_US": {
+      "first_seen": "2026-06-29T12:55:17.781945+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneacrefund.org/vacancies/rwanda-recrutement-stagiaire": {
+      "first_seen": "2026-06-29T12:55:17.781976+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.thebritishacademy.ac.uk/funding/schemes/shape-involve-and-engage/": {
+      "first_seen": "2026-06-29T12:55:17.782009+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unidir.org/job/graduate-professional-security-and-technology-2/": {
+      "first_seen": "2026-06-29T12:55:17.782037+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.coursera.org/learn/economics-of-ai": {
+      "first_seen": "2026-06-29T12:55:17.782061+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.healthdata.org/index%2Ephp/about/careers/job-openings/researcher-temporary-gem": {
+      "first_seen": "2026-06-29T12:55:17.782085+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gem.com/constellation-institute/64106250-5fb4-4ff5-b562-cc279c57dc57": {
+      "first_seen": "2026-06-29T12:55:17.782111+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/10alabs/jobs/4273684009": {
+      "first_seen": "2026-06-29T12:55:17.782138+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/biohub/jobs/7983994?gh_src=f5309c261us": {
+      "first_seen": "2026-06-29T12:55:17.782172+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://deepmindsafetyresearch.medium.com/introducing-our-short-course-on-agi-safety-1072adb7912c": {
+      "first_seen": "2026-06-29T12:55:17.782196+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.siemens.com/en_US/externaljobs/JobDetail/506371?sourceType=PREMIUM_POST_SITE": {
+      "first_seen": "2026-06-29T12:55:17.782229+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.tesla.com/careers/search/job/271951": {
+      "first_seen": "2026-06-29T12:55:17.782259+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/app53PsYpHxJW61l3/shrjyF9rqLVH2xdTR/tblBeumzf4BGqrc0z": {
+      "first_seen": "2026-06-29T12:55:17.782287+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/704787e6-2b49-4282-8648-faaf106e7d78": {
+      "first_seen": "2026-06-29T12:55:17.782314+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/6f460b05-94b1-457a-ac7d-17af48425ca2": {
+      "first_seen": "2026-06-29T12:55:17.782340+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/e1f50e09-077f-4163-abff-895c12a20799": {
+      "first_seen": "2026-06-29T12:55:17.782365+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/539f1a36-0378-46bc-b493-fb3a93adca10": {
+      "first_seen": "2026-06-29T12:55:17.782391+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/c99e7019-5dda-4739-8943-a19f47570689": {
+      "first_seen": "2026-06-29T12:55:17.782415+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/00ad32ab-f657-4239-9e92-e53232dc66a0": {
+      "first_seen": "2026-06-29T12:55:17.782439+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Irregular/e2ecd2b1-6a44-4afe-bd31-8d1366ca1bb6?embed=js": {
+      "first_seen": "2026-06-29T12:55:17.782471+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://meridianlabs.ai/careers/principal-fs": {
+      "first_seen": "2026-06-29T12:55:17.782497+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://meridianlabs.ai/careers/principal-fe": {
+      "first_seen": "2026-06-29T12:55:17.782523+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://meridianlabs.ai/careers/senior-fe": {
+      "first_seen": "2026-06-29T12:55:17.782549+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://prism-research.org/": {
+      "first_seen": "2026-06-29T12:55:17.782573+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gem.com/constellation-institute/79186266-9bd3-4136-ad96-389b388b6af1": {
+      "first_seen": "2026-06-29T12:55:17.782599+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/1b06d90d-a2ac-49dd-9f12-4408303c5e86": {
+      "first_seen": "2026-06-29T12:55:17.782624+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gem.com/constellation-institute/ff84a293-a436-410b-bf52-fe2dbe3485f9": {
+      "first_seen": "2026-06-29T12:55:17.782649+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.matsprogram.org/careers/compute-administrator-berkeley": {
+      "first_seen": "2026-06-29T12:55:17.782674+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://animalcharityevaluators.org/about/our-team/join-our-team/researcher/": {
+      "first_seen": "2026-06-29T12:55:17.782720+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://humansincontrol.org/careers/state-organizer": {
+      "first_seen": "2026-06-29T12:55:17.782748+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://humanaligned.ai/2026/": {
+      "first_seen": "2026-06-29T12:55:17.782776+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1R1jCGo4_oPzCUuvGd-TSO6QkLC5SnHkHFktmLj4tGIU/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.782813+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4258824009": {
+      "first_seen": "2026-06-29T12:55:17.782846+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://omidyar.com/where-we-focus/tech-journalism-fund/": {
+      "first_seen": "2026-06-29T12:55:17.782872+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://paxsapiens.bamboohr.com/careers/55": {
+      "first_seen": "2026-06-29T12:55:17.782900+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apply.interfolio.com/187001": {
+      "first_seen": "2026-06-29T12:55:17.782925+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.pureearth.org/wp-content/uploads/2026/05/Program-Assistant-Job-Description-BD.pdf": {
+      "first_seen": "2026-06-29T12:55:17.782951+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://xlabaisecurity.com/getting-started/welcome/": {
+      "first_seen": "2026-06-29T12:55:17.782974+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.eu.lever.co/controlai/f1906abe-2940-4949-a6a3-151d43b954a6": {
+      "first_seen": "2026-06-29T12:55:17.782999+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.safer-ai.org/jobs/standards-researcher": {
+      "first_seen": "2026-06-29T12:55:17.783025+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theaipn.org/careers/director-of-government-affairs/": {
+      "first_seen": "2026-06-29T12:55:17.783050+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://animaladvocacycareers.org/course/": {
+      "first_seen": "2026-06-29T12:55:17.783071+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.eahongkong.org/job-listing-part-time-developer": {
+      "first_seen": "2026-06-29T12:55:17.783092+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.udemy.com/course/worldbuilding-hopeful-futures-with-ai/": {
+      "first_seen": "2026-06-29T12:55:17.783113+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.trajectorylabs.com/careers/member-of-technical-staff": {
+      "first_seen": "2026-06-29T12:55:17.783138+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://vcdnp.org/fall-2026-internship/": {
+      "first_seen": "2026-06-29T12:55:17.783164+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ellis.eu/research/jobs/2026-05-27-phd-students-and-visiting-phd-students": {
+      "first_seen": "2026-06-29T12:55:17.783191+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/e/1FAIpQLSfzq7OD7T072MUREYs__tAs2L_uCUZnJz0JcuUw-TEoYKqCOg/viewform": {
+      "first_seen": "2026-06-29T12:55:17.783218+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/aisafety/a510a964-6425-405d-b757-cb7bfd19c994": {
+      "first_seen": "2026-06-29T12:55:17.783243+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://observatoriodebienestaranimal.jobs.personio.com/job/2647367": {
+      "first_seen": "2026-06-29T12:55:17.783265+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://nonproliferation-elearning.eu/": {
+      "first_seen": "2026-06-29T12:55:17.783288+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/404d4d26-760e-41a7-9bf2-b0da235246b3": {
+      "first_seen": "2026-06-29T12:55:17.783317+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/005ca9cd-8e31-42c9-9778-c4286f7d50df": {
+      "first_seen": "2026-06-29T12:55:17.783340+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/cbai/916b0bc0-02c7-4358-af8f-dcdd4af1f2f9": {
+      "first_seen": "2026-06-29T12:55:17.783363+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theaipn.org/careers/junior-associate/": {
+      "first_seen": "2026-06-29T12:55:17.783387+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Associate-AI-Security-Researcher_2024456-1": {
+      "first_seen": "2026-06-29T12:55:17.783412+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gem.com/transluce/am9icG9zdDoPcMZtBLP6V4VXFRxnm65P": {
+      "first_seen": "2026-06-29T12:55:17.783438+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theaipn.org/careers/vice-president-of-government-affairs-senate-focus/": {
+      "first_seen": "2026-06-29T12:55:17.783464+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theaipn.org/careers/director-donor-relations/": {
+      "first_seen": "2026-06-29T12:55:17.783489+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.safer-ai.org/jobs/frontier-ai-risk-management-governance-researcher": {
+      "first_seen": "2026-06-29T12:55:17.783515+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4407553779/?alternateChannel=search&eBP=NON_CHARGEABLE_CHANNEL&refId=babyK92OnAGsjxpnV4ZZEg%3D%3D&trackingId=YN%2Fm8gIxijbV13Hd7l5E5A%3D%3D&trk=d_flagship3_search_srp_jobs": {
+      "first_seen": "2026-06-29T12:55:17.783585+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/10alabs/jobs/4007350009": {
+      "first_seen": "2026-06-29T12:55:17.783618+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4248022009": {
+      "first_seen": "2026-06-29T12:55:17.783645+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1KaysDZ1G4mMBS-jh6UDnlU47usiVyYlCJNTwHM6ZLAM/": {
+      "first_seen": "2026-06-29T12:55:17.783671+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4113548009": {
+      "first_seen": "2026-06-29T12:55:17.784477+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.amacad.org/career/hellman-and-simons-fellow-science-engineering-technology": {
+      "first_seen": "2026-06-29T12:55:17.784521+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.nber.org/career-resources/research-assistant-positions-not-nber": {
+      "first_seen": "2026-06-29T12:55:17.784554+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://britishprogress.org/opportunities/head-of-operations": {
+      "first_seen": "2026-06-29T12:55:17.784590+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://outrider.org/outrider-foundation-seeks-program-associate": {
+      "first_seen": "2026-06-29T12:55:17.784618+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/ginkgobioworks/jobs/5047518007": {
+      "first_seen": "2026-06-29T12:55:17.784653+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.csis.org/opportunities/1770": {
+      "first_seen": "2026-06-29T12:55:17.784702+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.pureearth.org/wp-content/uploads/2026/05/HR-Internship.pdf": {
+      "first_seen": "2026-06-29T12:55:17.784734+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://humancompatible.ai/jobs": {
+      "first_seen": "2026-06-29T12:55:17.784763+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.485
+    },
+    "https://job-boards.greenhouse.io/xai/jobs/5143756007": {
+      "first_seen": "2026-06-29T12:55:17.784796+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Senior-AI-Security-Software-Engineer_2024470-2": {
+      "first_seen": "2026-06-29T12:55:17.784824+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/AI-Security-Software-Engineer_2024469-1": {
+      "first_seen": "2026-06-29T12:55:17.784850+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://app.trinethire.com/companies/586876-pure-earth/jobs/120688-human-resources-internship": {
+      "first_seen": "2026-06-29T12:55:17.784874+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4400609184/?eBP=NON_CHARGEABLE_CHANNEL&refId=vWpnW3ai%2BkspEebVTpp3zg%3D%3D&trackingId=vZ%2FCoG6uRj1x73djwCbRRw%3D%3D&trk=flagship3_search_srp_jobs": {
+      "first_seen": "2026-06-29T12:55:17.784947+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.alignerr.com/jobs/1ad553b6-973d-4463-b4ea-722976f54727?referral-source=linkedin-job": {
+      "first_seen": "2026-06-29T12:55:17.784985+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.alignerr.com/jobs/b687c780-2b77-4c7a-a546-7feb5af50197?referral-source=linkedin-job": {
+      "first_seen": "2026-06-29T12:55:17.785017+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/cloudflare/jobs/7577205?gh_jid=7577205&gh_src=5ylsd31": {
+      "first_seen": "2026-06-29T12:55:17.785056+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://hhmi.wd1.myworkdayjobs.com/en-US/External/details/Presidential-Fellow_R-4295-1?q=fellow": {
+      "first_seen": "2026-06-29T12:55:17.785097+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://humannypokrok.sk/programova-specialistka/": {
+      "first_seen": "2026-06-29T12:55:17.785124+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/security-researcher-agentic-ai-threats-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785151+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://scale.com/careers/4696595005": {
+      "first_seen": "2026-06-29T12:55:17.785179+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.successif.org/application-scorer": {
+      "first_seen": "2026-06-29T12:55:17.785202+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5211184008": {
+      "first_seen": "2026-06-29T12:55:17.785230+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Computational-Biologist-MA-02420/1389116600/": {
+      "first_seen": "2026-06-29T12:55:17.785256+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Computational-Biologist-MA-02420/1389117100/": {
+      "first_seen": "2026-06-29T12:55:17.785281+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/security-preparedness-lead-coding-agents-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785306+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/model-policy-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785330+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/epoch-ai/ab88ba6e-6a92-44cc-8830-a2dafca31f1a": {
+      "first_seen": "2026-06-29T12:55:17.785361+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/model-policy-chemical-and-biological-risk-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785387+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://broadinstitute.avature.net/en_US/careers/JobDetail/Research-Scientist-I-Viral-Genomics-Group-Sabeti-Lab/21632": {
+      "first_seen": "2026-06-29T12:55:17.785412+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/1K1sSJQXK0nNmCSu_j54G0jl-XVPMTJSHtBVzSzaXEjQ/viewform?edit_requested=true": {
+      "first_seen": "2026-06-29T12:55:17.785449+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/e/1FAIpQLSedbqeU4JZQASmnUyUY8ZWSL85opl2K8CUOGkEMiDMx0eqWdQ/viewform": {
+      "first_seen": "2026-06-29T12:55:17.785473+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.mitre.org/us/en/job/R116626/AI-Security-Engineer": {
+      "first_seen": "2026-06-29T12:55:17.785499+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4413995114/?alternateChannel=search&eBP=NON_CHARGEABLE_CHANNEL&refId=k5LKnIEw8tV3djFcqzYgTw%3D%3D&trackingId=%2FDoAtb24XuDmHv8qGPbfFA%3D%3D&trk=d_flagship3_search_srp_jobs": {
+      "first_seen": "2026-06-29T12:55:17.785566+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4413999014/?alternateChannel=search&refId=Rvt48cVRjsNsRAv%2B7g0eFA%3D%3D&trackingId=oOVIwe4KkWstutIloktOUg%3D%3D&trk=d_flagship3_company": {
+      "first_seen": "2026-06-29T12:55:17.785628+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers-cfr.icims.com/jobs/2928/research-associate%2c-china-strategy-initiative/job?in_iframe=1": {
+      "first_seen": "2026-06-29T12:55:17.785665+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/model-policy-frontier-cyber-risk-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785716+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-alignment-oversight-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.785747+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forum.effectivealtruism.org/posts/QmLSW3yGXFayNcNgx/ml-engineer-mit-ai-risk-initiative-contractor-part-time-6": {
+      "first_seen": "2026-06-29T12:55:17.785772+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Associate-Data-Scientist_2024499": {
+      "first_seen": "2026-06-29T12:55:17.785799+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://scale.com/careers/4677657005": {
+      "first_seen": "2026-06-29T12:55:17.785826+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://scale.com/careers/4675694005": {
+      "first_seen": "2026-06-29T12:55:17.785851+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.hluce.org/programs/luce-scholars/": {
+      "first_seen": "2026-06-29T12:55:17.785876+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/schmidt-entities/c42b4c52-d92a-4bd6-bac6-6b2d94159b35": {
+      "first_seen": "2026-06-29T12:55:17.785901+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fulbrightscholars.org/us-scholar-awards/FPPF": {
+      "first_seen": "2026-06-29T12:55:17.785926+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://igualdadanimal.org/empleo/coordinador-marketing-digital/": {
+      "first_seen": "2026-06-29T12:55:17.785952+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4980427008": {
+      "first_seen": "2026-06-29T12:55:17.785977+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4980436008": {
+      "first_seen": "2026-06-29T12:55:17.786002+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4980430008": {
+      "first_seen": "2026-06-29T12:55:17.786027+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ats.rippling.com/armilla-ai/jobs/58815295-c137-4d11-95d2-a313ba13730a": {
+      "first_seen": "2026-06-29T12:55:17.786052+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://asiasociety.org/policy-institute/intern-asia-society-policy-institute-center-china-analysis-domestic-politics": {
+      "first_seen": "2026-06-29T12:55:17.786084+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://asiasociety.org/policy-institute/summer-intern-asia-society-policy-institute-center-china-analysis-society": {
+      "first_seen": "2026-06-29T12:55:17.786110+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forecastingresearch.org/careers/content-editor": {
+      "first_seen": "2026-06-29T12:55:17.786132+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forecastingresearch.org/careers/research-assistant": {
+      "first_seen": "2026-06-29T12:55:17.786154+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.schwarzmanscholars.org/": {
+      "first_seen": "2026-06-29T12:55:17.786181+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/apolloresearch/3628de77-7641-44b7-b80f-28c4a7a68abf": {
+      "first_seen": "2026-06-29T12:55:17.786207+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/apolloresearch/bdc9ea00-6744-4f2a-8f23-06081af3945c": {
+      "first_seen": "2026-06-29T12:55:17.786232+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theaidigest.org/hiring": {
+      "first_seen": "2026-06-29T12:55:17.786254+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://asiasociety.org/policy-institute/summer-intern-aspi-center-china-analysis": {
+      "first_seen": "2026-06-29T12:55:17.786280+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.cam.ac.uk/jobs/phd-studentship-in-monitoring-and-increasing-llm-safety-nm49585-0": {
+      "first_seen": "2026-06-29T12:55:17.786305+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-alignment-training-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.786331+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1SmRwx9H1pBgS4Tr2Rjb88NdSit14wQSFS9QEbrqFlGc/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.786362+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Irregular/3258b769-ba83-49fa-ba11-8cb98494dee9?embed=js": {
+      "first_seen": "2026-06-29T12:55:17.786394+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4178629009": {
+      "first_seen": "2026-06-29T12:55:17.786420+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.againstmalaria.com/NewsItem.aspx?newsitem=AMF-is-hiring-Junior-Software-Engineer": {
+      "first_seen": "2026-06-29T12:55:17.786448+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://igualdadanimal.org/empleo/oferta-de-empleo-editor-de-video/": {
+      "first_seen": "2026-06-29T12:55:17.786472+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-misalignment-research-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.786497+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-alignment-science-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.786522+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/product-manager-cyber-safety-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.786545+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gem.com/transluce/am9icG9zdDoq-FKTd-JXCK4eCHw1wzGA": {
+      "first_seen": "2026-06-29T12:55:17.786571+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://trajectorylabs.net/careers/ai-red-teamer": {
+      "first_seen": "2026-06-29T12:55:17.786593+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Machine-Learning-Engineer---Secure-AI-Lab_2024338-2": {
+      "first_seen": "2026-06-29T12:55:17.786624+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/hiddenlayer/jobs/4599590007": {
+      "first_seen": "2026-06-29T12:55:17.786647+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1oXWkoQEL9_jE2rCJ0IDV8871dP0M0sXg-jlNVdV0EJw/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.786696+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Computational-Biologist-MA-02420/1366997300/": {
+      "first_seen": "2026-06-29T12:55:17.786729+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.0labs.ai/careers/ai-control-security-engineer": {
+      "first_seen": "2026-06-29T12:55:17.786753+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.0labs.ai/careers/founding-product-engineer": {
+      "first_seen": "2026-06-29T12:55:17.786780+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.effectiefgeven.be/vacatures/social-media-manager": {
+      "first_seen": "2026-06-29T12:55:17.786806+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4008813009": {
+      "first_seen": "2026-06-29T12:55:17.786831+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5195705008": {
+      "first_seen": "2026-06-29T12:55:17.786857+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/2344604": {
+      "first_seen": "2026-06-29T12:55:17.786882+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/dd6c0d36-e5ae-4ff5-9d5a-34b562a5e694": {
+      "first_seen": "2026-06-29T12:55:17.786907+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/ace82983-1564-47d0-a328-74c3bd9d03c8": {
+      "first_seen": "2026-06-29T12:55:17.786932+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.simplexaisafety.com/london-research-scientist": {
+      "first_seen": "2026-06-29T12:55:17.786957+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.shlab.org.cn/joinus/detail/7586567008909773098": {
+      "first_seen": "2026-06-29T12:55:17.786982+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lilasciences/jobs/4079014009": {
+      "first_seen": "2026-06-29T12:55:17.787006+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apply.workable.com/mila-2/j/B7AF1B04AF/": {
+      "first_seen": "2026-06-29T12:55:17.787031+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.outcapped.com/outcapped-careers/?ashby_jid=f01d2541-ac54-4614-99cd-137481667431": {
+      "first_seen": "2026-06-29T12:55:17.787060+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/research-assistant-exploring-the-economics-of-technological-progress-innovation-and-artificial-intelligence": {
+      "first_seen": "2026-06-29T12:55:17.787086+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.nus.edu.sg/job/Senior-Research-Fellow-%28Infectious-Disease-Modelling-&amp;-AI-for-Public-Health%29/32500-en_GB/": {
+      "first_seen": "2026-06-29T12:55:17.787119+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.anser.org/job/?id=5185898008": {
+      "first_seen": "2026-06-29T12:55:17.787155+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://utaustin.wd1.myworkdayjobs.com/en-US/UTstaff/job/CFA-Postdoctoral-Fellow---Center-for-Pandemic-Decision-Science_R_00042531": {
+      "first_seen": "2026-06-29T12:55:17.787182+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.meridiancambridge.org/community-ops-coordinator": {
+      "first_seen": "2026-06-29T12:55:17.787208+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/technical-associate-predoctoral-research-assistant": {
+      "first_seen": "2026-06-29T12:55:17.787234+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/postdoctoral-associate": {
+      "first_seen": "2026-06-29T12:55:17.787259+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://intern.usajobs.gov/Search/Results?hp=student&p=1&s=salary&sd=desc&wt=15328": {
+      "first_seen": "2026-06-29T12:55:17.787310+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.usajobs.gov/Search/Results?hp=graduates&wt=15326": {
+      "first_seen": "2026-06-29T12:55:17.787346+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.shlab.org.cn/joinus/detail/7599507253209090346?jobFunction=&jobType=&keyword=&location=&mode=social&subject=": {
+      "first_seen": "2026-06-29T12:55:17.787393+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1VksXTjn44bpX6FNEMqLCSzjtDecvP8Vf_1Mztxh1LU8/edit?usp=sharing": {
+      "first_seen": "2026-06-29T12:55:17.787433+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://collegeai.tsinghua.edu.cn/en/rengongzhinengxueyuanrencaizhaopinhaibao-yingwenban.pdf": {
+      "first_seen": "2026-06-29T12:55:17.787461+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.healthdata.org/index%2Ephp/about/careers/job-openings/researcher-temporary-integrated-analytics": {
+      "first_seen": "2026-06-29T12:55:17.787488+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://aria.pinpointhq.com/en/postings/1ade5ec1-be4f-4e3c-a666-ee72b9375424": {
+      "first_seen": "2026-06-29T12:55:17.787513+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lilasciences/jobs/4210472009": {
+      "first_seen": "2026-06-29T12:55:17.787539+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneacrefund.org/vacancies/finance-trainee": {
+      "first_seen": "2026-06-29T12:55:17.787564+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/hiddenlayer/jobs/5100067007": {
+      "first_seen": "2026-06-29T12:55:17.787586+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.povertyactionlab.org/careers/ai-policy-associate-j-pal-global-job-105524": {
+      "first_seen": "2026-06-29T12:55:17.787611+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Associate-AI-Security-Researcher_2024056-1": {
+      "first_seen": "2026-06-29T12:55:17.787636+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/AI-Security-Researcher_2024057-1": {
+      "first_seen": "2026-06-29T12:55:17.787661+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4982193008": {
+      "first_seen": "2026-06-29T12:55:17.787708+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4631822008": {
+      "first_seen": "2026-06-29T12:55:17.787737+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apply.workable.com/mila-2/j/B644CB0FCE/": {
+      "first_seen": "2026-06-29T12:55:17.787762+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5066997008": {
+      "first_seen": "2026-06-29T12:55:17.787787+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5066977008": {
+      "first_seen": "2026-06-29T12:55:17.787811+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ats.rippling.com/armilla-ai/jobs/31983626-c38c-4c93-a52c-82c1491f60f7": {
+      "first_seen": "2026-06-29T12:55:17.787835+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4610158008": {
+      "first_seen": "2026-06-29T12:55:17.787860+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4595463008": {
+      "first_seen": "2026-06-29T12:55:17.787884+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.nonproliferation.eu/hcoc/hcoc-youth-group-second-edition-call-for-applications-now-open/": {
+      "first_seen": "2026-06-29T12:55:17.787914+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/14En9ZhajBHIaM_iwn0m9vbTRIn0-Az-QrnOpjiRM7fc/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.787945+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/postdoctoral-associate---ai-performance-and-safety": {
+      "first_seen": "2026-06-29T12:55:17.787972+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/technical-lead-safety-research-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.787999+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://app.mokahr.com/social-recruitment/high-flyer/140576": {
+      "first_seen": "2026-06-29T12:55:17.788026+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Group-11-10-Co-Op-Cyber-Security-Summer-2026-1-MA-02420/1374211700/": {
+      "first_seen": "2026-06-29T12:55:17.788051+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://menlovc.com/anthology-fund/": {
+      "first_seen": "2026-06-29T12:55:17.788077+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1UxruiF1jo5s956wbyRZp_SNrE1y4SNE0MF3-MkM5sqQ/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.788109+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4778843008": {
+      "first_seen": "2026-06-29T12:55:17.788136+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5153564008": {
+      "first_seen": "2026-06-29T12:55:17.788160+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/product-manager-bio-safety-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.788184+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fpf.org/analyst-counsel-ai-governance/?message=pantheon-cleared-url-cache": {
+      "first_seen": "2026-06-29T12:55:17.788215+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cdt.org/careers/": {
+      "first_seen": "2026-06-29T12:55:17.788242+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.csis.org/opportunities/1753": {
+      "first_seen": "2026-06-29T12:55:17.788267+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.eahongkong.org/join-our-team": {
+      "first_seen": "2026-06-29T12:55:17.788292+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.eahongkong.org/job-listing-part-time-social-media": {
+      "first_seen": "2026-06-29T12:55:17.788315+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://grnh.se/6i76vvi28us": {
+      "first_seen": "2026-06-29T12:55:17.788337+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://igualdadanimal.org/empleo/european-campaigns-communications-manager/": {
+      "first_seen": "2026-06-29T12:55:17.788359+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4002932009": {
+      "first_seen": "2026-06-29T12:55:17.788384+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4002926009": {
+      "first_seen": "2026-06-29T12:55:17.788409+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4002929009": {
+      "first_seen": "2026-06-29T12:55:17.788433+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/goodfire/jobs/4746990008": {
+      "first_seen": "2026-06-29T12:55:17.788457+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5137183008": {
+      "first_seen": "2026-06-29T12:55:17.788483+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5066995008": {
+      "first_seen": "2026-06-29T12:55:17.788507+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.apple.com/en-gb/details/200650850-0836/staff-applied-research-and-ml-responsible-ai-and-safety?team=MLAI": {
+      "first_seen": "2026-06-29T12:55:17.788537+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://international-partnerships.ec.europa.eu/document/download/f6236005-a46a-4e25-9f2e-b2669dccb6bc_en": {
+      "first_seen": "2026-06-29T12:55:17.788564+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.thilo-hagendorff.info/wordpress/wp-content/uploads/2026/03/AI-Safety-PhD.pdf": {
+      "first_seen": "2026-06-29T12:55:17.788590+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.shlab.org.cn/joinus/detail/7562520187132643647": {
+      "first_seen": "2026-06-29T12:55:17.788621+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1NwXSnFK7MbnD9TYtZqkEk6iTFsi89JN8kXkjNXGK0rQ/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.788651+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1WPU50PPtDHy9fA4lwF-3W0YNYJaTRm3LwKcvYaOklVM/preview?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.788700+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.wisconsinproject.org/about-us/employment/": {
+      "first_seen": "2026-06-29T12:55:17.788736+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4989788008": {
+      "first_seen": "2026-06-29T12:55:17.788768+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/data-scientist-preparedness-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.788794+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://survivalandflourishing.com/full-stack-engineer": {
+      "first_seen": "2026-06-29T12:55:17.788817+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3736833": {
+      "first_seen": "2026-06-29T12:55:17.788842+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3698593": {
+      "first_seen": "2026-06-29T12:55:17.788866+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-automated-red-teaming-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.788890+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-frontier-biological-and-chemical-risks-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.788914+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/software-engineer/": {
+      "first_seen": "2026-06-29T12:55:17.788939+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-frontier-cybersecurity-risks-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.788985+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.apple.com/en-gb/details/200647859-0836/aiml-senior-ml-researcher-in-foundation-models-responsible-ai?team=MLAI": {
+      "first_seen": "2026-06-29T12:55:17.789039+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forecastingresearch.org/careers/data-engineer": {
+      "first_seen": "2026-06-29T12:55:17.789073+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.redwoodresearch.org/careers": {
+      "first_seen": "2026-06-29T12:55:17.789100+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/global-detection-and-response-lead-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.789127+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/valthos/58637d53-f949-49fa-b318-88a93635337b": {
+      "first_seen": "2026-06-29T12:55:17.789153+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/security-engineer-detection-and-response-emea-london-uk/": {
+      "first_seen": "2026-06-29T12:55:17.789178+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.asymmetricsecurity.com/careers-listing/founding-engineer": {
+      "first_seen": "2026-06-29T12:55:17.789203+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forms.gle/3sxtZiSLU4gQZryR7": {
+      "first_seen": "2026-06-29T12:55:17.789225+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/appFXEeK33hqSbnBD/pagmxpM5lUFzjjc8P/form": {
+      "first_seen": "2026-06-29T12:55:17.789249+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5120512008": {
+      "first_seen": "2026-06-29T12:55:17.789275+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://dawnsong.io/": {
+      "first_seen": "2026-06-29T12:55:17.789301+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.whitehouse.gov/ostp/internships/": {
+      "first_seen": "2026-06-29T12:55:17.789326+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://igualdadanimal.mx/empleos/oferta-de-empleo-asociado-de-campanas/": {
+      "first_seen": "2026-06-29T12:55:17.789351+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1r5YKOUi6gMUZoZvAEh0tHbbHM9RKYk6ONEkw_Tpizb0/preview?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.789389+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/posts/carmine-ventre-35388622_aisafety-aialignment-mechanismdesign-activity-7421947981307756544-e69Y/": {
+      "first_seen": "2026-06-29T12:55:17.789417+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.povertyactionlab.org/careers/ai-policy-lead-j-pal-global-job-105493": {
+      "first_seen": "2026-06-29T12:55:17.789444+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Group-05-59-CO-OP-%28RE%29-Cyber-System-Assessments-July-December-2026-MA-02420/1361577000/": {
+      "first_seen": "2026-06-29T12:55:17.789470+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Group-05-59-CO-OP-%28IoT%29-Cyber-System-Assessments-July-December-2026-MA-02420/1361576300/": {
+      "first_seen": "2026-06-29T12:55:17.789494+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.tienprocent.club/doe-mee": {
+      "first_seen": "2026-06-29T12:55:17.789520+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Irregular/69966779-e3e7-4ffa-a691-329b86dbf53d?embed=js": {
+      "first_seen": "2026-06-29T12:55:17.789561+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Irregular/7e8a2432-0ed7-4fd7-8bcd-d0d89db663b3?embed=js": {
+      "first_seen": "2026-06-29T12:55:17.789592+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Irregular/7a9dde60-14ab-4296-b355-63f2564263e0?embed=js": {
+      "first_seen": "2026-06-29T12:55:17.789630+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forum.effectivealtruism.org/posts/NvvHgGxojoTEq2HkA/zurich-ai-safety-is-looking-for-co-directors-eoi": {
+      "first_seen": "2026-06-29T12:55:17.789658+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.notion.so/Use-Your-Creativity-to-Make-a-Frontier-AI-Model-Safer-AI-Red-Teaming-298c6fc4dec280ee956dcb78897f323b": {
+      "first_seen": "2026-06-29T12:55:17.789701+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5076477008": {
+      "first_seen": "2026-06-29T12:55:17.789731+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://eahire.notion.site/eahire/Multiple-high-impact-PhD-student-positions-4f539332738a49cc8915aaa8731f9a3e": {
+      "first_seen": "2026-06-29T12:55:17.789757+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ats.rippling.com/gordian-biotechnology/jobs/e41b3008-73fb-41b6-b22d-bf94e927128d": {
+      "first_seen": "2026-06-29T12:55:17.789791+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.apple.com/en-gb/details/200640076-3577/ml-safety-engineer?team=SFTWR": {
+      "first_seen": "2026-06-29T12:55:17.789826+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forum.effectivealtruism.org/posts/mQoq3RXtwhgNwLBGN/ea-san-francisco-needs-a-new-lead-organizer": {
+      "first_seen": "2026-06-29T12:55:17.789851+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5063007008": {
+      "first_seen": "2026-06-29T12:55:17.789877+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4502508008": {
+      "first_seen": "2026-06-29T12:55:17.789902+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-trustworthy-ai-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.789926+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-pretraining-safety-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.789949+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-safety-oversight-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.789973+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.armilla.ai/careers": {
+      "first_seen": "2026-06-29T12:55:17.789998+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://static1.squarespace.com/static/68924fd1cb448a62bf39f107/t/69436142fb12c57bdafe518c/1766023490793/Claryx+-+Computational+Biologist+Job+Description+%28Dec-25%29_vF.pdf": {
+      "first_seen": "2026-06-29T12:55:17.790023+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://static1.squarespace.com/static/68924fd1cb448a62bf39f107/t/694360a7be6fc705faf20292/1766023335818/Claryx+-+Research+Associate+Job+Description+%28Dec-25%29_vF.pdf": {
+      "first_seen": "2026-06-29T12:55:17.790047+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/app53PsYpHxJW61l3/shr7NG7EmN5On6lQG": {
+      "first_seen": "2026-06-29T12:55:17.790078+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/graduate-software-engineer/": {
+      "first_seen": "2026-06-29T12:55:17.790100+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/posts/jessedunietz_ai-nerds-come-support-my-team-at-nist-on-activity-7240864161662930945-WN-M/": {
+      "first_seen": "2026-06-29T12:55:17.790129+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-robustness-and-safety-training-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.790154+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-alignment-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.790178+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.themidasproject.com/volunteer": {
+      "first_seen": "2026-06-29T12:55:17.790200+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/appHnaEzJEzXRdtJW/pagFxyhLEAJumpmlC/form": {
+      "first_seen": "2026-06-29T12:55:17.790224+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/xai/jobs/5008186007": {
+      "first_seen": "2026-06-29T12:55:17.790248+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cnaisi.cn/jrwm": {
+      "first_seen": "2026-06-29T12:55:17.790272+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5025624008": {
+      "first_seen": "2026-06-29T12:55:17.790297+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/16MwSYURaxkstolkXCZzHVBIz9WgPmTbEul7Y3thjoac/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.790329+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/haizelabs/jobs/4070377008": {
+      "first_seen": "2026-06-29T12:55:17.790356+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://elicit.com/careers?ashby_jid=e04136b7-57e5-44d5-9a7c-cced3e2cb0f8": {
+      "first_seen": "2026-06-29T12:55:17.790389+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://elicit.com/careers?ashby_jid=913a03d5-bd26-4c64-8346-21a029f344f7": {
+      "first_seen": "2026-06-29T12:55:17.790417+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://elicit.com/careers?ashby_jid=b5e218b8-8730-4254-b026-1fe2fe02c3eb": {
+      "first_seen": "2026-06-29T12:55:17.790444+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careersearch.stanford.edu/jobs/senior-research-scholar-william-j-perry-lecturer-29368": {
+      "first_seen": "2026-06-29T12:55:17.790470+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/haizelabs/jobs/4685944008": {
+      "first_seen": "2026-06-29T12:55:17.790496+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/2256692": {
+      "first_seen": "2026-06-29T12:55:17.790520+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://aigs.ca/volunteer/": {
+      "first_seen": "2026-06-29T12:55:17.790542+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/security-engineer-detection-and-response-sydney-australia/": {
+      "first_seen": "2026-06-29T12:55:17.790597+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/1cYNcejGHniGJ4Cvi_SCWuuGWK5C5f_zOnQENa1rLldQ/viewform?edit_requested=true": {
+      "first_seen": "2026-06-29T12:55:17.790624+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.aialign.net/recruit": {
+      "first_seen": "2026-06-29T12:55:17.790651+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://securebio.org/careers/2025-field-sampler": {
+      "first_seen": "2026-06-29T12:55:17.790691+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://alice.io/positions/position-EE_F52": {
+      "first_seen": "2026-06-29T12:55:17.790722+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fpf.org/us-policy-internships/": {
+      "first_seen": "2026-06-29T12:55:17.790747+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://hewlett.hrmdirect.com/employment/job-opening.php?nohd=&req=3566721&req_loc=1112590": {
+      "first_seen": "2026-06-29T12:55:17.790788+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://scottaaronson.blog/?p=8790": {
+      "first_seen": "2026-06-29T12:55:17.790821+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/haizelabs/jobs/4627851008": {
+      "first_seen": "2026-06-29T12:55:17.790849+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/research-assistant---ai-in-science": {
+      "first_seen": "2026-06-29T12:55:17.790881+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apply.workable.com/ellison-institute-of-technology/j/D14CD808EC/": {
+      "first_seen": "2026-06-29T12:55:17.790906+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3690274": {
+      "first_seen": "2026-06-29T12:55:17.790931+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3690286": {
+      "first_seen": "2026-06-29T12:55:17.790956+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3690312": {
+      "first_seen": "2026-06-29T12:55:17.790980+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/3690340": {
+      "first_seen": "2026-06-29T12:55:17.791004+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.pauseai-us.org/Apply": {
+      "first_seen": "2026-06-29T12:55:17.791026+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.csis.org/opportunities/1703": {
+      "first_seen": "2026-06-29T12:55:17.791050+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cmu.wd5.myworkdayjobs.com/en-US/SEI/job/Pittsburgh-PA/Senior-AI-Security-Researcher_2022900-1": {
+      "first_seen": "2026-06-29T12:55:17.791075+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Applied-AIML-Researcher-MA-02420/1288187600/": {
+      "first_seen": "2026-06-29T12:55:17.791100+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4532887008": {
+      "first_seen": "2026-06-29T12:55:17.791125+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/givewell/jobs/4944026008": {
+      "first_seen": "2026-06-29T12:55:17.791146+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://elicit.com/careers?ashby_jid=d27d51d7-b318-4cb0-9b88-c37de18905f3": {
+      "first_seen": "2026-06-29T12:55:17.791185+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.nus.edu.sg/job/Research-Associate-%28Law-and-Governance%2C-Biosecurity-and-Global-Health%29/30430-en_GB/": {
+      "first_seen": "2026-06-29T12:55:17.791211+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/security-engineer-agent-security-san-francisco/": {
+      "first_seen": "2026-06-29T12:55:17.791237+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://grnh.se/0b4ueh0k8us": {
+      "first_seen": "2026-06-29T12:55:17.791262+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/hiddenlayer/jobs/4915355007": {
+      "first_seen": "2026-06-29T12:55:17.791287+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Research-Scientist-System-Security-Researcher-MA-02420/1328089000/": {
+      "first_seen": "2026-06-29T12:55:17.791313+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/e/1FAIpQLSefLWdsE_okD2GIWYNaMHtoibGRewwWa5CmVri-SVcXZax3Bg/viewform": {
+      "first_seen": "2026-06-29T12:55:17.791339+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fpf.org/asia-pacific-office-internship-fpf-apac/": {
+      "first_seen": "2026-06-29T12:55:17.791364+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/appEoCwOwtT7OnfoH/shrGsYllkZw4PsmAn/tbl6RgyRf2Dn4OsVl/viwnrWzFzzgiEtAFg?blocks=hide": {
+      "first_seen": "2026-06-29T12:55:17.791395+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/e/1FAIpQLSfwQ7ZkUljz4HPDlLUH2r4KjeRrh8bRTWge3MZgqVEklGd31g/viewform": {
+      "first_seen": "2026-06-29T12:55:17.791419+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.adobe.com/us/en/job/R158493/2026-AI-ML-Intern-Machine-Learning-Engineer": {
+      "first_seen": "2026-06-29T12:55:17.791445+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.nus.edu.sg/job/Research-AssociateResearch-Fellow-%28part-time%29/30129-en_GB/": {
+      "first_seen": "2026-06-29T12:55:17.791470+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://app.mokahr.com/social-recruitment/baai/42173": {
+      "first_seen": "2026-06-29T12:55:17.791496+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.cdc.gov/fellowships/index.html": {
+      "first_seen": "2026-06-29T12:55:17.791521+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.nus.edu.sg/job/Research-Fellow-%28Infectious-Disease-Modelling%29/30141-en_GB/": {
+      "first_seen": "2026-06-29T12:55:17.791546+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ec.europa.eu/eusurvey/runner/AIOffice-Interest-General": {
+      "first_seen": "2026-06-29T12:55:17.791571+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.eu.greenhouse.io/gensyn/jobs/4579609101": {
+      "first_seen": "2026-06-29T12:55:17.791594+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.ipa.go.jp/recruit/shokutaku/shokutaku-di04.html": {
+      "first_seen": "2026-06-29T12:55:17.791618+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.zintellect.com/Opportunity/Details/DOE-STP-OP-2025-0001": {
+      "first_seen": "2026-06-29T12:55:17.791643+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1Nqz1vAJQzr4XOpB-mHg2YGzkIItX-RMj2b88pLROnjA/edit?tab=t.0": {
+      "first_seen": "2026-06-29T12:55:17.791671+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://infothreats.cse.uconn.edu/currently-hiring/": {
+      "first_seen": "2026-06-29T12:55:17.791718+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/forms/d/e/1FAIpQLSfERP8qmSWHeDLFQ_NAyyaxcznDrzjJZDNbosPgJDJa0d0MKA/viewform": {
+      "first_seen": "2026-06-29T12:55:17.791748+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://animaloutlook.org/intern/": {
+      "first_seen": "2026-06-29T12:55:17.791778+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.armscontrol.org/internships": {
+      "first_seen": "2026-06-29T12:55:17.791803+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://1fortheworld.org/volunteer-with-us-1": {
+      "first_seen": "2026-06-29T12:55:17.791828+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/xai/jobs/4800712007": {
+      "first_seen": "2026-06-29T12:55:17.791852+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://sph.nus.edu.sg/about/careers/": {
+      "first_seen": "2026-06-29T12:55:17.791877+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.uschina.org/business-advisory-services-and-event-planning-intern-beijing/": {
+      "first_seen": "2026-06-29T12:55:17.791901+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://airtable.com/app3AlIYjrAVYhvIe/shr1dGfy6WQfJ5mei/tblD3ExDW2P8mtVlj": {
+      "first_seen": "2026-06-29T12:55:17.791926+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.ncuscr.org/internships/": {
+      "first_seen": "2026-06-29T12:55:17.791948+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.advocates-for-animals.com/_files/ugd/093987_3894d0f7df2c4cbf898126472bfb1e3a.pdf": {
+      "first_seen": "2026-06-29T12:55:17.791992+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.nus.edu.sg/job/Research-Fellow-%28NUS-Advance-ID%29/29117-en_GB/": {
+      "first_seen": "2026-06-29T12:55:17.792017+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openchip.factorialhr.com/job_posting/junior-security-software-engineer-243261": {
+      "first_seen": "2026-06-29T12:55:17.792046+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/tdv/4aa51878-d68a-4b09-a007-9c311ccf3271?trk=feed_main-feed-card_feed-article-content": {
+      "first_seen": "2026-06-29T12:55:17.792078+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://forecastingresearch.org/careers/student-research-assistant": {
+      "first_seen": "2026-06-29T12:55:17.792101+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.cnas.org/careers/internships": {
+      "first_seen": "2026-06-29T12:55:17.792126+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://bedford.io/misc/join/": {
+      "first_seen": "2026-06-29T12:55:17.792150+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/windfall/f77efc24-0d57-4efa-be19-77d472e967d8": {
+      "first_seen": "2026-06-29T12:55:42.157076+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.505
+    },
+    "https://impact-ops.org/jobs/senior-recruitment-specialist-ai-safety-focus/": {
+      "first_seen": "2026-06-29T12:56:00.117254+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.695
+    },
+    "https://foresight.org/request-for-proposals/": {
+      "first_seen": "2026-06-29T12:56:05.986242+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.455
+    },
+    "https://survivalandflourishing.fund/2026/application": {
+      "first_seen": "2026-06-29T12:56:18.361475+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.46
+    },
+    "https://www.healthdata.org/index%2Ephp/about/careers/job-openings/research-scientist-temporary-rgud": {
+      "first_seen": "2026-06-29T12:56:25.139270+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7025
+    },
+    "https://tally.so/r/b561K2": {
+      "first_seen": "2026-06-29T12:56:36.126583+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.67
+    },
+    "https://protectdemocracy.recruitee.com/o/tech-counsel-ai-for-democracy-action-lab": {
+      "first_seen": "2026-06-29T12:56:45.763658+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4875
+    },
+    "https://protectdemocracy.recruitee.com/o/tech-policy-strategist-ai-for-democracy-action-lab": {
+      "first_seen": "2026-06-29T12:56:51.137379+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.365
+    },
+    "https://www.prism-global.com/trustee-vacancies": {
+      "first_seen": "2026-06-29T12:57:08.423970+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.595
+    },
+    "https://airtable.com/app53PsYpHxJW61l3/shr6eKNhPjxj4UH4E": {
+      "first_seen": "2026-06-29T12:57:13.169284+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.57
+    },
+    "https://airtable.com/app53PsYpHxJW61l3/shrOB1Un3aHb066Wm": {
+      "first_seen": "2026-06-29T12:57:51.543187+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6275
+    },
+    "https://www.arthropoda.org/work-with-us": {
+      "first_seen": "2026-06-29T12:57:57.447219+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5475
+    },
+    "https://forum.effectivealtruism.org/posts/GxvzNniYDtTKpSjdi/senior-researcher-mit-ai-risk-initiative": {
+      "first_seen": "2026-06-29T12:58:03.693058+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.625
+    },
+    "https://openai.com/careers/principal-software-engineer-infrastructure-security-remote-us/": {
+      "first_seen": "2026-06-29T12:58:09.412547+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5825
+    },
+    "https://atlascomputing.org/jobs/field-strategist.pdf": {
+      "first_seen": "2026-06-29T12:58:21.000465+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4425
+    },
+    "https://forms.gle/q7iwQB2VvurjMiT4A": {
+      "first_seen": "2026-06-29T12:58:27.122427+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.57
+    },
+    "https://www.lesswrong.com/posts/LDbGob3XJ3LDBFmAe/co-found-lens-academy-with-me-we-have-early-users-and": {
+      "first_seen": "2026-06-29T12:58:32.992418+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.56
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5183044008": {
+      "first_seen": "2026-06-29T12:58:38.874190+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.35
+    },
+    "https://alice.io/positions/position-DD_067": {
+      "first_seen": "2026-06-29T12:58:44.133669+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.56
+    },
+    "https://openai.com/careers/security-engineer-insider-threat-detection-and-response-san-francisco/": {
+      "first_seen": "2026-06-29T12:58:49.392621+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4875
+    },
+    "https://elicit.com/careers?ashby_jid=2c18fbc6-2e1a-4ba1-a1b2-73db54bc95ca": {
+      "first_seen": "2026-06-29T12:58:54.844632+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5925
+    },
+    "https://www.mercatus.org/students/fellowships": {
+      "first_seen": "2026-06-29T12:59:15.517263+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.3925
+    },
+    "https://www.openphilanthropy.org/funding-for-work-that-builds-capacity-to-address-risks-from-transformative-ai/": {
+      "first_seen": "2026-06-29T12:59:27.186089+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.555
+    },
+    "https://www.averi.org/careers": {
+      "first_seen": "2026-06-29T12:59:45.124973+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6225
+    },
+    "https://pulitzercenter.org/grants-fellowships/opportunities-journalists/ai-reporting-grants": {
+      "first_seen": "2026-06-29T12:59:50.277068+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4175
+    },
+    "https://amododesign.com/career/products-spinouts/": {
+      "first_seen": "2026-06-29T12:59:56.076974+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5925
+    },
+    "https://openai.com/careers/software-engineer-infrastructure-security-remote-us/": {
+      "first_seen": "2026-06-29T13:00:28.442238+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.46
+    },
+    "https://openai.com/careers/security-engineer-infrastructure-security-remote-us/": {
+      "first_seen": "2026-06-29T13:00:34.134827+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.45
+    },
+    "https://elicit.com/careers?ashby_jid=aa99e2e9-5b15-4cd3-ac9d-9c9177ff61c8": {
+      "first_seen": "2026-06-29T13:00:45.893130+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.515
+    },
+    "https://www.openphilanthropy.org/funding-for-programs-and-events-on-global-catastrophic-risk-effective-altruism-and-other-topics/": {
+      "first_seen": "2026-06-29T13:01:06.185804+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.76
+    },
+    "https://malengo.org/chief-investment-officer/": {
+      "first_seen": "2026-06-29T13:01:28.960497+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7825
     }
   }
 }
