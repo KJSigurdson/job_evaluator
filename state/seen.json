@@ -6665,6 +6665,36 @@
       "first_seen": "2026-06-29T13:19:30.675360+00:00",
       "verdict": "inserted",
       "fit_score": 0.7675
+    },
+    "https://airtable.com/app53PsYpHxJW61l3/shr303f0nPKns4n45": {
+      "first_seen": "2026-06-29T13:23:21.616542+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.4
+    },
+    "https://gfi.org/resource/lead-scitech-specialist": {
+      "first_seen": "2026-06-29T13:24:33.299095+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5275
+    },
+    "https://weanimals.org/work-with-us/join-our-team/director-of-development": {
+      "first_seen": "2026-06-29T13:24:52.467911+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.575
+    },
+    "https://iliad.ac/careers.html": {
+      "first_seen": "2026-06-29T13:26:40.669802+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.685
+    },
+    "https://sida.se/jobba-med-bistand/jobba-pa-sida/lediga-tjanster/5637-handlaggare-till-sidas-enhet-for-klimat-och-miljo-ref-127-26": {
+      "first_seen": "2026-06-29T13:27:55.543992+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.765
+    },
+    "https://sida.se/jobba-med-bistand/jobba-pa-sida/lediga-tjanster/5651-avdelningscontroller-till-europa-avdelningen-ref-141-26": {
+      "first_seen": "2026-06-29T13:28:16.460419+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7825
     }
   }
 }
