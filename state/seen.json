@@ -6695,6 +6695,26 @@
       "first_seen": "2026-06-29T13:28:16.460419+00:00",
       "verdict": "inserted",
       "fit_score": 0.7825
+    },
+    "https://careers.ll.mit.edu/job/Lexington-Group-05-59-CO-OP-Cyber-System-Assessments-Fall-2026-MA-02420/1361576300/": {
+      "first_seen": "2026-06-30T09:26:30.643085+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://projectcoa.org/work-with-us/": {
+      "first_seen": "2026-06-30T09:26:30.643143+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://staff-emory.icims.com/jobs/168883/senior-epidemiologist-%28part-time%29---the-task-force-for-global-health/job?in_iframe=1": {
+      "first_seen": "2026-06-30T09:28:02.969866+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7075
+    },
+    "https://careers.paebbl.com/jobs/7958445-general-counsel": {
+      "first_seen": "2026-06-30T09:28:08.685871+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.535
     }
   }
 }
