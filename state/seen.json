@@ -7705,6 +7705,721 @@
       "first_seen": "2026-07-03T08:57:28.293766+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.54
+    },
+    "https://horizonpublicservice.org/ai-rapid-response-fellowship/": {
+      "first_seen": "2026-07-04T08:31:09.915042+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/18LQxClucVrgY2jZx1sLABxODxdZNq1zr48cQMtBA4x8/edit?tab=t.0": {
+      "first_seen": "2026-07-04T08:31:09.915143+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apartresearch.notion.site/Co-Lead-Author-Open-Problems-in-Technical-AI-Governance-2026-Update-391fcfd1de9d805baec5e684ce5e3550?pvs=74": {
+      "first_seen": "2026-07-04T08:31:09.915263+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.aisafety.sg/careers/research-engineer-neo-research-contract": {
+      "first_seen": "2026-07-04T08:31:09.915356+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cepi.my.salesforce-sites.com/careers/xcdrecruit__PositionDetails?id=a43P300000FsDCYIA3": {
+      "first_seen": "2026-07-04T08:31:09.915403+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://aiwi.org/primer/": {
+      "first_seen": "2026-07-04T08:31:09.915437+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5240422008": {
+      "first_seen": "2026-07-04T08:31:09.915473+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?ccId=19000101_000001&cid=9ad45f59-5c0c-4073-aa8a-607eccdecc5c&jobId=594995&lang=en_US": {
+      "first_seen": "2026-07-04T08:31:09.915523+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.crfb.org/lorenzeninternship": {
+      "first_seen": "2026-07-04T08:31:09.915553+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://calcareers.ca.gov/CalHrPublic/Jobs/JobPosting.aspx?JobControlId=523056": {
+      "first_seen": "2026-07-04T08:31:09.915595+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.ashbyhq.com/Lambda/0663f04c-097d-414f-b0a0-414a7cf153d6": {
+      "first_seen": "2026-07-04T08:31:09.915626+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.simula.no/careers/job-openings/postdoctoral-research-fellowship-in-validation-of-ai-based-decision-making": {
+      "first_seen": "2026-07-04T08:31:09.915660+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.simula.no/careers/job-openings/phd-research-fellowship-in-safety-and-security-evaluation-of-deployed-ai-systems": {
+      "first_seen": "2026-07-04T08:31:09.915687+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.socialchangelab.org/careers/research-outreach-officer.html": {
+      "first_seen": "2026-07-04T08:31:09.915711+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.52
+    },
+    "https://www.usajobs.gov/job/875057800": {
+      "first_seen": "2026-07-04T08:31:09.915738+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.usajobs.gov/job/874653700": {
+      "first_seen": "2026-07-04T08:31:09.915797+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.ultipro.com/INT1086IAVI/JobBoard/79d2b402-806e-448d-9abf-44b876cd43ee/OpportunityDetail?opportunityId=833eb5f6-3b73-4a51-b001-df2dc0471b98": {
+      "first_seen": "2026-07-04T08:31:09.915830+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1hWAgqCcX85-7VPhaRu_faXFjQpE-WUV33Wqw2v9W2U8/edit?tab=t.0": {
+      "first_seen": "2026-07-04T08:31:09.915887+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5575
+    },
+    "https://perimeter.bio/": {
+      "first_seen": "2026-07-04T08:31:09.915910+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneyoungworld.com/scholarship/astrazeneca-young-health-programme-impact-fellowship": {
+      "first_seen": "2026-07-04T08:31:09.915938+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://dzivniekubriviba.lv/vakances/meklejam-brivpratigos-socialo-tiklu-satura-autorus": {
+      "first_seen": "2026-07-04T08:31:09.915959+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.odi.org/en/postings/9178d1e8-2697-405b-86f4-144f683a8f26": {
+      "first_seen": "2026-07-04T08:31:09.915983+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://tbinstitute.wd3.myworkdayjobs.com/en-US/TBI/job/Malawi/Team-Leader---Energy-Access-Programme_JR002138": {
+      "first_seen": "2026-07-04T08:31:09.916005+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://surplus.dev/": {
+      "first_seen": "2026-07-04T08:31:09.916030+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://taisi.ca/summer-intensive": {
+      "first_seen": "2026-07-04T08:31:09.916054+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fortifyhealth.pinpointhq.com/en/postings/876f2c01-4cbe-4f00-99e2-9290dd0371af": {
+      "first_seen": "2026-07-04T08:31:09.916076+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.635
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/4951844008": {
+      "first_seen": "2026-07-04T08:31:09.916105+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://poverty-action.org/shared-services-manager": {
+      "first_seen": "2026-07-04T08:31:09.916129+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.careers.gov.sg/jobs/hrp/17780923/005056a3-53e2-1fd1-9db1-c268a00ab401": {
+      "first_seen": "2026-07-04T08:31:09.916151+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://climeworks.com/jobs/senior-strategic-partnership-manager-100": {
+      "first_seen": "2026-07-04T08:31:09.916172+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/lawzero/jobs/4305208009": {
+      "first_seen": "2026-07-04T08:31:09.916199+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://inbreakthrough.org/job/senior-manager-programme-mis-2": {
+      "first_seen": "2026-07-04T08:31:09.916220+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://tbinstitute.wd3.myworkdayjobs.com/en-US/TBI/job/Nairobi/Senior-Manager---Health--Africa_JR002135": {
+      "first_seen": "2026-07-04T08:31:09.916243+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://wellcome.wd3.myworkdayjobs.com/en-GB/Wellcome/job/London/Senior-Manager--Funding-Management---Directed-Activities_R-003414-2": {
+      "first_seen": "2026-07-04T08:31:09.916264+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://intelehealth.zohorecruit.com/jobs/Careers/783954000008379044/Senior-Android-Developer": {
+      "first_seen": "2026-07-04T08:31:09.916312+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://nwo.nl/en/calls/rubicon-2026-2": {
+      "first_seen": "2026-07-04T08:31:09.916343+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs-jhpiego.icims.com/jobs/7923/routine-immunization-%28ri%29-master-trainers/job?in_iframe=1": {
+      "first_seen": "2026-07-04T08:31:09.916382+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/researcher-alignment-cot-monitorability-san-francisco": {
+      "first_seen": "2026-07-04T08:31:09.916408+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://sequent.org/careers/research-scientist": {
+      "first_seen": "2026-07-04T08:31:09.916433+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://hiig.de/en/open-positions": {
+      "first_seen": "2026-07-04T08:31:09.916458+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://orfonline.org/work-with-us/research-assistant-technology-vertical": {
+      "first_seen": "2026-07-04T08:31:09.916481+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cgdev.org/blog/momentum-tackling-global-lead-poisoning-continues-grow-theres-still-much-we-dont-know-so-were": {
+      "first_seen": "2026-07-04T08:31:09.916506+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042158300": {
+      "first_seen": "2026-07-04T08:31:09.916571+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://wd3.myworkdaysite.com/en-GB/recruiting/wfp/job_openings/job/Dar-es-Salaam-Tanzania-The-United-Rep/Programme-Policy-Officer--Micronutrients----Project-Coordinator_JR124596": {
+      "first_seen": "2026-07-04T08:31:09.916596+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042185515": {
+      "first_seen": "2026-07-04T08:31:09.916619+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://app.recy.no/careers/varc/jobs/c37f830d-e4d8-4e9d-ad95-1525e0a072fb": {
+      "first_seen": "2026-07-04T08:31:09.916641+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://academicpositions.harvard.edu/postings/16467": {
+      "first_seen": "2026-07-04T08:31:09.916670+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042125358": {
+      "first_seen": "2026-07-04T08:31:09.916692+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1JueX5YfErmMumMVR0IARvyg5FAEVKBoyaL3Uem1vdGc/edit": {
+      "first_seen": "2026-07-04T08:31:09.916713+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.39
+    },
+    "https://docs.google.com/document/d/1OSE-5VJG4CncqitS_Aqfz67AkqkuEDVQUqGiPBEMfNY/edit": {
+      "first_seen": "2026-07-04T08:31:09.916734+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.3825
+    },
+    "https://docs.google.com/document/d/18zlblGEdl7-1zEtwzzG8p91Me5SoAPoTM6ObqDz0fzM/edit": {
+      "first_seen": "2026-07-04T08:31:09.916754+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.58
+    },
+    "https://tbinstitute.wd3.myworkdayjobs.com/en-US/TBI/job/Malawi/Policy---Delivery-Expert---Energy-Access-Programme_JR002139": {
+      "first_seen": "2026-07-04T08:31:09.916777+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.helmholtz-muenchen.de/jobposting/5eddfae278b4b7f433a34402836194a0789c40130": {
+      "first_seen": "2026-07-04T08:31:09.916800+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/charmindustrial/ecbf7ccb-74ea-4c4e-a7e0-af09dbc35251": {
+      "first_seen": "2026-07-04T08:31:09.916822+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1_DGTYzGYVhYsOXILeN7eofJXRM9NqLklKzUPykSBPY4/edit": {
+      "first_seen": "2026-07-04T08:31:09.916842+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.68
+    },
+    "https://crewcarbon.com/jobs/office-manager-executive-assistant": {
+      "first_seen": "2026-07-04T08:31:09.916864+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://tbinstitute.wd3.myworkdayjobs.com/en-US/TBI/job/Malawi/Monitoring--Evaluation---Learning-Expert---Energy-Access-Programme_JR002141": {
+      "first_seen": "2026-07-04T08:31:09.916886+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://patronus.ai/job-detail?gh_jid=4265882009": {
+      "first_seen": "2026-07-04T08:31:09.916917+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://patronus.ai/job-detail?gh_jid=4241103009": {
+      "first_seen": "2026-07-04T08:31:09.916946+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://patronus.ai/job-detail?gh_jid=4234483009": {
+      "first_seen": "2026-07-04T08:31:09.916975+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://research.pasteur.fr/en/job/identifying-disease-associated-behavioral-signatures-in-drosophila-larval-models-of-neurological-disorders": {
+      "first_seen": "2026-07-04T08:31:09.916999+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.smartrecruiters.com/OECD/744000134983729-junior-policy-analyst": {
+      "first_seen": "2026-07-04T08:31:09.917022+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.smartrecruiters.com/OECD/744000135053004-junior-energy-analyst-electricity-systems-and-markets-temporary": {
+      "first_seen": "2026-07-04T08:31:09.917044+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://div.fund/careers/detail?id=e23b42b2-8198-4fa3-b5ef-df58872ed60f": {
+      "first_seen": "2026-07-04T08:31:09.917077+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7595
+    },
+    "https://unjobs.org/vacancies/1783042154335": {
+      "first_seen": "2026-07-04T08:31:09.917101+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cdn.ceps.eu/2026/07/Job-Advert-Intern_ERCC_Energy_July2026.pdf": {
+      "first_seen": "2026-07-04T08:31:09.917124+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042241188": {
+      "first_seen": "2026-07-04T08:31:09.917145+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theirc.wd1.myworkdayjobs.com/en-US/External_Careers/job/London-UK/Immunization-Specialist_JR00003994": {
+      "first_seen": "2026-07-04T08:31:09.917167+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1782836009397": {
+      "first_seen": "2026-07-04T08:31:09.917189+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://tbinstitute.wd3.myworkdayjobs.com/en-US/TBI/job/Malawi/Financing---Fundraising-Expert--Energy-Access-Programme_JR002140-1": {
+      "first_seen": "2026-07-04T08:31:09.917277+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.odi.org/register-your-interest/new": {
+      "first_seen": "2026-07-04T08:31:09.917301+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://virtual-routes.org/vacancies/executive-support-and-research-officer-london-hybrid-80-100": {
+      "first_seen": "2026-07-04T08:31:09.917354+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/charmindustrial/9ed340e5-00c6-418b-b641-1fea0aa0a425": {
+      "first_seen": "2026-07-04T08:31:09.917381+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://images.transparencycdn.org/images/End-of-Project-Evaluation-of-%E2%80%98%E2%80%99Inclusive-Service-Delivery-in-Africa-ISDA%E2%80%99%E2%80%99-project-3rd-of-July.pdf": {
+      "first_seen": "2026-07-04T08:31:09.917405+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?cid=0c68d588-8c9c-408d-9476-64d2fbc7640d": {
+      "first_seen": "2026-07-04T08:31:09.917440+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042231748": {
+      "first_seen": "2026-07-04T08:31:09.917465+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/educate/jobs/8037741": {
+      "first_seen": "2026-07-04T08:31:09.917489+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.smartrecruiters.com/OECD/744000134780814-deputy-head-of-division-and-head-of-media-and-social-media-unit": {
+      "first_seen": "2026-07-04T08:31:09.917526+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://gatesfoundation.wd1.myworkdayjobs.com/en-US/Gates/job/New-Delhi-India/Deputy-Director---Strategy--Planning---Management-and-Measurement--Learning---Evaluation_B021652-1": {
+      "first_seen": "2026-07-04T08:31:09.917549+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://hr.nih.gov/careers/open-positions/job-bdb72d3d-5f2d-4d88-8625-d7cdb0f39f01": {
+      "first_seen": "2026-07-04T08:31:09.917572+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://poverty-action.org/data-scientist-ii": {
+      "first_seen": "2026-07-04T08:31:09.917591+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://path.wd1.myworkdayjobs.com/en-US/External/job/United-Kingdom-London-Project-Office/Consultant--AI-Engineer_JR2672": {
+      "first_seen": "2026-07-04T08:31:09.917620+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042199302": {
+      "first_seen": "2026-07-04T08:31:09.917642+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.un.org/jobSearchDescription/279623": {
+      "first_seen": "2026-07-04T08:31:09.917664+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs-jhpiego.icims.com/jobs/7922/clinical-coordinator/job?in_iframe=1": {
+      "first_seen": "2026-07-04T08:31:09.917696+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://edf.org/jobs/chief-staff": {
+      "first_seen": "2026-07-04T08:31:09.917720+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneacrefund.org/vacancies/tupande-automation-engineering-lead": {
+      "first_seen": "2026-07-04T08:31:09.917743+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1782734093215": {
+      "first_seen": "2026-07-04T08:31:09.917767+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.atlanticcouncil.org/job-opportunity/associate-director-geotech-center/": {
+      "first_seen": "2026-07-04T08:31:09.917790+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://asiasociety.org/policy-institute/assistant-director-operations-and-strategy-center-china-analysis": {
+      "first_seen": "2026-07-04T08:31:09.917812+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042152925": {
+      "first_seen": "2026-07-04T08:31:09.917833+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783042156990": {
+      "first_seen": "2026-07-04T08:31:09.917853+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://embl.wd103.myworkdayjobs.com/en-US/EMBL/job/ARISE2-Postdoctoral-Fellowship---2026-Call-for-Applications_JR4031": {
+      "first_seen": "2026-07-04T08:31:09.917879+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://edf.org/jobs/analyst-mission-finance": {
+      "first_seen": "2026-07-04T08:31:09.917899+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://sentient-futures.notion.site/fellowships": {
+      "first_seen": "2026-07-04T08:31:09.917919+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5575
+    },
+    "https://unjobs.org/vacancies/1783042230387": {
+      "first_seen": "2026-07-04T08:31:09.917952+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://seva.org/site/SPageServer/SPageServer?pagename=getinvolved%2Fvolunteer": {
+      "first_seen": "2026-07-04T08:31:09.917999+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.rethinkpriorities.org/en/postings/29fccee6-6375-4ae7-ae87-0fd8c782b680": {
+      "first_seen": "2026-07-04T08:31:09.918025+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://livinggoods.applytojob.com/apply/OH8bWdgVQh/Senior-Manager-Global-Monitoring-Evaluation-Research-And-Learning": {
+      "first_seen": "2026-07-04T08:31:09.918050+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://stimson.applicantpro.com/jobs/4135232": {
+      "first_seen": "2026-07-04T08:31:09.918072+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs-jhpiego.icims.com/jobs/7914/senior-clinical-advisor/job?in_iframe=1": {
+      "first_seen": "2026-07-04T08:31:09.918103+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://securityandtechnology.org/senior-associate-cyber": {
+      "first_seen": "2026-07-04T08:31:09.918129+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://cstep.in/job/senior-analyst-5": {
+      "first_seen": "2026-07-04T08:31:09.918152+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://longtermrisk.org/2026-research-manager": {
+      "first_seen": "2026-07-04T08:31:09.918178+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruit.icipe.org/description_of_assignment/displayRecord?id=615": {
+      "first_seen": "2026-07-04T08:31:09.918210+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://palisade-research.notion.site/hiring-us": {
+      "first_seen": "2026-07-04T08:31:09.918236+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://wd3.myworkdaysite.com/en-GB/recruiting/wfp/job_openings/job/Port-Sudan-Sudan-The-Republic-Of-The/Programme-Associate--School-Feeding--GS6_JR124540": {
+      "first_seen": "2026-07-04T08:31:09.918263+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://path.wd1.myworkdayjobs.com/en-US/External/job/India-New-Delhi-Country-Program-Office/Program-Officer---Urban-Health--Patna_JR2671": {
+      "first_seen": "2026-07-04T08:31:09.918307+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://path.wd1.myworkdayjobs.com/en-US/External/job/India-New-Delhi-Country-Program-Office/Program-Officer---Urban-Health--Nagpur_JR2669": {
+      "first_seen": "2026-07-04T08:31:09.918333+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://path.wd1.myworkdayjobs.com/en-US/External/job/India-New-Delhi-Country-Program-Office/Program-Coordinator--Nagpur_JR2670": {
+      "first_seen": "2026-07-04T08:31:09.918356+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://path.wd1.myworkdayjobs.com/en-US/External/job/India-New-Delhi-Country-Program-Office/Program-Coordinator--Patna--Bihar_JR2668": {
+      "first_seen": "2026-07-04T08:31:09.918378+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://matsprogram.org/careers/office-manager": {
+      "first_seen": "2026-07-04T08:31:09.918439+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theirc.wd1.myworkdayjobs.com/en-US/External_Careers/job/Goma-Democratic-Republic-of-the-Congo/MEAL-Officer--IPC---WASH_JR00004015": {
+      "first_seen": "2026-07-04T08:31:09.918483+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.au.int/job/Junior-Program-Officer-%28AfCFTA%29/3020-en_US": {
+      "first_seen": "2026-07-04T08:31:09.918504+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://seva.org/site/SPageServer?pagename=about%2Fjobs.html": {
+      "first_seen": "2026-07-04T08:31:09.918548+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://learned-swordtail-400.notion.site/1bc152db20af8086a678c750c5106b2b": {
+      "first_seen": "2026-07-04T08:31:09.918579+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.enabel.be/job/Kinshasa-Expert_e-Leadership-%26-Strat%C3%A9gie-Port-%26-Transport/1410220033": {
+      "first_seen": "2026-07-04T08:31:09.918605+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://matsprogram.org/careers/executive-business-partner-london": {
+      "first_seen": "2026-07-04T08:31:09.918627+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://globalenergymonitor.bamboohr.com/careers/116": {
+      "first_seen": "2026-07-04T08:31:09.918647+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://carnegieendowment.applicantpro.com/jobs/4134922": {
+      "first_seen": "2026-07-04T08:31:09.918690+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://apply.careers.microsoft.com/careers/job/1970393556885678": {
+      "first_seen": "2026-07-04T08:31:09.918735+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.plattnerfoundation.org/HPI/job/Potsdam-Wissenschaftlichen-Mitarbeiter-%28mwd%29-zum-Thema-Desinformationskampagnen-14482/1344228755": {
+      "first_seen": "2026-07-04T08:31:09.918764+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1xGF4HB_afPgcd2Koo83hIbCJJSQOPVTT/view": {
+      "first_seen": "2026-07-04T08:31:43.223634+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.712
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?ccId=19000101_000001&cid=9b16364c-5e0e-4e66-be82-8f108b1eb279&jobId=552902": {
+      "first_seen": "2026-07-04T08:32:28.118521+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.555
+    },
+    "https://www.far.ai/careers?ashby_jid=fb89d27b-3057-46df-bb0b-7d31e142ebb2": {
+      "first_seen": "2026-07-04T08:32:36.864529+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6275
+    },
+    "https://docs.google.com/document/d/10zAp2bXTkZgiPreIm4crp38TFco4KleFN14Kw5BprAs/edit?tab=t.0": {
+      "first_seen": "2026-07-04T08:32:41.738858+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.455
+    },
+    "https://openai.com/form/rosalind-biodefense-program/": {
+      "first_seen": "2026-07-04T08:33:05.608789+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7425
+    },
+    "https://m2m.breezy.hr/p/1af969e6df1d01-solution-architect": {
+      "first_seen": "2026-07-04T08:33:58.344580+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7275
+    },
+    "https://www.jobbnorge.no/ledige-stillinger/stilling/305049/fast-stilling-som-seniorraadgiver-utredningsleder-i-seksjon-for-internasjonalt-samarbeid": {
+      "first_seen": "2026-07-04T08:34:29.256845+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.625
+    },
+    "https://miraclefeet.bamboohr.com/careers/100": {
+      "first_seen": "2026-07-04T08:34:34.472380+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6625
+    },
+    "https://fika.bamboohr.com/careers/104": {
+      "first_seen": "2026-07-04T08:34:53.901078+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6425
+    },
+    "https://staff-emory.icims.com/jobs/169408/the-carter-center%3A-director%2C-trachoma-control-program%2C-health-programs/job?in_iframe=1": {
+      "first_seen": "2026-07-04T08:35:08.805302+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6875
+    },
+    "https://job-boards.greenhouse.io/reflective/jobs/5284106008": {
+      "first_seen": "2026-07-04T08:35:33.329839+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.45
+    },
+    "https://digitalgreen.applytojob.com/apply/Hsct3lFOlj/Agricultural-Content-Expert-Brazil": {
+      "first_seen": "2026-07-04T08:35:50.955498+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.52
+    },
+    "https://wd3.myworkdaysite.com/en-GB/recruiting/wfp/job_openings/job/Abidjan-Cote-DIvoire-The-RepOf/Senior-Advisor--Resource-Mobilization-and-Strategic-Engagement-Consultant_JR124521": {
+      "first_seen": "2026-07-04T08:36:02.047953+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.715
+    },
+    "https://malariaconsortium.current-vacancies.com/Jobs/Advert/4195797?cid=2061&t=Programme-Officer": {
+      "first_seen": "2026-07-04T08:36:07.109684+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5775
+    },
+    "https://erecruitment.ecdc.europa.eu/en/our-vacancies/principal-expert-arhai-group-leader-scientific-advice-and-country-support-176": {
+      "first_seen": "2026-07-04T08:36:25.973666+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.71
+    },
+    "https://erecruitment.ecdc.europa.eu/en/our-vacancies/principal-expert-group-leader-emergency-preparedness-and-response-175": {
+      "first_seen": "2026-07-04T08:36:32.152129+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7725
+    },
+    "https://job-boards.greenhouse.io/partnershipforpublicservice/jobs/4303996009": {
+      "first_seen": "2026-07-04T08:36:37.584341+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5125
+    },
+    "https://greenerbydefault.com/jobs": {
+      "first_seen": "2026-07-04T08:37:13.896483+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5975
+    },
+    "https://div.fund/careers/detail?id=08997bc2-6026-4c8f-8a5e-2234dac7a22b": {
+      "first_seen": "2026-07-04T08:39:36.702356+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7625
+    },
+    "https://job-boards.greenhouse.io/educate/jobs/8043456": {
+      "first_seen": "2026-07-04T08:40:00.355666+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.76
+    },
+    "https://oneacrefund.org/vacancies/tupande-ai-engineering-lead": {
+      "first_seen": "2026-07-04T08:41:37.047259+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.81
     }
   }
 }
