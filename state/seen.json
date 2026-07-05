@@ -8420,6 +8420,11 @@
       "first_seen": "2026-07-04T08:41:37.047259+00:00",
       "verdict": "inserted",
       "fit_score": 0.81
+    },
+    "https://dgap.org/de/dgap/jobs/co-leitung-fuer-den-aufbau-eines-tech-zentrums-m-w-d": {
+      "first_seen": "2026-07-05T08:49:36.857713+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5725
     }
   }
 }
