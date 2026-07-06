@@ -8425,6 +8425,46 @@
       "first_seen": "2026-07-05T08:49:36.857713+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.5725
+    },
+    "https://jobs.lever.co/epoch-ai/71202beb-84f1-4f2e-ad9d-f325b64c9b24": {
+      "first_seen": "2026-07-06T10:10:00.772306+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://malariaconsortium.current-vacancies.com/Jobs/Advert/4245654?cid=2061&t=M-And-E-officer": {
+      "first_seen": "2026-07-06T10:10:00.772397+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.lever.co/epoch-ai/8bfbbe7b-8334-4d85-9804-e17738bcafe4": {
+      "first_seen": "2026-07-06T10:10:11.742419+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.535
+    },
+    "https://careers.proveg.org/jobs/8019255-consultor-a-tecnico-a-em-financiamento-para-a-transicao-agropecuaria": {
+      "first_seen": "2026-07-06T10:10:17.695706+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.555
+    },
+    "https://halcyonfutures.org/founders": {
+      "first_seen": "2026-07-06T10:10:23.767109+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7275
+    },
+    "https://www.usds.gov/apply": {
+      "first_seen": "2026-07-06T10:11:02.349740+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.53
+    },
+    "https://edf.org/jobs/director-agriculture-policy": {
+      "first_seen": "2026-07-06T10:11:25.409660+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5675
+    },
+    "https://sei.org/people/jobs/steel-cooperation-lead": {
+      "first_seen": "2026-07-06T10:12:39.190513+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.62
     }
   }
 }
