@@ -8730,6 +8730,131 @@
       "first_seen": "2026-07-07T09:37:12.477923+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.3525
+    },
+    "https://app.trinethire.com/companies/586876-pure-earth/jobs/122242-vice-president-of-operations": {
+      "first_seen": "2026-07-08T08:21:19.903132+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.renaissancephilanthropy.org/careers/entrepreneur-in-residence-fellowship-launch479-fund": {
+      "first_seen": "2026-07-08T08:21:19.903184+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.renaissancephilanthropy.org/careers/director-catalyze479-fund": {
+      "first_seen": "2026-07-08T08:21:19.903209+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.renaissancephilanthropy.org/careers/engineer-in-residence-fellowship-launch479-fund": {
+      "first_seen": "2026-07-08T08:21:19.903230+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.nti.org/job-listing/executive-assistant-to-the-ceo/": {
+      "first_seen": "2026-07-08T08:21:19.903263+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4437183894/?alternateChannel=search&eBP=NON_CHARGEABLE_CHANNEL&refId=5xhUbSAZBLjrZtmN833Zeg%3D%3D&trackingId=YL9py16%2B5Y8GRfH%2BTmZzgQ%3D%3D&trk=d_flagship3_search_srp_jobs": {
+      "first_seen": "2026-07-08T08:21:19.903338+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.linkedin.com/jobs/view/4437194570/?alternateChannel=search&refId=28mG60VNXdShW%2FK4mwPQgA%3D%3D&trackingId=rszsFxGQtgCB0nCE%2B6BCfA%3D%3D&trk=d_flagship3_company": {
+      "first_seen": "2026-07-08T08:21:19.903392+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://theelders.org/news/we-are-recruiting-programme-advisor-artificial-intelligence": {
+      "first_seen": "2026-07-08T08:21:19.903435+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://alice.io/positions/position-91_352": {
+      "first_seen": "2026-07-08T08:21:19.903461+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5252793008": {
+      "first_seen": "2026-07-08T08:21:19.903484+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/139489025168679622-senior-security-engineer-agentic-red-team-deepmind?company=DeepMind&page=2": {
+      "first_seen": "2026-07-08T08:21:19.903517+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/108574842709516998-principal-virologist-responsible-development-and-innovation-deepmind?company=DeepMind": {
+      "first_seen": "2026-07-08T08:21:19.903543+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/88021074851046086-senior-virologist-deepmind?company=DeepMind": {
+      "first_seen": "2026-07-08T08:21:19.903568+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.iiss.org/careers/jobs/2026/07/iissamericas-research-internship-on-technology-trade-and-geopolitics/": {
+      "first_seen": "2026-07-08T08:21:19.903591+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://miraclefeet.bamboohr.com/careers/101": {
+      "first_seen": "2026-07-08T08:21:19.903618+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://new-incentives.breezy.hr/p/ddec126d66e0-stakeholder-relation-officer": {
+      "first_seen": "2026-07-08T08:21:19.903640+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://oneacrefund.org/vacancies/investor-relations-graduate-trainee": {
+      "first_seen": "2026-07-08T08:21:19.903660+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/research-program-manager-alignment-san-francisco/": {
+      "first_seen": "2026-07-08T08:21:19.903680+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1qPr1ajEuU2ItcN24Qqxh9H7R99YEGtGT/view?usp=sharing": {
+      "first_seen": "2026-07-08T08:21:19.903703+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1ZzDLdbp3MD2Bq6mk6N4o7hDMlt0xXuHn/view?usp=sharing": {
+      "first_seen": "2026-07-08T08:21:19.903725+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://vcdnp.org/eufp-fellowship/": {
+      "first_seen": "2026-07-08T08:21:19.903745+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.fishwelfareinitiative.org/sales-marketing-manager": {
+      "first_seen": "2026-07-08T08:21:19.903774+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/educate/jobs/8041675": {
+      "first_seen": "2026-07-08T08:21:27.629216+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7075
+    },
+    "https://job-boards.greenhouse.io/educate/jobs/7590539": {
+      "first_seen": "2026-07-08T08:21:34.111386+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.71
+    },
+    "https://jobs.ashbyhq.com/far.ai/7d1a985d-18cf-4775-af06-d4022d3e6012?embed=js": {
+      "first_seen": "2026-07-08T08:21:40.556119+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6025
     }
   }
 }
