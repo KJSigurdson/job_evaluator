@@ -9225,6 +9225,106 @@
       "first_seen": "2026-07-09T09:33:02.094818+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.515
+    },
+    "https://go.probablygood.org/EiQo9u": {
+      "first_seen": "2026-07-10T09:27:34.213153+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.securefrontier.ai/": {
+      "first_seen": "2026-07-10T09:27:34.213212+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://go.probablygood.org/nE1Rm3": {
+      "first_seen": "2026-07-10T09:27:34.213252+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gusto.com/postings/palisade-research-policy-generalist-6530786c-0a60-4459-84fc-996661772ae0": {
+      "first_seen": "2026-07-10T09:27:34.213285+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gusto.com/postings/palisade-research-national-security-expert-b4275a42-78be-4bbf-9f84-7c67e170a926": {
+      "first_seen": "2026-07-10T09:27:34.213315+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gusto.com/postings/palisade-research-regulatory-and-legal-policy-expert-27572c55-be63-4f9f-b5a8-d813ecbb8664": {
+      "first_seen": "2026-07-10T09:27:34.213343+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.gusto.com/postings/palisade-research-congressional-policy-lead-027ec20f-7473-4afe-a175-02ec56cf60aa": {
+      "first_seen": "2026-07-10T09:27:34.213369+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://biotrust.org/jobs/credentialing-lead": {
+      "first_seen": "2026-07-10T09:27:34.213428+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://biotrust.org/jobs/backend-infrastructure-engineer": {
+      "first_seen": "2026-07-10T09:27:34.213454+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://biotrust.org/jobs/product-engineer": {
+      "first_seen": "2026-07-10T09:27:34.213479+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5305631008": {
+      "first_seen": "2026-07-10T09:27:34.213516+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/137264870985736902-threat-modeler-lead-cbrne-deepmind?company=DeepMind&page=2": {
+      "first_seen": "2026-07-10T09:27:34.213555+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.syntonyresearch.ai/work/cto/": {
+      "first_seen": "2026-07-10T09:27:34.213611+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.healthdata.org/about/careers/job-openings/researcher-temporary-gem": {
+      "first_seen": "2026-07-10T09:27:34.213649+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://go.probablygood.org/fZUGOR": {
+      "first_seen": "2026-07-10T09:27:39.700083+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.39
+    },
+    "https://www.longtermresilience.org/open-call-for-contractor-opportunities-ai-biosecurity-and-ai-bio-work/": {
+      "first_seen": "2026-07-10T09:27:45.673097+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.7075
+    },
+    "https://sparai.org/mentors/": {
+      "first_seen": "2026-07-10T09:27:50.874487+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.595
+    },
+    "https://go.probablygood.org/RuS9yu": {
+      "first_seen": "2026-07-10T09:27:57.857287+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.695
+    },
+    "https://www.cooperativeai.com/calls-for-proposals/scaling-ai-safety-for-a-multi-agent-world": {
+      "first_seen": "2026-07-10T09:28:16.738448+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6
+    },
+    "https://www.healthdata.org/about/careers/job-openings/research-scientist-temporary-rgud": {
+      "first_seen": "2026-07-10T09:28:46.099088+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6925
     }
   }
 }
