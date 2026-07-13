@@ -10305,6 +10305,71 @@
       "first_seen": "2026-07-12T08:11:51.919482+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.395
+    },
+    "https://go.probablygood.org/PsFClj": {
+      "first_seen": "2026-07-13T09:17:39.798545+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://go.probablygood.org/WKJznv": {
+      "first_seen": "2026-07-13T09:17:39.798621+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.meridiancambridge.org/office-and-community-manager": {
+      "first_seen": "2026-07-13T09:17:39.798689+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.careers.gov.sg/jobs/hrp/17814068/005056a3-d347-1fe1-9efa-74ed6b0862ad": {
+      "first_seen": "2026-07-13T09:17:39.798743+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.kcl.ac.uk/study/funding/funding-opportunities/kings-prize-doctoral-programme-in-safe-trusted-and-responsible-artificial-intelligence": {
+      "first_seen": "2026-07-13T09:17:39.798772+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.helmholtz-muenchen.de/jobposting/b2d4a0f73e5dad5ef31ba804ce22b1fd0d7d9cef0": {
+      "first_seen": "2026-07-13T09:17:39.798796+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://fas.org/careers": {
+      "first_seen": "2026-07-13T09:17:39.798823+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://appliedhealthanalytics.org/careers/data-scientist": {
+      "first_seen": "2026-07-13T09:17:39.798854+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://appliedhealthanalytics.org/careers/biostatistician-geostatistician": {
+      "first_seen": "2026-07-13T09:17:39.798877+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://go.probablygood.org/o31A3i": {
+      "first_seen": "2026-07-13T09:17:47.796175+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.74
+    },
+    "https://go.probablygood.org/EESHIY": {
+      "first_seen": "2026-07-13T09:17:53.832822+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.68
+    },
+    "https://job-boards.greenhouse.io/givedirectly/jobs/4714132005": {
+      "first_seen": "2026-07-13T09:18:10.842592+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6025
+    },
+    "https://images.transparencycdn.org/images/DR-Young-Journalists-Editor_-2026.pdf": {
+      "first_seen": "2026-07-13T09:18:35.307886+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6025
     }
   }
 }
