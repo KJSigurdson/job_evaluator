@@ -10370,6 +10370,86 @@
       "first_seen": "2026-07-13T09:18:35.307886+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.6025
+    },
+    "https://docs.google.com/document/d/1lAABbT6rqNL2hT8mXqAUmyMKQLDxb4NT3XaNRKMP15M/edit?usp=sharing": {
+      "first_seen": "2026-07-14T07:55:34.576775+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://amododesign.com/career/ai-verification-general-application/": {
+      "first_seen": "2026-07-14T07:55:34.576874+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.renaissancephilanthropy.org/careers/director-research-and-origination-fund-ecosystem": {
+      "first_seen": "2026-07-14T07:55:34.576926+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.lasrlabs.org/research-manager": {
+      "first_seen": "2026-07-14T07:55:34.576969+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://futuretech.mit.edu/opportunities/senior-researcher---mit-ai-risk-initiative": {
+      "first_seen": "2026-07-14T07:55:34.577001+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/145KComVimfUkWlH_A4CeBGj8K0vhc6I4ykZYXGaWD84/edit?usp=sharing": {
+      "first_seen": "2026-07-14T07:55:34.577057+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5319696008": {
+      "first_seen": "2026-07-14T07:55:34.577139+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.givingwhatwecan.org/grants-ops-associate": {
+      "first_seen": "2026-07-14T07:55:34.577166+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.71
+    },
+    "https://docs.google.com/document/d/1-7JMxHXrbzOiG6BhkT2Ts6wufYlEvpt9FaGl-erDT4U/preview?tab=t.0": {
+      "first_seen": "2026-07-14T07:55:34.577197+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1WQJQWLemM12rJ8xAKqASZsKCIKb2yROGOZaX6KEXrDw/edit?tab=t.0": {
+      "first_seen": "2026-07-14T07:55:34.577226+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1EWaT9U0f0HTiP-_j6WkboKKyaw6Bz2un/view?usp=sharing": {
+      "first_seen": "2026-07-14T07:55:34.577261+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1bOsCGpm6I7_ZGmjQ4B_G2_1IcOu6Ab3N/view?usp=sharing": {
+      "first_seen": "2026-07-14T07:55:34.577292+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/145KComVimfUkWlH_A4CeBGj8K0vhc6I4ykZYXGaWD84/edit?tab=t.0": {
+      "first_seen": "2026-07-14T07:55:40.137100+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.49
+    },
+    "https://www.suvita.org/careers/head-of-finance-and-compliance": {
+      "first_seen": "2026-07-14T07:55:55.474858+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6625
+    },
+    "https://blueprintbiosecurity.org/biosurveillance-rfp-2026/": {
+      "first_seen": "2026-07-14T07:56:01.728528+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.615
+    },
+    "https://docs.google.com/document/d/1lAABbT6rqNL2hT8mXqAUmyMKQLDxb4NT3XaNRKMP15M/edit?tab=t.0": {
+      "first_seen": "2026-07-14T07:56:19.641957+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.555
     }
   }
 }
