@@ -10450,6 +10450,181 @@
       "first_seen": "2026-07-14T07:56:19.641957+00:00",
       "verdict": "below_threshold",
       "fit_score": 0.555
+    },
+    "https://www.arena.education/role-ops-associate": {
+      "first_seen": "2026-07-15T08:00:17.829358+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ari.us/careers/?gh_jid=4313375009": {
+      "first_seen": "2026-07-15T08:00:17.829442+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://careers.founderspledge.com/jobs/8063550-senior-community-manager": {
+      "first_seen": "2026-07-15T08:00:17.829487+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/1R-OHwJaUGPAolD13izc3GnMdpVelCLef/edit": {
+      "first_seen": "2026-07-15T08:00:17.829534+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://drive.google.com/file/d/14xXv8LS0J4DTtkb2LOOjgm72Vi6KdCcd/edit": {
+      "first_seen": "2026-07-15T08:00:17.829566+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.aisafety.camp/": {
+      "first_seen": "2026-07-15T08:00:17.829594+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5322723008": {
+      "first_seen": "2026-07-15T08:00:17.829625+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/97701290112361158-principal-virologist-responsible-development-and-innovation-deepmind?company=DeepMind&page=4": {
+      "first_seen": "2026-07-15T08:00:17.829668+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/101535657599345350-communications-lead-post-agi-research-deepmind?company=DeepMind": {
+      "first_seen": "2026-07-15T08:00:17.829696+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.google.com/about/careers/applications/jobs/results/126087301276017350-research-strategist-emerging-impacts-team-deepmind?company=DeepMind&page=3": {
+      "first_seen": "2026-07-15T08:00:17.829724+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/4327987": {
+      "first_seen": "2026-07-15T08:00:17.829747+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.ncuscr.org/employment/": {
+      "first_seen": "2026-07-15T08:00:17.829768+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/national-security-cyber-evaluation-lead-washington-dc/": {
+      "first_seen": "2026-07-15T08:00:17.829787+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/propublica/jobs/4577283006": {
+      "first_seen": "2026-07-15T08:00:17.829807+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://vistainstituteai.org/programs/agents": {
+      "first_seen": "2026-07-15T08:00:17.829824+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://vistainstituteai.org/programs/national-security-law-ai": {
+      "first_seen": "2026-07-15T08:00:17.829840+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://1fortheworld.org/volunteer-with-us": {
+      "first_seen": "2026-07-15T08:00:17.829866+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://docs.google.com/document/d/1VbQCRnfhHKDKqcYQQB2hESul_-E-G6xmZQMcpYf5zj8/edit?tab=t.0": {
+      "first_seen": "2026-07-15T08:00:17.829892+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.sentientfutures.ai/incubator/": {
+      "first_seen": "2026-07-15T08:00:17.829909+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.au.int/job/Senior-Procurement-Officer-%28AUSSOM%29/3022-en_US": {
+      "first_seen": "2026-07-15T08:00:17.829936+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://algoverseairesearch.org/airesearchprogram": {
+      "first_seen": "2026-07-15T08:00:17.829952+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ec.europa.eu/eusurvey/runner/CINEA_2026_CA_FGIV_18": {
+      "first_seen": "2026-07-15T08:00:17.829971+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://arena.education/role-ops-associate": {
+      "first_seen": "2026-07-15T08:00:17.829989+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://join.com/companies/faifarms/16434113-junior-data-scientist-insite": {
+      "first_seen": "2026-07-15T08:00:17.830004+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://ec.europa.eu/eusurvey/runner/CINEA_2026_CA_FGIV_16": {
+      "first_seen": "2026-07-15T08:00:17.830021+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783846372536": {
+      "first_seen": "2026-07-15T08:00:17.830058+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783846288283": {
+      "first_seen": "2026-07-15T08:00:17.830076+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783846292118": {
+      "first_seen": "2026-07-15T08:00:17.830092+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783846293397": {
+      "first_seen": "2026-07-15T08:00:17.830108+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783846349101": {
+      "first_seen": "2026-07-15T08:00:17.830125+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://openai.com/careers/secure-manufacturing-and-stealth-investigator-san-francisco/": {
+      "first_seen": "2026-07-15T08:00:17.830142+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://unjobs.org/vacancies/1783862345798": {
+      "first_seen": "2026-07-15T08:00:17.830161+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://sentientfutures.ai/projectincubator/": {
+      "first_seen": "2026-07-15T08:00:23.304768+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.665
+    },
+    "https://edf.org/jobs/vice-president-global-methane-communications": {
+      "first_seen": "2026-07-15T08:00:56.350092+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.535
+    },
+    "https://apply.workable.com/evidence-action/j/D33EBA02A9": {
+      "first_seen": "2026-07-15T08:01:54.115043+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.76
     }
   }
 }
