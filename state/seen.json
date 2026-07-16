@@ -10870,6 +10870,86 @@
       "first_seen": "2026-07-16T08:08:05.758966+00:00",
       "verdict": "inserted",
       "fit_score": 0.75
+    },
+    "https://www.animalallianceasia.org/local-event-coordinator": {
+      "first_seen": "2026-07-16T14:37:22.496281+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://job-boards.greenhouse.io/anthropic/jobs/5326358008": {
+      "first_seen": "2026-07-16T14:37:22.496329+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://jobs.csiro.au/job/Melbourne%2C-VIC-Undergraduate-Vacation-Studentships-CSIRO-Futures/1364393866/": {
+      "first_seen": "2026-07-16T14:37:22.496355+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://recruiting.paylocity.com/Recruiting/Jobs/Details/4331223": {
+      "first_seen": "2026-07-16T14:37:22.496375+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.ifsh.de/karriere/details/job/studentischer-angestellter-im-projekt-cbwnet-2490761": {
+      "first_seen": "2026-07-16T14:37:22.496395+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://grnh.se/gkxng06r8us": {
+      "first_seen": "2026-07-16T14:37:22.496416+00:00",
+      "verdict": "gated_out",
+      "fit_score": null
+    },
+    "https://www.iaps.ai/digital-content-and-strategy-specialist": {
+      "first_seen": "2026-07-16T14:37:47.133656+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.575
+    },
+    "https://www.renaissancephilanthropy.org/careers/research-engineer-engineering-hub": {
+      "first_seen": "2026-07-16T14:37:52.187401+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.635
+    },
+    "https://www.renaissancephilanthropy.org/careers/partnerships-west-coast-lead": {
+      "first_seen": "2026-07-16T14:37:57.663676+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6075
+    },
+    "https://docs.google.com/document/d/1ZhaVKvfKUwoT3tDMU1K977lj4wnKqMlnKKfTfp-Johk/edit": {
+      "first_seen": "2026-07-16T14:38:08.711469+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.69
+    },
+    "https://docs.google.com/document/d/1t8dX_7GoGBUkO4Ja3ctqJfjzWaenYIheFeJW0c_AWso/edit": {
+      "first_seen": "2026-07-16T14:38:14.241756+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.6475
+    },
+    "https://workforcenow.adp.com/mascsr/default/mdf/recruitment/recruitment.html?ccId=19000101_000001&cid=9b16364c-5e0e-4e66-be82-8f108b1eb279&jobId=552441": {
+      "first_seen": "2026-07-16T14:38:19.443273+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.39
+    },
+    "https://africajobsfund.com/opportunities/expression-of-interest": {
+      "first_seen": "2026-07-16T14:39:21.495340+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.765
+    },
+    "https://africajobsfund.com/apply/entrepreneur": {
+      "first_seen": "2026-07-16T14:39:43.778858+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.775
+    },
+    "https://www.centreforeffectivealtruism.org/careers?ashby_jid=97c6c334-bd3d-4fc3-a3f9-3d3928c343d1": {
+      "first_seen": "2026-07-16T14:40:06.076880+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7775
+    },
+    "https://www.renaissancephilanthropy.org/careers/director-glp-1-in-india-fund": {
+      "first_seen": "2026-07-16T14:40:27.239758+00:00",
+      "verdict": "inserted",
+      "fit_score": 0.7675
     }
   }
 }
