@@ -10950,6 +10950,11 @@
       "first_seen": "2026-07-16T14:40:27.239758+00:00",
       "verdict": "inserted",
       "fit_score": 0.7675
+    },
+    "https://jobb.djurensratt.se/jobs/8045980-kampanjstrateg": {
+      "first_seen": "2026-07-17T08:02:39.834963+00:00",
+      "verdict": "below_threshold",
+      "fit_score": 0.5275
     }
   }
 }
