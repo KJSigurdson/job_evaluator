@@ -34,19 +34,21 @@ def _weights_row(user_id: str, *, threshold: float, near_miss_floor: float = 0.6
     }
 
 
-def _profile_row(user_id: str) -> dict:
+def _profile_row(user_id: str, *, email_on_match: bool = False) -> dict:
     return {
         "user_id": user_id,
         "experience": ["Built a BI function"], "skills": ["sql"],
         "career_goals": "Data leadership", "cause_priorities": ["global health"],
         "location": "Remote", "location_constraints": "Remote preferred",
         "seniority_level": "Senior", "comp_needs": "Market rate",
-        "values_notes": "GWWC pledge",
+        "values_notes": "GWWC pledge", "email_on_match": email_on_match,
     }
 
 
-def _seed_user(client, user_id: str, *, threshold: float, near_miss_floor: float = 0.6) -> None:
-    client.seed("profiles", [_profile_row(user_id)])
+def _seed_user(
+    client, user_id: str, *, threshold: float, near_miss_floor: float = 0.6, email_on_match: bool = False,
+) -> None:
+    client.seed("profiles", [_profile_row(user_id, email_on_match=email_on_match)])
     client.seed("scoring_weights", [_weights_row(user_id, threshold=threshold, near_miss_floor=near_miss_floor)])
 
 
@@ -387,3 +389,129 @@ def test_one_off_dry_run_never_touches_search_quota(fake_client, monkeypatch):
     pipeline.run(_client=fake_client, only_user_id="u1", dry_run=True)
 
     assert fake_client.table("search_quota").rows == []
+
+
+# ---------------------------------------------------------------------------
+# Opt-in match-digest email
+# ---------------------------------------------------------------------------
+
+def _spy_digest(monkeypatch):
+    calls: list[tuple[str, list]] = []
+    monkeypatch.setattr(pipeline, "send_match_digest", lambda user_id, matches: calls.append((user_id, matches)))
+    return calls
+
+
+def test_email_on_match_true_with_insert_triggers_one_send(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=True)
+    posting = make_posting(url="https://example.org/job/digest-yes", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    calls = _spy_digest(monkeypatch)
+
+    pipeline.run(_client=fake_client)
+
+    assert len(calls) == 1
+    user_id, matches = calls[0]
+    assert user_id == "u1"
+    assert len(matches) == 1
+    assert matches[0]["url"] == posting.url
+    assert matches[0]["title"] == posting.title
+    assert matches[0]["fit_score"] == pytest.approx(0.8, rel=0.05)
+
+
+def test_email_on_match_false_triggers_no_send(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=False)
+    posting = make_posting(url="https://example.org/job/digest-no", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    calls = _spy_digest(monkeypatch)
+
+    pipeline.run(_client=fake_client)
+
+    assert calls == []
+
+
+def test_email_on_match_true_with_zero_inserts_triggers_no_send(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.99, near_miss_floor=0.99, email_on_match=True)
+    posting = make_posting(url="https://example.org/job/digest-no-insert", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.5)
+    calls = _spy_digest(monkeypatch)
+
+    pipeline.run(_client=fake_client)
+
+    assert calls == []
+
+
+def test_email_on_match_only_includes_new_matches_this_run_not_preexisting(fake_client, monkeypatch):
+    """Regression: an already-existing match for this user (filtered out by the
+    skip-set before scoring) must not appear in the digest — only matches actually
+    inserted THIS run."""
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=True)
+    existing = make_posting(url="https://example.org/job/pre-existing", source="iap", deadline=date(2030, 1, 1))
+    new = make_posting(url="https://example.org/job/brand-new", source="iap", deadline=date(2030, 1, 1))
+    fake_client.seed("matches", [{
+        "user_id": "u1", "canonical_url": canonical_url(existing.url), "title": "x", "org": "x",
+    }])
+    _stub_sources(monkeypatch, [existing, new])
+    _stub_llms(monkeypatch, fit=0.8)
+    calls = _spy_digest(monkeypatch)
+
+    pipeline.run(_client=fake_client)
+
+    assert len(calls) == 1
+    _, matches = calls[0]
+    assert [m["url"] for m in matches] == [new.url]
+
+
+def test_email_digest_dry_run_sends_nothing(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=True)
+    posting = make_posting(url="https://example.org/job/digest-dry", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    calls = _spy_digest(monkeypatch)
+
+    pipeline.run(_client=fake_client, dry_run=True)
+
+    assert calls == []
+
+
+def test_email_digest_failure_does_not_fail_run_or_flip_quota(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=True)
+    posting = make_posting(url="https://example.org/job/digest-fails", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    def boom(user_id, matches):
+        raise RuntimeError("email service is down")
+
+    monkeypatch.setattr(pipeline, "send_match_digest", boom)
+
+    log = pipeline.run(_client=fake_client, only_user_id="u1")  # exercises quota tracking too
+
+    assert log.user_results[0].inserted == 1
+    assert fake_client.table("search_quota").rows[0]["status"] == "complete"
+
+
+def test_email_digest_failure_does_not_interrupt_other_users(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5, email_on_match=True)
+    _seed_user(fake_client, "u2", threshold=0.5, email_on_match=True)
+    posting = make_posting(url="https://example.org/job/digest-multi", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    calls: list[str] = []
+
+    def flaky(user_id, matches):
+        calls.append(user_id)
+        if user_id == "u1":
+            raise RuntimeError("email service is down for u1")
+
+    monkeypatch.setattr(pipeline, "send_match_digest", flaky)
+
+    log = pipeline.run(_client=fake_client)
+
+    results = {r.user_id: r for r in log.user_results}
+    assert results["u1"].inserted == 1
+    assert results["u2"].inserted == 1
+    assert calls == ["u1", "u2"]

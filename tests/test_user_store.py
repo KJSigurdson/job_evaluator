@@ -160,6 +160,35 @@ def test_build_profile_defaults_missing_location_rule_to_empty_dict():
 
 
 # ---------------------------------------------------------------------------
+# email_on_match — opt-in flag consumed by pipeline.py for the match-digest email
+# ---------------------------------------------------------------------------
+
+def test_build_profile_email_on_match_true():
+    prow = _profile_row(email_on_match=True)
+    profile = _build_profile(prow, _weights_row())
+    assert profile["email_on_match"] is True
+
+
+def test_build_profile_email_on_match_false():
+    prow = _profile_row(email_on_match=False)
+    profile = _build_profile(prow, _weights_row())
+    assert profile["email_on_match"] is False
+
+
+def test_build_profile_email_on_match_defaults_false_when_absent():
+    prow = _profile_row()
+    assert "email_on_match" not in prow
+    profile = _build_profile(prow, _weights_row())
+    assert profile["email_on_match"] is False
+
+
+def test_build_profile_email_on_match_null_normalises_to_false():
+    prow = _profile_row(email_on_match=None)
+    profile = _build_profile(prow, _weights_row())
+    assert profile["email_on_match"] is False
+
+
+# ---------------------------------------------------------------------------
 # _build_rubric
 # ---------------------------------------------------------------------------
 

@@ -184,6 +184,10 @@ def _build_profile(
     profiles.experience / profiles.skills columns. The fallback is per-field: a user
     with structured work/education rows but no structured skill rows gets structured
     experience text + free-text skills, and vice versa.
+
+    "email_on_match" is the opt-in flag pipeline.py checks before sending a match-
+    digest email (src/notify.py) — normalised to a strict bool so a missing/null
+    column defaults to no email, not an error.
     """
     achievements_by_experience = achievements_by_experience or {}
     experience_text = _render_experience_text(experiences, achievements_by_experience)
@@ -197,6 +201,7 @@ def _build_profile(
         "cause_priorities": prow.get("cause_priorities"),
         "values_notes": prow.get("values_notes"),
         "career_goals": prow.get("career_goals"),
+        "email_on_match": bool(prow.get("email_on_match")),
         "skills": skills_text if skills_text is not None else prow.get("skills"),
         "experience_inventory": experience_text if experience_text is not None else prow.get("experience"),
         "hard_constraints": {

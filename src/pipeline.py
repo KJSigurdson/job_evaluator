@@ -19,6 +19,15 @@ Usage:
             running → complete/failed status to `search_quota` for that user — the
             normal multi-user daily run never touches that table.
 
+Match-digest email (src/notify.py):
+    At the end of each user's iteration, if profile["email_on_match"] is true and at
+    least one match was inserted THIS run (not pre-existing ones filtered out by the
+    skip-set) and the run isn't --dry-run, one digest email is sent for that user's
+    new matches. This is strictly best-effort: notify.send_match_digest() never
+    raises, and the call site here is wrapped in try/except as a second layer of
+    defense — an email failure can never fail the run, flip search_quota to 'failed',
+    or stop processing of subsequent users.
+
 Staleness note (14-day cutoff for deadline-less postings):
     Postings with neither `deadline` nor `posted_at` (e.g. IAP rows) have no natural
     recency signal, so we anchor staleness to `first_seen` in the `seen` table instead.
@@ -47,6 +56,7 @@ from src import scoring as scoring_mod
 from src.dedup import canonical_url
 from src.enrich import EnrichmentError, enrich
 from src.matches_store import fetch_existing_match_urls, upsert_match
+from src.notify import send_match_digest
 from src.quota_store import set_status
 from src.schemas import (
     MatchRow,
@@ -207,6 +217,7 @@ def run(
 
             user_postings = [p for p in fresh if canonical_url(p.url) not in skip_set]
             result = UserRunResult(user_id=user.user_id, new_after_dedup=len(user_postings))
+            new_matches: list[dict] = []  # matches actually inserted THIS run, for the opt-in digest email
 
             threshold     = user.rubric["threshold"]
             near_miss_min = user.rubric["near_miss_min"]
@@ -287,6 +298,14 @@ def run(
                     "inserted", scored.fit_score, dry_run=dry_run,
                 )
                 result.inserted += 1
+                new_matches.append({
+                    "title": row.title,
+                    "org": row.org,
+                    "location": row.location,
+                    "fit_score": row.fit_score,
+                    "why_fits": row.why_fits,
+                    "url": row.url,
+                })
 
             log.info(
                 "User %s: new=%d gated_out=%d scored=%d inserted=%d near_miss=%d parse_fail=%d",
@@ -294,6 +313,15 @@ def run(
                 result.scored, result.inserted, result.near_misses, result.parse_failures,
             )
             user_results.append(result)
+
+            # -- Opt-in match-digest email. Best-effort: must never fail the run,
+            # flip search_quota, or interrupt other users — notify.send_match_digest
+            # itself never raises, and this try/except is a second layer of defense.
+            if user.profile.get("email_on_match") and new_matches and not dry_run:
+                try:
+                    send_match_digest(user.user_id, new_matches)
+                except Exception as exc:
+                    log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
 
         # -------------------------------------------------------------------------
         # 5. Emit RunLog
