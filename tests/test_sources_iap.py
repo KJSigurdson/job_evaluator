@@ -104,6 +104,11 @@ def test_comp_mapped():
     assert p.comp == "$120,000"
 
 
+def test_cause_area_mapped():
+    [p] = parse_rows(sheet(_GOOD_ROW))
+    assert p.cause_area == "Global health and development"
+
+
 def test_deadline_mapped():
     [p] = parse_rows(sheet(_GOOD_ROW))
     assert p.deadline == date(2026, 12, 31)
@@ -249,6 +254,16 @@ def test_location_none_when_blank():
     )
     [p] = parse_rows(sheet(r))
     assert p.location is None
+
+
+def test_cause_area_none_when_blank():
+    r = row(
+        cell("Org"), cell("Role"), cell("https://example.com/job"),
+        cell("Remote"), cell(), cell(""),  # blank cause area
+        cell(), cell(), cell(),
+    )
+    [p] = parse_rows(sheet(r))
+    assert p.cause_area is None
 
 
 def test_comp_none_when_blank():

@@ -18,6 +18,7 @@ class RawPosting(BaseModel):
     location: str | None = None
     seniority: str | None = None
     comp: str | None = None
+    cause_area: str | None = None
     deadline: date | None = None
     posted_at: date | None = None  # None → exempt from recency filter (e.g. IAP)
     raw_text: str  # full text fed to the LLM parser / Tier 1 scorer
@@ -44,7 +45,7 @@ class DimensionScore(BaseModel):
 
 
 class Tier1ScoreOutput(BaseModel):
-    """Structured JSON output from the Tier 1 LLM call. Field names match rubric.yaml keys."""
+    """Structured JSON output from the Tier 1 LLM call. Field names match rubric dimension keys."""
     cause_mission_fit: DimensionScore
     role_function_fit: DimensionScore
     location_compatibility: DimensionScore
@@ -62,7 +63,7 @@ class ScoredPosting(BaseModel):
     posting: RawPosting
     gate: HardGateResult
     scores: Tier1ScoreOutput
-    fit_score: float = Field(ge=0.0, le=1.0)  # weighted sum; weights from rubric.yaml
+    fit_score: float = Field(ge=0.0, le=1.0)  # weighted sum; weights from the user's scoring_weights row
 
 
 # ---------------------------------------------------------------------------
@@ -79,34 +80,44 @@ class Tier2EnrichmentOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Notion insertion shape — assembled from ScoredPosting + Tier2EnrichmentOutput
+# Per-user context — built from Supabase `profiles` + `scoring_weights` rows
 # ---------------------------------------------------------------------------
 
-class NotionInsertRow(BaseModel):
-    role: str
+class UserContext(BaseModel):
+    user_id: str
+    profile: dict  # shape gate.py / scoring.py / enrich.py expect (see user_store.py)
+    rubric: dict   # shape scoring.py expects: {threshold, near_miss_min, dimensions}
+
+
+# ---------------------------------------------------------------------------
+# Matches insertion shape — assembled from ScoredPosting + Tier2EnrichmentOutput.
+# Only ever contains job fields + model output. Never status/user_notes/discarded —
+# those are user-owned columns the app manages; this schema has no fields for them
+# so it is structurally impossible to write them via matches_store.upsert_match.
+# ---------------------------------------------------------------------------
+
+class MatchRow(BaseModel):
+    title: str
     org: str
     org_summary: str
     source: str
     url: str
+    canonical_url: str
     date_found: date
     deadline: date | None = None
     comp: str | None = None
+    location: str | None = None
+    seniority: str | None = None
+    cause_area: str | None = None
     # Aggregate
     fit_score: float
-    # Per-dimension (stored as individual Notion number properties for later recalibration)
-    cause_mission_fit: float
-    role_function_fit: float
-    location_compatibility: float
-    seniority_match: float
-    comp_adequacy: float
-    values_alignment: float
-    skill_growth: float
+    # Per-dimension scores as jsonb: {cause_mission_fit: 0.8, ...}
+    dimension_scores: dict[str, float]
     # Enrichment text
     why_fits: str
     why_not_fits: str
-    emphasize_in_cv: str  # newline-joined list for Notion text field
-    deemphasize: str      # newline-joined list for Notion text field
-    status: str = "Proposed"
+    emphasize_in_cv: list[str]
+    deemphasize: list[str]
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +132,15 @@ class SourceResult(BaseModel):
 
 
 class RunCounts(BaseModel):
+    """Shared counts from the single scrape + recency-filter pass, before the per-user loop."""
     scraped: int = 0
+    recency_dropped: int = 0
+    stale_dropped: int = 0       # dropped by the 14-day first-seen cutoff (deadline-less, posted_at-less)
+    shared_pool_size: int = 0    # size of the fresh pool handed to every user's loop
+
+
+class UserRunResult(BaseModel):
+    user_id: str
     new_after_dedup: int = 0
     gated_out: int = 0
     scored: int = 0
@@ -130,10 +149,9 @@ class RunCounts(BaseModel):
     parse_failures: int = 0
 
 
-class NearMiss(BaseModel):
-    posting: RawPosting
-    scores: Tier1ScoreOutput
-    fit_score: float
+class ParseFailure(BaseModel):
+    user_id: str
+    url: str
 
 
 class RunLog(BaseModel):
@@ -143,5 +161,5 @@ class RunLog(BaseModel):
     temperature: float
     counts: RunCounts
     source_results: list[SourceResult] = Field(default_factory=list)
-    near_misses: list[NearMiss] = Field(default_factory=list)
-    parse_failure_urls: list[str] = Field(default_factory=list)
+    user_results: list[UserRunResult] = Field(default_factory=list)
+    parse_failures: list[ParseFailure] = Field(default_factory=list)

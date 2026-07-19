@@ -5,7 +5,7 @@ import logging
 
 import pytest
 
-from src.user_store import _build_profile, _build_rubric, fetch_users
+from src.user_store import _build_profile, _build_rubric, fetch_users, _render_experience_text, _render_skills_text
 
 
 def _profile_row(**kwargs) -> dict:
@@ -82,6 +82,50 @@ def test_fetch_users_multiple_users(fake_client):
 
 
 # ---------------------------------------------------------------------------
+# fetch_users(only_user_id=...) — one-off single-user scoping
+# ---------------------------------------------------------------------------
+
+def test_fetch_users_only_user_id_returns_only_that_user(fake_client):
+    fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
+
+    users = fetch_users(fake_client, only_user_id="u1")
+    assert [u.user_id for u in users] == ["u1"]
+
+
+def test_fetch_users_only_user_id_scopes_experiences(fake_client):
+    fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
+    fake_client.seed("experiences", [
+        {"id": "e1", "user_id": "u1", "kind": "work", "title": "u1's job",
+         "organization": "Org1", "start_date": "2020-01-01", "end_date": None,
+         "proficiency": None, "sort_order": 0, "notes": None},
+        {"id": "e2", "user_id": "u2", "kind": "work", "title": "u2's job",
+         "organization": "Org2", "start_date": "2020-01-01", "end_date": None,
+         "proficiency": None, "sort_order": 0, "notes": None},
+    ])
+
+    [user] = fetch_users(fake_client, only_user_id="u1")
+    assert "u1's job" in user.profile["experience_inventory"]
+    assert "u2's job" not in user.profile["experience_inventory"]
+
+
+def test_fetch_users_only_user_id_not_found_returns_empty(fake_client):
+    fake_client.seed("profiles", [_profile_row(user_id="u1")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])
+
+    assert fetch_users(fake_client, only_user_id="nonexistent") == []
+
+
+def test_fetch_users_none_only_user_id_is_unaffected(fake_client):
+    """only_user_id=None (the default) must produce identical results to omitting it."""
+    fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
+
+    assert {u.user_id for u in fetch_users(fake_client, only_user_id=None)} == {"u1", "u2"}
+
+
+# ---------------------------------------------------------------------------
 # _build_profile
 # ---------------------------------------------------------------------------
 
@@ -124,3 +168,168 @@ def test_build_rubric_warns_when_weights_dont_sum_to_one(caplog):
     with caplog.at_level(logging.WARNING):
         _build_rubric(wrow)
     assert "sum to" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# fetch_users — bulk experiences/experience_achievements fetch
+# ---------------------------------------------------------------------------
+
+def _experience(**kwargs) -> dict:
+    defaults = dict(
+        id="exp-1", user_id="u1", kind="work", title="Head of BI",
+        organization="Evidensia", start_date="2019-01-01", end_date="2024-01-01",
+        proficiency=None, sort_order=0, notes=None,
+    )
+    defaults.update(kwargs)
+    return defaults
+
+
+def _achievement(**kwargs) -> dict:
+    defaults = dict(
+        id="ach-1", experience_id="exp-1", user_id="u1",
+        description="Grew team from 1 to 7", sort_order=0,
+    )
+    defaults.update(kwargs)
+    return defaults
+
+
+def test_fetch_users_renders_structured_experience_into_profile(fake_client):
+    fake_client.seed("profiles", [_profile_row()])
+    fake_client.seed("scoring_weights", [_weights_row()])
+    fake_client.seed("experiences", [_experience()])
+    fake_client.seed("experience_achievements", [_achievement()])
+
+    [user] = fetch_users(fake_client)
+
+    assert "Head of BI" in user.profile["experience_inventory"]
+    assert "Evidensia" in user.profile["experience_inventory"]
+    assert "Grew team from 1 to 7" in user.profile["experience_inventory"]
+
+
+def test_fetch_users_only_queries_experiences_for_processed_users(fake_client):
+    """A profile with no scoring_weights row is never processed, so it shouldn't be
+    part of the bulk experiences query (verified indirectly: its experiences, if any,
+    must not leak into another user's rendered profile)."""
+    fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])  # u2 has no weights
+    fake_client.seed("experiences", [_experience(user_id="u2", title="Should not appear")])
+
+    [user] = fetch_users(fake_client)
+    assert user.user_id == "u1"
+    assert "Should not appear" not in str(user.profile["experience_inventory"])
+
+
+# ---------------------------------------------------------------------------
+# _render_experience_text / _render_skills_text — grouping, ordering, fallback
+# ---------------------------------------------------------------------------
+
+def test_render_experience_text_groups_by_kind_in_fixed_order():
+    rows = [
+        _experience(id="e1", kind="education", title="MSc Economics", sort_order=0),
+        _experience(id="e2", kind="work", title="Head of BI", sort_order=0),
+        _experience(id="e3", kind="extracurricular", title="Board member", sort_order=0),
+    ]
+    text = _render_experience_text(rows, {})
+    assert text.index("Work:") < text.index("Education:") < text.index("Extracurricular:")
+
+
+def test_render_experience_text_orders_entries_by_sort_order():
+    rows = [
+        _experience(id="e1", title="Second Job", sort_order=1),
+        _experience(id="e2", title="First Job", sort_order=0),
+    ]
+    text = _render_experience_text(rows, {})
+    assert text.index("First Job") < text.index("Second Job")
+
+
+def test_render_experience_text_nests_achievements_under_their_experience():
+    rows = [_experience(id="e1", title="Head of BI")]
+    achievements = {"e1": [_achievement(experience_id="e1", description="Built the BI function")]}
+    text = _render_experience_text(rows, achievements)
+    assert text.index("Head of BI") < text.index("Built the BI function")
+
+
+def test_render_experience_text_includes_notes():
+    rows = [_experience(id="e1", notes="Promoted twice")]
+    text = _render_experience_text(rows, {})
+    assert "Promoted twice" in text
+
+
+def test_render_experience_text_handles_missing_organization():
+    rows = [_experience(id="e1", title="Freelance Consultant", organization=None)]
+    text = _render_experience_text(rows, {})
+    assert "Freelance Consultant (2019-01-01–2024-01-01)" in text
+
+
+def test_render_experience_text_present_when_no_end_date():
+    rows = [_experience(id="e1", end_date=None)]
+    text = _render_experience_text(rows, {})
+    assert "Present" in text
+
+
+def test_render_experience_text_none_when_no_work_kind_rows():
+    rows = [_experience(id="e1", kind="skill", title="SQL")]
+    assert _render_experience_text(rows, {}) is None
+
+
+def test_render_experience_text_none_for_empty_list():
+    assert _render_experience_text([], {}) is None
+
+
+def test_render_skills_text_groups_by_kind_in_fixed_order():
+    rows = [
+        _experience(id="s1", kind="language", title="Swedish", proficiency="fluent", sort_order=0),
+        _experience(id="s2", kind="skill", title="Stakeholder management", proficiency="expert", sort_order=0),
+        _experience(id="s3", kind="software_skill", title="Power BI", proficiency="expert", sort_order=0),
+    ]
+    text = _render_skills_text(rows)
+    assert text.index("Skills:") < text.index("Software:") < text.index("Languages:")
+    assert "Power BI (expert)" in text
+    assert "Swedish (fluent)" in text
+
+
+def test_render_skills_text_orders_entries_by_sort_order():
+    rows = [
+        _experience(id="s1", kind="skill", title="Second Skill", proficiency="working_proficiency", sort_order=1),
+        _experience(id="s2", kind="skill", title="First Skill", proficiency="expert", sort_order=0),
+    ]
+    text = _render_skills_text(rows)
+    assert text.index("First Skill") < text.index("Second Skill")
+
+
+def test_render_skills_text_none_when_no_skill_kind_rows():
+    rows = [_experience(id="e1", kind="work")]
+    assert _render_skills_text(rows) is None
+
+
+# ---------------------------------------------------------------------------
+# Per-field fallback to free-text profiles.experience / profiles.skills
+# ---------------------------------------------------------------------------
+
+def test_build_profile_falls_back_to_free_text_when_no_experiences_rows():
+    prow = _profile_row(experience="Free-text experience blob", skills="Free-text skills blob")
+    profile = _build_profile(prow, _weights_row(), experiences=[])
+    assert profile["experience_inventory"] == "Free-text experience blob"
+    assert profile["skills"] == "Free-text skills blob"
+
+
+def test_build_profile_structured_experience_with_free_text_skills_fallback():
+    """Structured work rows exist but no structured skill-kind rows → experience is
+    rendered, skills falls back to the free-text profiles.skills column."""
+    prow = _profile_row(skills="Free-text skills blob")
+    experiences = [_experience(id="e1", kind="work", title="Head of BI")]
+
+    profile = _build_profile(prow, _weights_row(), experiences=experiences)
+
+    assert "Head of BI" in profile["experience_inventory"]
+    assert profile["skills"] == "Free-text skills blob"
+
+
+def test_build_profile_structured_skills_with_free_text_experience_fallback():
+    prow = _profile_row(experience="Free-text experience blob")
+    experiences = [_experience(id="s1", kind="skill", title="SQL", proficiency="expert")]
+
+    profile = _build_profile(prow, _weights_row(), experiences=experiences)
+
+    assert profile["experience_inventory"] == "Free-text experience blob"
+    assert "SQL (expert)" in profile["skills"]

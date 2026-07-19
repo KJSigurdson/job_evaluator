@@ -85,6 +85,16 @@ def test_seniority_none_when_empty():
     assert p.seniority is None
 
 
+def test_cause_area_from_tags_area():
+    [p] = parse_hits([hit(tags_area=[{"name": "Global health and development"}])])
+    assert p.cause_area == "Global health and development"
+
+
+def test_cause_area_none_when_empty():
+    [p] = parse_hits([hit(tags_area=[])])
+    assert p.cause_area is None
+
+
 def test_comp_from_salary_text():
     [p] = parse_hits([hit(salary_text="$90,000–$110,000")])
     assert p.comp == "$90,000–$110,000"

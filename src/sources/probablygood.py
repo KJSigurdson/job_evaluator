@@ -128,6 +128,7 @@ def parse_hits(hits: list[dict]) -> list[RawPosting]:
         org      = ((hit.get("org") or {}).get("name") or "").strip()
         location = ", ".join(_tag_names(hit.get("locations")))
         seniority = ", ".join(_tag_names(hit.get("tags_experience"))) or None
+        cause_area = ", ".join(_tag_names(hit.get("tags_area"))) or None
         comp      = _extract_comp(hit)
         deadline  = _extract_unix_date(hit, "closes_at_unix")
         posted_at = _extract_unix_date(hit, "posted_at_unix")
@@ -150,6 +151,7 @@ def parse_hits(hits: list[dict]) -> list[RawPosting]:
             location=location or None,
             seniority=seniority,
             comp=comp,
+            cause_area=cause_area,
             deadline=deadline,
             posted_at=posted_at,
             raw_text=raw_text,

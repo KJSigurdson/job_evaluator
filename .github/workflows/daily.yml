@@ -1,14 +1,17 @@
-# EA Job Evaluator — daily pipeline
+# EA Job Evaluator — daily pipeline (multi-user)
 #
 # Runs automatically at 06:00 UTC every day.
-# Scrapes EA job boards, scores new roles, inserts high-fit ones into Notion,
-# then commits the updated seen-URL cache (state/seen.json) so the next run
-# skips already-processed postings without re-hitting Notion.
+# Scrapes EA job boards once, scores each Supabase-registered user's shared pool
+# against their own profile/weights, and upserts matches into Supabase per user.
+# State (seen-cache) lives in the Supabase `seen` table — nothing is committed back
+# to the repo.
 #
 # Manual trigger (Actions → Run workflow):
-#   dry_run = false  →  full run, inserts into Notion, commits cache
-#   dry_run = true   →  scrape + score only, prints would-be inserts, no writes
-#   limit   = N      →  cap postings processed to N (useful for smoke-testing a manual run)
+#   dry_run       = false  →  full run, writes matches + seen to Supabase
+#   dry_run       = true   →  scrape + score only, prints would-be matches, no writes
+#   limit         = N      →  cap the shared postings pool to N (useful for smoke-testing)
+#   only_user_id  = <uuid> →  one-off run scoped to a single user; writes running/complete/
+#                             failed status to search_quota for that user (skipped in dry-run)
 
 name: Daily pipeline
 
@@ -18,16 +21,17 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Dry run (scrape + score only, no Notion writes or cache commit)"
+        description: "Dry run (scrape + score only, no seen/matches writes)"
         type: boolean
         default: false
       limit:
-        description: "Cap number of postings processed (leave empty for no cap)"
+        description: "Cap the shared postings pool (leave empty for no cap)"
         type: string
         default: ""
-
-permissions:
-  contents: write   # needed to commit state/seen.json back to the repo
+      only_user_id:
+        description: "One-off run scoped to a single user_id (leave empty for the normal multi-user run)"
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}
@@ -54,8 +58,8 @@ jobs:
       - name: Run pipeline
         env:
           ANTHROPIC_API_KEY:           ${{ secrets.ANTHROPIC_API_KEY }}
-          NOTION_TOKEN:                ${{ secrets.NOTION_TOKEN }}
-          NOTION_DB_ID:                ${{ secrets.NOTION_DB_ID }}
+          SUPABASE_URL:                ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY:   ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           IAP_SHEET_ID:                ${{ secrets.IAP_SHEET_ID }}
           IAP_SHEET_TAB:               ${{ secrets.IAP_SHEET_TAB }}
@@ -67,15 +71,7 @@ jobs:
           RECENCY_DAYS:                ${{ secrets.RECENCY_DAYS }}
         run: |
           ARGS=""
-          [ "${{ inputs.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
-          [ -n "${{ inputs.limit }}" ]          && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          [ "${{ inputs.dry_run }}" = "true" ]   && ARGS="$ARGS --dry-run"
+          [ -n "${{ inputs.limit }}" ]           && ARGS="$ARGS --limit ${{ inputs.limit }}"
+          [ -n "${{ inputs.only_user_id }}" ]    && ARGS="$ARGS --only-user-id ${{ inputs.only_user_id }}"
           python -m src.pipeline $ARGS
-
-      - name: Commit updated seen cache
-        if: ${{ inputs.dry_run != 'true' }}
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add state/seen.json
-          git diff --staged --quiet || git commit -m "Update seen cache [skip ci]"
-          git push

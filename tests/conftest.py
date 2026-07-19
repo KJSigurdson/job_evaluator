@@ -1,28 +1,157 @@
 """Shared fixtures and stub factory helpers."""
 from __future__ import annotations
 
-from datetime import date
-
 import pytest
-import yaml
 
 from src.schemas import DimensionScore, RawPosting, Tier1ScoreOutput
-
+from src.user_store import _build_profile, _build_rubric
 
 REPO_ROOT = __file__.rsplit("/tests/", 1)[0]
 
 
+# ---------------------------------------------------------------------------
+# Fake Supabase client — in-memory tables, enough of the query-builder surface
+# for user_store.py / seen_store.py / matches_store.py to run against.
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, data: list[dict]):
+        self.data = data
+
+
+class _FakeQuery:
+    def __init__(self, table: "_FakeTable", op: str, payload: dict | None = None, on_conflict: str | None = None):
+        self._table = table
+        self._op = op
+        self._payload = payload
+        self._on_conflict = on_conflict
+        self._filters: list[tuple[str, object]] = []
+
+    def select(self, _cols: str = "*") -> "_FakeQuery":
+        return self
+
+    def eq(self, col: str, val) -> "_FakeQuery":
+        self._filters.append(("eq", col, val))
+        return self
+
+    def in_(self, col: str, values) -> "_FakeQuery":
+        self._filters.append(("in", col, list(values)))
+        return self
+
+    def execute(self) -> _FakeResponse:
+        if self._op == "select":
+            rows = self._table.rows
+            for kind, col, val in self._filters:
+                if kind == "eq":
+                    rows = [r for r in rows if r.get(col) == val]
+                elif kind == "in":
+                    rows = [r for r in rows if r.get(col) in val]
+            return _FakeResponse([dict(r) for r in rows])
+
+        if self._op == "upsert":
+            key_cols = (self._on_conflict or "").split(",")
+            match = next(
+                (r for r in self._table.rows if all(r.get(c) == self._payload.get(c) for c in key_cols)),
+                None,
+            )
+            if match is not None:
+                match.update(self._payload)
+            else:
+                self._table.rows.append(dict(self._payload))
+            return _FakeResponse([dict(self._payload)])
+
+        raise NotImplementedError(self._op)
+
+
+class _FakeTable:
+    def __init__(self):
+        self.rows: list[dict] = []
+
+    def select(self, cols: str = "*") -> _FakeQuery:
+        return _FakeQuery(self, "select").select(cols)
+
+    def upsert(self, payload: dict, on_conflict: str | None = None) -> _FakeQuery:
+        return _FakeQuery(self, "upsert", payload=payload, on_conflict=on_conflict)
+
+
+class FakeSupabaseClient:
+    """Minimal stand-in for a supabase.Client. Backs each table with an in-memory list."""
+
+    def __init__(self):
+        self._tables: dict[str, _FakeTable] = {}
+
+    def table(self, name: str) -> _FakeTable:
+        return self._tables.setdefault(name, _FakeTable())
+
+    def seed(self, name: str, rows: list[dict]) -> None:
+        self.table(name).rows.extend(dict(r) for r in rows)
+
+
+@pytest.fixture
+def fake_client() -> FakeSupabaseClient:
+    return FakeSupabaseClient()
+
+
+# ---------------------------------------------------------------------------
+# profile / rubric — built the same way pipeline.py builds them at runtime,
+# from fake `profiles` + `scoring_weights` rows, so test_gate.py/test_scoring.py
+# exercise the real Supabase-row → dict mapping instead of a hand-rolled shape.
+# ---------------------------------------------------------------------------
+
 @pytest.fixture(scope="session")
-def profile() -> dict:
-    with open(f"{REPO_ROOT}/profile.yaml") as f:
-        return yaml.safe_load(f)
+def profile_row() -> dict:
+    return {
+        "user_id": "u-test",
+        "experience": {
+            "core_strengths": ["Built a BI function from scratch", "Led multi-country rollout"],
+            "technical": {"sql": "strong", "python": "working"},
+        },
+        "skills": ["data leadership", "analytics", "stakeholder management"],
+        "career_goals": "Move into an EA-aligned data leadership role.",
+        "cause_priorities": ["global health and development", "EA-aligned impact"],
+        "location": "Sundsvall, Sweden",
+        "location_constraints": "Prefers remote or Sweden-based hybrid; open to relocation within Sweden.",
+        "seniority_level": "10+ years, director-level",
+        "comp_needs": "Flag tjänstepension replicability when comp is discussed.",
+        "values_notes": "GWWC pledge, HIP IAP completed, effective giving advocacy.",
+    }
 
 
 @pytest.fixture(scope="session")
-def rubric() -> dict:
-    with open(f"{REPO_ROOT}/rubric.yaml") as f:
-        return yaml.safe_load(f)
+def weights_row() -> dict:
+    return {
+        "user_id": "u-test",
+        "cause_mission_fit": 0.25,
+        "role_function_fit": 0.25,
+        "location_compatibility": 0.15,
+        "seniority_match": 0.10,
+        "comp_adequacy": 0.10,
+        "values_alignment": 0.10,
+        "skill_growth": 0.05,
+        "location_rule": {
+            "accept_fully_remote": True,
+            "accept_sweden_hybrid": True,
+            "accept_onsite_locations": ["Sundsvall"],
+        },
+        "seniority_rule": {"min_years_experience": 5},
+        "insert_threshold": 0.75,
+        "near_miss_floor": 0.65,
+    }
 
+
+@pytest.fixture(scope="session")
+def profile(profile_row: dict, weights_row: dict) -> dict:
+    return _build_profile(profile_row, weights_row)
+
+
+@pytest.fixture(scope="session")
+def rubric(weights_row: dict) -> dict:
+    return _build_rubric(weights_row)
+
+
+# ---------------------------------------------------------------------------
+# Posting / Tier 1 score stub factories
+# ---------------------------------------------------------------------------
 
 def make_posting(**kwargs) -> RawPosting:
     defaults = dict(

@@ -110,6 +110,7 @@ def parse_rows(rows: list[RawRow]) -> list[RawPosting]:
             location=location,
             seniority=title,  # lets gate's junior/graduate/intern keyword checks scan the role name
             comp=comp,
+            cause_area=cause_area or None,
             deadline=deadline,
             raw_text=raw_text,
         ))

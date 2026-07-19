@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 from src import enrich as enrich_mod
 from src import pipeline
+from src import quota_store
 from src import scoring as scoring_mod
 from src.dedup import canonical_url
 from src.sources import eightyk, iap, probablygood
@@ -204,3 +207,104 @@ def test_dry_run_writes_nothing(fake_client, monkeypatch):
     assert log.user_results[0].inserted == 1  # still counted
     assert fake_client.table("matches").rows == []
     assert fake_client.table("seen").rows == []
+
+
+# ---------------------------------------------------------------------------
+# only_user_id — one-off single-user run + search_quota status write-back
+# ---------------------------------------------------------------------------
+
+def test_one_off_scores_only_the_requested_user(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    _seed_user(fake_client, "u2", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/one-off", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client, only_user_id="u1")
+
+    assert [r.user_id for r in log.user_results] == ["u1"]
+    assert fetch_match_urls(fake_client, "u1") == {canonical_url(posting.url)}
+    assert fetch_match_urls(fake_client, "u2") == set()
+
+
+def test_one_off_success_writes_running_then_complete(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/quota-ok", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    calls: list[tuple[str, str]] = []
+    real_set_status = quota_store.set_status
+
+    def spy(client, user_id, status, **kwargs):
+        calls.append((user_id, status))
+        return real_set_status(client, user_id, status, **kwargs)
+
+    monkeypatch.setattr(pipeline, "set_status", spy)
+
+    pipeline.run(_client=fake_client, only_user_id="u1")
+
+    assert calls == [("u1", "running"), ("u1", "complete")]
+    row = fake_client.table("search_quota").rows[0]
+    assert row["status"] == "complete"
+    assert row["completed_at"]
+
+
+def test_one_off_zero_matches_still_marks_complete(fake_client, monkeypatch):
+    """Zero matches written is still a successful run — status must be 'complete', not 'failed'."""
+    _seed_user(fake_client, "u1", threshold=0.99, near_miss_floor=0.99)
+    posting = make_posting(url="https://example.org/job/no-match", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.5)
+
+    log = pipeline.run(_client=fake_client, only_user_id="u1")
+
+    assert log.user_results[0].inserted == 0
+    assert fake_client.table("search_quota").rows[0]["status"] == "complete"
+
+
+def test_one_off_exception_writes_failed_and_reraises(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    _stub_sources(monkeypatch, [])
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(pipeline, "load_seen_urls", boom)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        pipeline.run(_client=fake_client, only_user_id="u1")
+
+    row = fake_client.table("search_quota").rows[0]
+    assert row["status"] == "failed"
+    assert "completed_at" not in row
+
+
+def test_one_off_user_not_found_writes_failed(fake_client):
+    with pytest.raises(RuntimeError, match="no profile"):
+        pipeline.run(_client=fake_client, only_user_id="ghost-user")
+
+    row = fake_client.table("search_quota").rows[0]
+    assert row["status"] == "failed"
+
+
+def test_daily_mode_never_touches_search_quota(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/daily", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client)  # only_user_id=None
+
+    assert fake_client.table("search_quota").rows == []
+
+
+def test_one_off_dry_run_never_touches_search_quota(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/one-off-dry", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client, only_user_id="u1", dry_run=True)
+
+    assert fake_client.table("search_quota").rows == []

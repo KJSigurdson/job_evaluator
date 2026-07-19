@@ -5,13 +5,11 @@ Usage:
 
 Fetches the first 3 postings from ProbablyGood (no extra env vars needed),
 runs Tier 1 scoring on all three, then runs Tier 2 enrichment on the
-highest scorer.  Loads secrets from .env automatically.
+highest scorer, using the first Supabase-registered user (profile + weights).
+Loads secrets from .env automatically.
 """
 from __future__ import annotations
 
-from pathlib import Path
-
-import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,18 +18,19 @@ from src.enrich import enrich  # noqa: E402  (must follow load_dotenv)
 from src.gate import check as gate_check  # noqa: E402
 from src.scoring import score  # noqa: E402
 from src.sources.probablygood import fetch_raw_hits, parse_hits  # noqa: E402
-
-_ROOT = Path(__file__).parent.parent
-
-
-def _load_yaml(name: str) -> dict:
-    with open(_ROOT / name) as f:
-        return yaml.safe_load(f)
+from src.supabase_client import get_client  # noqa: E402
+from src.user_store import fetch_users  # noqa: E402
 
 
 def main() -> None:
-    profile = _load_yaml("profile.yaml")
-    rubric  = _load_yaml("rubric.yaml")
+    users = fetch_users(get_client())
+    if not users:
+        print("No Supabase user has both a profile and scoring_weights row — nothing to smoke-test.")
+        return
+
+    user = users[0]
+    profile, rubric = user.profile, user.rubric
+    print(f"Using user {user.user_id}\n")
 
     print("Fetching ProbablyGood postings …")
     raw_hits = fetch_raw_hits()

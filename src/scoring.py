@@ -29,7 +29,7 @@ class ScoringError(Exception):
 # ---------------------------------------------------------------------------
 
 def weighted_sum(scores: Tier1ScoreOutput, rubric: dict) -> float:
-    """Compute the weighted aggregate fit score. Weights read from rubric.yaml dimensions."""
+    """Compute the weighted aggregate fit score. Weights read from rubric["dimensions"]."""
     total = 0.0
     for dim, cfg in rubric["dimensions"].items():
         total += getattr(scores, dim).score * cfg["weight"]

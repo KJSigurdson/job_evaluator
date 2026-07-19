@@ -22,7 +22,7 @@ def _match_row(**kwargs) -> MatchRow:
         canonical_url=canonical_url("https://example.org/job/1"),
         date_found=date.today(),
         fit_score=0.85,
-        scores={"cause_mission_fit": 0.9, "role_function_fit": 0.8},
+        dimension_scores={"cause_mission_fit": 0.9, "role_function_fit": 0.8},
         why_fits="Strong mission alignment.",
         why_not_fits="No fundraising experience.",
         emphasize_in_cv=["BI leadership"],
@@ -46,6 +46,19 @@ def test_upsert_sets_user_id(fake_client):
     upsert_match(fake_client, "u1", _match_row())
     row = fake_client.table("matches").rows[0]
     assert row["user_id"] == "u1"
+
+
+def test_upsert_payload_uses_dimension_scores_key(fake_client):
+    upsert_match(fake_client, "u1", _match_row(dimension_scores={"cause_mission_fit": 0.42}))
+    row = fake_client.table("matches").rows[0]
+    assert row["dimension_scores"] == {"cause_mission_fit": 0.42}
+    assert "scores" not in row
+
+
+def test_upsert_includes_url(fake_client):
+    upsert_match(fake_client, "u1", _match_row())
+    row = fake_client.table("matches").rows[0]
+    assert row["url"] == "https://example.org/job/1"
 
 
 def test_upsert_re_encounter_does_not_touch_forbidden_columns(fake_client):
