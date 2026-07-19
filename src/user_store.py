@@ -16,10 +16,13 @@ from src.schemas import UserContext
 
 log = logging.getLogger(__name__)
 
-_WORK_KINDS = ("work", "education", "extracurricular")
+_WORK_KINDS = ("work", "education", "extracurricular", "publication")
 _SKILL_KINDS = ("skill", "software_skill", "language")
 
-_EXPERIENCE_HEADERS = {"work": "Work", "education": "Education", "extracurricular": "Extracurricular"}
+_EXPERIENCE_HEADERS = {
+    "work": "Work", "education": "Education", "extracurricular": "Extracurricular",
+    "publication": "Publications & Writing",
+}
 _SKILL_HEADERS = {"skill": "Skills", "software_skill": "Software", "language": "Languages"}
 
 _DIMENSIONS = (
@@ -212,10 +215,21 @@ def _format_experience_entry(row: dict) -> str:
     return f"{header} ({start}–{end})"
 
 
+def _format_publication_entry(row: dict) -> str:
+    """A publication is a point in time, not a range — venue (organization) and a
+    single date, no end_date/"Present"."""
+    title = row["title"]
+    venue = row.get("organization")
+    date = row.get("start_date")
+    header = f"{title} — {venue}" if venue else title
+    return f"{header} ({date})"
+
+
 def _render_experience_text(experiences: list[dict], achievements_by_experience: dict[str, list[dict]]) -> str | None:
-    """Render `work`/`education`/`extracurricular` experiences rows into readable text,
-    grouped under fixed headers in a fixed order, entries ordered by sort_order.
-    Returns None if the user has no rows of these kinds (triggers the free-text fallback).
+    """Render `work`/`education`/`extracurricular`/`publication` experiences rows into
+    readable text, grouped under fixed headers in a fixed order, entries ordered by
+    sort_order. Returns None if the user has no rows of these kinds (triggers the
+    free-text fallback).
     """
     by_kind: dict[str, list[dict]] = {}
     for row in experiences:
@@ -231,7 +245,8 @@ def _render_experience_text(experiences: list[dict], achievements_by_experience:
             continue
         lines = [f"{_EXPERIENCE_HEADERS[kind]}:"]
         for entry in entries:
-            lines.append(f"- {_format_experience_entry(entry)}")
+            entry_line = _format_publication_entry(entry) if kind == "publication" else _format_experience_entry(entry)
+            lines.append(f"- {entry_line}")
             for achievement in achievements_by_experience.get(entry["id"], []):
                 lines.append(f"  * {achievement['description']}")
             if entry.get("notes"):

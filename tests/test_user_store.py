@@ -359,6 +359,118 @@ def test_render_experience_text_none_for_empty_list():
     assert _render_experience_text([], {}) is None
 
 
+# ---------------------------------------------------------------------------
+# 'publication' kind — routed into the experience block, point-in-time formatting
+# ---------------------------------------------------------------------------
+
+def test_render_experience_text_includes_publications_section():
+    rows = [_experience(
+        id="p1", kind="publication", title="Scaling BI in a Multi-Country Rollout",
+        organization="Nordic Data Journal", start_date="2022-06-01", end_date=None,
+    )]
+    text = _render_experience_text(rows, {})
+    assert "Publications & Writing:" in text
+    assert "Scaling BI in a Multi-Country Rollout" in text
+    assert "Nordic Data Journal" in text
+
+
+def test_render_experience_text_publication_shows_single_date_not_range():
+    rows = [_experience(
+        id="p1", kind="publication", title="On Effective Giving",
+        organization="Substack", start_date="2023-03-15", end_date=None,
+    )]
+    text = _render_experience_text(rows, {})
+    assert "(2023-03-15)" in text
+    assert "–Present" not in text
+    assert "–None" not in text
+
+
+def test_render_experience_text_publication_section_ordered_after_others():
+    rows = [
+        _experience(id="p1", kind="publication", title="A Paper", start_date="2023-01-01"),
+        _experience(id="e1", kind="work", title="Head of BI"),
+        _experience(id="e2", kind="education", title="MSc Economics"),
+        _experience(id="e3", kind="extracurricular", title="Board member"),
+    ]
+    text = _render_experience_text(rows, {})
+    assert (
+        text.index("Work:") < text.index("Education:")
+        < text.index("Extracurricular:") < text.index("Publications & Writing:")
+    )
+
+
+def test_render_experience_text_publication_entries_ordered_by_sort_order():
+    rows = [
+        _experience(id="p1", kind="publication", title="Second Paper", start_date="2023-01-01", sort_order=1),
+        _experience(id="p2", kind="publication", title="First Paper", start_date="2022-01-01", sort_order=0),
+    ]
+    text = _render_experience_text(rows, {})
+    assert text.index("First Paper") < text.index("Second Paper")
+
+
+def test_render_experience_text_publication_nests_achievements():
+    rows = [_experience(id="p1", kind="publication", title="A Paper", start_date="2023-01-01")]
+    achievements = {"p1": [_achievement(experience_id="p1", description="Cited in 3 follow-up studies")]}
+    text = _render_experience_text(rows, achievements)
+    assert text.index("A Paper") < text.index("Cited in 3 follow-up studies")
+
+
+def test_render_experience_text_publication_includes_notes_as_summary():
+    rows = [_experience(
+        id="p1", kind="publication", title="A Paper", start_date="2023-01-01",
+        notes="Abstract: this paper examines...",
+    )]
+    text = _render_experience_text(rows, {})
+    assert "Abstract: this paper examines..." in text
+
+
+def test_render_experience_text_publication_missing_organization():
+    rows = [_experience(id="p1", kind="publication", title="Solo Blog Post", organization=None, start_date="2023-01-01")]
+    text = _render_experience_text(rows, {})
+    assert "Solo Blog Post (2023-01-01)" in text
+
+
+def test_render_experience_text_none_when_only_skill_kind_rows_publication_absent():
+    """Sanity check: publication support doesn't change the no-work-kind-rows fallback trigger."""
+    rows = [_experience(id="e1", kind="skill", title="SQL")]
+    assert _render_experience_text(rows, {}) is None
+
+
+def test_render_skills_text_excludes_publication_rows():
+    rows = [
+        _experience(id="p1", kind="publication", title="A Paper", start_date="2023-01-01"),
+        _experience(id="s1", kind="skill", title="SQL", proficiency="expert"),
+    ]
+    skills_text = _render_skills_text(rows)
+    assert "A Paper" not in skills_text
+    assert "SQL (expert)" in skills_text
+
+
+def test_build_profile_publication_only_user_gets_structured_text_not_free_text_fallback():
+    prow = _profile_row(experience="Free-text experience blob — should not appear")
+    experiences = [_experience(id="p1", kind="publication", title="A Paper", start_date="2023-01-01")]
+
+    profile = _build_profile(prow, _weights_row(), experiences=experiences)
+
+    assert "A Paper" in profile["experience_inventory"]
+    assert "Free-text experience blob" not in profile["experience_inventory"]
+
+
+def test_fetch_users_renders_publication_into_profile(fake_client):
+    fake_client.seed("profiles", [_profile_row()])
+    fake_client.seed("scoring_weights", [_weights_row()])
+    fake_client.seed("experiences", [_experience(
+        id="p1", kind="publication", title="Scaling BI",
+        organization="Nordic Data Journal", start_date="2022-06-01",
+    )])
+
+    [user] = fetch_users(fake_client)
+
+    assert "Publications & Writing:" in user.profile["experience_inventory"]
+    assert "Scaling BI" in user.profile["experience_inventory"]
+    assert "Scaling BI" not in user.profile["skills"]
+
+
 def test_render_skills_text_groups_by_kind_in_fixed_order():
     rows = [
         _experience(id="s1", kind="language", title="Swedish", proficiency="fluent", sort_order=0),
