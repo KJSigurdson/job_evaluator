@@ -9,6 +9,7 @@ skipped (logged, not fatal).
 """
 from __future__ import annotations
 
+import json
 import logging
 
 from src.schemas import UserContext
@@ -44,6 +45,35 @@ _DIMENSION_DESCRIPTIONS = {
     "values_alignment": "Org culture and mission alignment with the candidate's values.",
     "skill_growth": "Opportunity to close the candidate's acknowledged skill gaps.",
 }
+
+
+def _parse_rule(value, *, user_id=None, field=None) -> dict:
+    """Parse a scoring_weights rule column (location_rule / seniority_rule) into a dict.
+
+    These are `text` columns holding JSON — PostgREST returns them as plain strings, not
+    parsed objects. gate.py calls `.get()` on the parsed result, so an unparsed string
+    crashes with AttributeError. An empty dict is the correct permissive default: the
+    gate treats unstated constraints as a pass (see gate._check_location/_check_seniority).
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            log.warning("scoring_weights for user %s: %s is not valid JSON: %r", user_id, field, value)
+            return {}
+        if not isinstance(parsed, dict):
+            log.warning("scoring_weights for user %s: %s parsed to non-object JSON: %r", user_id, field, value)
+            return {}
+        return parsed
+    log.warning("scoring_weights for user %s: %s has unexpected type %s", user_id, field, type(value).__name__)
+    return {}
 
 
 def fetch_users(client, only_user_id: str | None = None) -> list[UserContext]:
@@ -141,6 +171,11 @@ def _build_profile(
     (currently gate-inert — see gate._check_seniority) structured rule;
     profiles.seniority_level is descriptive context.
 
+    location_rule/seniority_rule are `text` columns holding JSON — PostgREST returns
+    them as plain strings, not parsed objects — so both are run through _parse_rule()
+    before being handed to gate.py, which calls .get() on them and would otherwise
+    crash on a raw string.
+
     "experience_inventory" and "skills" prefer structured `experiences` rows when any
     exist for the relevant kind-group; otherwise they fall back to the free-text
     profiles.experience / profiles.skills columns. The fallback is per-field: a user
@@ -162,8 +197,8 @@ def _build_profile(
         "skills": skills_text if skills_text is not None else prow.get("skills"),
         "experience_inventory": experience_text if experience_text is not None else prow.get("experience"),
         "hard_constraints": {
-            "location": wrow.get("location_rule") or {},
-            "seniority": wrow.get("seniority_rule"),
+            "location": _parse_rule(wrow.get("location_rule"), user_id=wrow.get("user_id"), field="location_rule"),
+            "seniority": _parse_rule(wrow.get("seniority_rule"), user_id=wrow.get("user_id"), field="seniority_rule"),
         },
     }
 

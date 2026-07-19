@@ -1,11 +1,19 @@
 """Tests for user_store.py: profile+weights merge and dict-shape building."""
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
 
-from src.user_store import _build_profile, _build_rubric, fetch_users, _render_experience_text, _render_skills_text
+from src.user_store import (
+    _build_profile,
+    _build_rubric,
+    _parse_rule,
+    _render_experience_text,
+    _render_skills_text,
+    fetch_users,
+)
 
 
 def _profile_row(**kwargs) -> dict:
@@ -26,6 +34,8 @@ def _profile_row(**kwargs) -> dict:
 
 
 def _weights_row(**kwargs) -> dict:
+    # location_rule/seniority_rule are `text` columns in real Postgres — PostgREST
+    # returns them as JSON strings, not parsed objects. Stored as strings here to match.
     defaults = dict(
         user_id="u1",
         cause_mission_fit=0.25,
@@ -35,8 +45,8 @@ def _weights_row(**kwargs) -> dict:
         comp_adequacy=0.10,
         values_alignment=0.10,
         skill_growth=0.05,
-        location_rule={"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []},
-        seniority_rule={"min_years_experience": 5},
+        location_rule=json.dumps({"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []}),
+        seniority_rule=json.dumps({"min_years_experience": 5}),
         insert_threshold=0.75,
         near_miss_floor=0.65,
     )
@@ -134,8 +144,10 @@ def test_build_profile_uses_weights_row_for_hard_constraints():
     wrow = _weights_row()
     profile = _build_profile(prow, wrow)
 
-    assert profile["hard_constraints"]["location"] == wrow["location_rule"]
-    assert profile["hard_constraints"]["seniority"] == wrow["seniority_rule"]
+    # location_rule/seniority_rule are stored as JSON strings (real PostgREST shape);
+    # _build_profile must parse them into dicts before gate.py ever sees them.
+    assert profile["hard_constraints"]["location"] == json.loads(wrow["location_rule"])
+    assert profile["hard_constraints"]["seniority"] == json.loads(wrow["seniority_rule"])
     # descriptive field carried through separately for LLM context, untouched
     assert profile["location_constraints"] == "descriptive text, not gate-shaped"
 
@@ -168,6 +180,77 @@ def test_build_rubric_warns_when_weights_dont_sum_to_one(caplog):
     with caplog.at_level(logging.WARNING):
         _build_rubric(wrow)
     assert "sum to" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# _parse_rule — location_rule/seniority_rule are `text` columns holding JSON
+# ---------------------------------------------------------------------------
+
+def test_parse_rule_valid_json_object_string():
+    assert _parse_rule('{"accept_fully_remote": true}') == {"accept_fully_remote": True}
+
+
+def test_parse_rule_none_returns_empty_dict():
+    assert _parse_rule(None) == {}
+
+
+def test_parse_rule_empty_string_returns_empty_dict():
+    assert _parse_rule("") == {}
+
+
+def test_parse_rule_whitespace_only_string_returns_empty_dict():
+    assert _parse_rule("   ") == {}
+
+
+def test_parse_rule_null_literal_string_returns_empty_dict():
+    assert _parse_rule("null") == {}
+
+
+def test_parse_rule_dict_passthrough():
+    d = {"min_years_experience": 5}
+    assert _parse_rule(d) is d
+
+
+def test_parse_rule_malformed_json_returns_empty_dict_and_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        result = _parse_rule("{not valid json", user_id="u1", field="location_rule")
+    assert result == {}
+    assert "u1" in caplog.text
+    assert "location_rule" in caplog.text
+
+
+def test_parse_rule_non_object_json_returns_empty_dict_and_warns(caplog):
+    with caplog.at_level(logging.WARNING):
+        result = _parse_rule("[1, 2, 3]", user_id="u1", field="seniority_rule")
+    assert result == {}
+    assert "u1" in caplog.text
+    assert "seniority_rule" in caplog.text
+
+
+def test_build_profile_parses_json_string_rules_end_to_end():
+    """The exact bug: real PostgREST returns text columns as strings, not dicts.
+    gate.py calls .get() on hard_constraints values, so an unparsed string crashes it —
+    this asserts _build_profile hands gate.py a dict either way."""
+    prow = _profile_row()
+    wrow = _weights_row(
+        location_rule='{"accept_fully_remote": true, "accept_onsite_locations": ["Sundsvall"]}',
+        seniority_rule='{"min_years_experience": 5}',
+    )
+    profile = _build_profile(prow, wrow)
+
+    assert isinstance(profile["hard_constraints"]["location"], dict)
+    assert isinstance(profile["hard_constraints"]["seniority"], dict)
+    assert profile["hard_constraints"]["location"]["accept_fully_remote"] is True
+    assert profile["hard_constraints"]["seniority"]["min_years_experience"] == 5
+    # gate.py calls .get() on this — must not raise
+    profile["hard_constraints"]["location"].get("accept_fully_remote")
+
+
+def test_build_profile_malformed_rule_string_degrades_to_permissive_empty_dict():
+    prow = _profile_row()
+    wrow = _weights_row(location_rule="{not valid json")
+    profile = _build_profile(prow, wrow)
+    assert profile["hard_constraints"]["location"] == {}
 
 
 # ---------------------------------------------------------------------------

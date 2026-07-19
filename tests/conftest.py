@@ -1,6 +1,8 @@
 """Shared fixtures and stub factory helpers."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.schemas import DimensionScore, RawPosting, Tier1ScoreOutput
@@ -128,12 +130,15 @@ def weights_row() -> dict:
         "comp_adequacy": 0.10,
         "values_alignment": 0.10,
         "skill_growth": 0.05,
-        "location_rule": {
+        # location_rule/seniority_rule are `text` columns in real Postgres — PostgREST
+        # returns them as JSON strings, not parsed objects. Stored as strings here to
+        # match that and exercise user_store._parse_rule end-to-end.
+        "location_rule": json.dumps({
             "accept_fully_remote": True,
             "accept_sweden_hybrid": True,
             "accept_onsite_locations": ["Sundsvall"],
-        },
-        "seniority_rule": {"min_years_experience": 5},
+        }),
+        "seniority_rule": json.dumps({"min_years_experience": 5}),
         "insert_threshold": 0.75,
         "near_miss_floor": 0.65,
     }

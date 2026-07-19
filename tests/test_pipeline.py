@@ -2,6 +2,7 @@
 Supabase client, stubbed sources, and monkeypatched LLM calls (no real network/API)."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -17,13 +18,17 @@ from src.schemas import Tier2EnrichmentOutput
 
 
 def _weights_row(user_id: str, *, threshold: float, near_miss_floor: float = 0.6) -> dict:
+    # location_rule/seniority_rule are `text` columns in real Postgres — PostgREST
+    # returns them as JSON strings, not parsed objects. Stored as strings here so the
+    # gate.check() call in these integration tests exercises the real end-to-end path
+    # (user_store._parse_rule -> gate.py), the same path that crashed on live data.
     return {
         "user_id": user_id,
         "cause_mission_fit": 1 / 7, "role_function_fit": 1 / 7,
         "location_compatibility": 1 / 7, "seniority_match": 1 / 7,
         "comp_adequacy": 1 / 7, "values_alignment": 1 / 7, "skill_growth": 1 / 7,
-        "location_rule": {"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []},
-        "seniority_rule": {"min_years_experience": 5},
+        "location_rule": json.dumps({"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []}),
+        "seniority_rule": json.dumps({"min_years_experience": 5}),
         "insert_threshold": threshold,
         "near_miss_floor": near_miss_floor,
     }
