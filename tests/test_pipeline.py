@@ -197,6 +197,80 @@ def test_limit_caps_shared_pool(fake_client, monkeypatch):
     assert log.user_results[0].new_after_dedup == 2
 
 
+class _ReverseRandom:
+    """Deterministic stand-in for random.Random — reverses instead of shuffling, so
+    tests can assert the pool was reordered before --limit is applied without relying
+    on a real (unpredictable) shuffle outcome."""
+    def __init__(self, seed):
+        pass
+
+    def shuffle(self, lst):
+        lst.reverse()
+
+
+class _SpyRandom:
+    """Records whether .shuffle() was ever called, without changing list order."""
+    calls: list = []
+
+    def __init__(self, seed):
+        pass
+
+    def shuffle(self, lst):
+        _SpyRandom.calls.append(True)
+
+
+def test_limit_draws_from_multiple_sources_not_just_first_scraped(fake_client, monkeypatch):
+    """Regression test: iap is scraped first and contributes far more postings than
+    --limit. Before the fix, fresh[:limit] was a positional slice of scrape order, so
+    a capped run only ever saw iap postings — 80k and probably_good were starved
+    entirely whenever iap alone exceeded the cap."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+
+    iap_postings = [
+        make_posting(url=f"https://example.org/iap/{i}", source="iap", deadline=date(2030, 1, 1))
+        for i in range(5)
+    ]
+    eightyk_postings = [make_posting(url="https://example.org/80k/0", source="80k", deadline=date(2030, 1, 1))]
+    pg_postings = [make_posting(url="https://example.org/pg/0", source="probably_good", deadline=date(2030, 1, 1))]
+
+    monkeypatch.setattr(iap, "fetch", lambda: iap_postings)
+    monkeypatch.setattr(eightyk, "fetch", lambda: eightyk_postings)
+    monkeypatch.setattr(probablygood, "fetch", lambda: pg_postings)
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setattr(pipeline.random, "Random", _ReverseRandom)
+
+    log = pipeline.run(_client=fake_client, limit=2)
+
+    assert log.counts.shared_pool_size == 2
+    inserted_sources = {r["source"] for r in fake_client.table("matches").rows}
+    assert len(inserted_sources) > 1
+    assert inserted_sources != {"iap"}
+
+
+def test_no_shuffle_when_limit_is_none(fake_client, monkeypatch):
+    """An uncapped run must stay in natural scrape order — the shuffle only exists to
+    make --limit fair across sources, and must not run otherwise."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+
+    iap_posting = make_posting(url="https://example.org/iap/0", source="iap", deadline=date(2030, 1, 1))
+    eightyk_posting = make_posting(url="https://example.org/80k/0", source="80k", deadline=date(2030, 1, 1))
+    pg_posting = make_posting(url="https://example.org/pg/0", source="probably_good", deadline=date(2030, 1, 1))
+
+    monkeypatch.setattr(iap, "fetch", lambda: [iap_posting])
+    monkeypatch.setattr(eightyk, "fetch", lambda: [eightyk_posting])
+    monkeypatch.setattr(probablygood, "fetch", lambda: [pg_posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    _SpyRandom.calls = []
+    monkeypatch.setattr(pipeline.random, "Random", _SpyRandom)
+
+    pipeline.run(_client=fake_client)  # limit=None
+
+    assert _SpyRandom.calls == []
+    inserted_sources_in_order = [r["source"] for r in fake_client.table("matches").rows]
+    assert inserted_sources_in_order == ["iap", "80k", "probably_good"]
+
+
 # ---------------------------------------------------------------------------
 # dry-run does not write seen/matches
 # ---------------------------------------------------------------------------

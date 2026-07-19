@@ -10,7 +10,10 @@ Usage:
             would-be matches instead. SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY are still
             required even in dry-run, since user context comes from Supabase.
 --limit N   caps the shared postings pool after the recency/staleness filter (a single
-            global cap applied once, before the per-user loop — not per user).
+            global cap applied once, before the per-user loop — not per user). The pool
+            is shuffled (seeded on run_id) immediately before the cap is applied, so a
+            capped run draws roughly proportionally across sources instead of always
+            favoring whichever source was scraped first.
 --only-user-id ID   scopes the run to a single user (a one-off request) instead of
             every registered user. When set and not --dry-run, writes
             running → complete/failed status to `search_quota` for that user — the
@@ -35,6 +38,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import uuid
 from datetime import date, datetime, timezone
 
@@ -178,9 +182,13 @@ def run(
         )
 
         # -------------------------------------------------------------------------
-        # 3. Apply --limit — a single global cap on the shared pool, before per-user loop
+        # 3. Apply --limit — a single global cap on the shared pool, before per-user loop.
+        # Shuffle first (seeded on run_id, so a given run is reproducible for debugging)
+        # so the cap draws roughly proportionally across sources instead of always
+        # favoring whichever source was scraped first (fixed scrape order above).
         # -------------------------------------------------------------------------
         if limit is not None:
+            random.Random(run_id).shuffle(fresh)
             fresh = fresh[:limit]
             log.info("--limit %d: capped shared pool to %d posting(s)", limit, len(fresh))
 
