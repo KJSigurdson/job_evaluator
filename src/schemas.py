@@ -116,8 +116,13 @@ class MatchRow(BaseModel):
     # Enrichment text
     why_fits: str
     why_not_fits: str
-    emphasize_in_cv: list[str]
-    deemphasize: list[str]
+    # jsonb arrays. None only if genuinely absent; a returned-but-empty enrichment
+    # list is written as [] (see enrich.py — Tier2EnrichmentOutput requires these as
+    # native list[str], defensively coerced from a JSON-array-in-a-string if a model
+    # ever returns one). Left as real Python lists all the way to the upsert payload —
+    # supabase-py serialises them to jsonb automatically; no manual json.dumps here.
+    emphasize_in_cv: list[str] | None = None
+    deemphasize: list[str] | None = None
 
 
 # ---------------------------------------------------------------------------

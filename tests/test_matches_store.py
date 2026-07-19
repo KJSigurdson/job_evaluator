@@ -61,6 +61,39 @@ def test_upsert_includes_url(fake_client):
     assert row["url"] == "https://example.org/job/1"
 
 
+def test_upsert_payload_writes_real_lists_for_cv_guidance(fake_client):
+    """Regression: emphasize_in_cv/deemphasize map to jsonb columns and must be
+    written as actual Python lists, not a stringified JSON array — the client
+    serialises real lists to jsonb automatically; a string would land as raw text."""
+    upsert_match(fake_client, "u1", _match_row(
+        emphasize_in_cv=["BI leadership", "CRM ownership"],
+        deemphasize=["IT portfolio work"],
+    ))
+    row = fake_client.table("matches").rows[0]
+
+    assert row["emphasize_in_cv"] == ["BI leadership", "CRM ownership"]
+    assert isinstance(row["emphasize_in_cv"], list)
+    assert not isinstance(row["emphasize_in_cv"], str)
+
+    assert row["deemphasize"] == ["IT portfolio work"]
+    assert isinstance(row["deemphasize"], list)
+    assert not isinstance(row["deemphasize"], str)
+
+
+def test_upsert_payload_writes_empty_list_for_empty_cv_guidance(fake_client):
+    upsert_match(fake_client, "u1", _match_row(emphasize_in_cv=[], deemphasize=[]))
+    row = fake_client.table("matches").rows[0]
+    assert row["emphasize_in_cv"] == []
+    assert row["deemphasize"] == []
+
+
+def test_upsert_payload_writes_null_for_absent_cv_guidance(fake_client):
+    upsert_match(fake_client, "u1", _match_row(emphasize_in_cv=None, deemphasize=None))
+    row = fake_client.table("matches").rows[0]
+    assert row["emphasize_in_cv"] is None
+    assert row["deemphasize"] is None
+
+
 def test_upsert_re_encounter_does_not_touch_forbidden_columns(fake_client):
     """Even a direct re-upsert (bypassing the pipeline's skip-set) must never clobber
     user-owned tracking columns — MatchRow structurally has no such fields."""

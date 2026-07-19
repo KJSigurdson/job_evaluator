@@ -141,3 +141,34 @@ def test_match_row_round_trip():
     )
     assert row.fit_score == 0.85
     assert row.emphasize_in_cv == ["BI leadership"]
+    assert isinstance(row.emphasize_in_cv, list)
+    assert isinstance(row.deemphasize, list)
+
+
+def _match_row_minimal(**overrides) -> MatchRow:
+    url = "https://example.com/job/2"
+    defaults = dict(
+        title="Head of Data", org="GiveDirectly", org_summary="...", source="80k",
+        url=url, canonical_url=canonical_url(url), date_found=date.today(),
+        fit_score=0.85, dimension_scores={"cause_mission_fit": 0.9},
+        why_fits="...", why_not_fits="...",
+    )
+    defaults.update(overrides)
+    return MatchRow(**defaults)
+
+
+def test_match_row_emphasize_in_cv_defaults_to_none_when_absent():
+    row = _match_row_minimal()
+    assert row.emphasize_in_cv is None
+    assert row.deemphasize is None
+
+
+def test_match_row_accepts_empty_list_for_cv_guidance():
+    row = _match_row_minimal(emphasize_in_cv=[], deemphasize=[])
+    assert row.emphasize_in_cv == []
+    assert row.deemphasize == []
+
+
+def test_match_row_rejects_string_for_cv_guidance():
+    with pytest.raises(ValidationError):
+        _match_row_minimal(emphasize_in_cv="BI leadership, CRM ownership")

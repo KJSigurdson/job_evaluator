@@ -1,6 +1,7 @@
 """Tier 2 enrichment + CV guidance. Only called for fit_score >= threshold."""
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -13,6 +14,7 @@ from src.schemas import ScoredPosting, Tier2EnrichmentOutput
 log = logging.getLogger(__name__)
 
 _TIER2_MODEL_DEFAULT = "claude-sonnet-4-6"
+_LIST_FIELDS = ("emphasize_in_cv", "deemphasize")
 
 
 class EnrichmentError(Exception):
@@ -39,6 +41,38 @@ def enrich(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOutput:
                 f"Tier 2 failed after retry for {scored.posting.url}: {exc}"
             ) from exc
     raise EnrichmentError("unreachable")  # satisfies type checker
+
+
+# ---------------------------------------------------------------------------
+# Response parsing — pure, unit-testable without hitting the Anthropic API
+# ---------------------------------------------------------------------------
+
+def _coerce_list_field(value):
+    """emphasize_in_cv/deemphasize must end up as real list[str], not a stringified
+    JSON array. The tool schema requires a native array, but if a model ever returns
+    a JSON-array-in-a-string anyway, parse it back into a real list here rather than
+    let Tier2EnrichmentOutput validation fail (and burn the retry) over a formatting
+    quirk. Anything else (already a list, or a genuinely malformed/non-array string)
+    is passed through unchanged so normal list[str] validation raises its own clear
+    error and the standard retry-then-skip path runs.
+    """
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return value
+    return parsed if isinstance(parsed, list) else value
+
+
+def _parse_enrichment_output(tool_input: dict) -> Tier2EnrichmentOutput:
+    """Validate raw tool-use input into Tier2EnrichmentOutput, defensively coercing
+    emphasize_in_cv/deemphasize via _coerce_list_field first."""
+    normalized = dict(tool_input)
+    for field in _LIST_FIELDS:
+        if field in normalized:
+            normalized[field] = _coerce_list_field(normalized[field])
+    return Tier2EnrichmentOutput.model_validate(normalized)
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +114,6 @@ def _call_llm(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOutput:
 
     try:
         tool_input = response.content[0].input
-        return Tier2EnrichmentOutput.model_validate(tool_input)
+        return _parse_enrichment_output(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
         raise ValueError(f"Tier 2 response parse error: {exc}") from exc
