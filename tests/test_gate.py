@@ -112,3 +112,34 @@ def test_reason_none_on_pass(profile):
     result = check(make_posting(location="Remote", seniority="Senior, 8+ years"), profile)
     assert result.passed
     assert result.reason is None
+
+
+# ---------------------------------------------------------------------------
+# rejection_reason — diagnostic-only categorisation, does not affect passed/*_pass
+# ---------------------------------------------------------------------------
+
+def test_rejection_reason_location_when_only_location_fails(profile):
+    result = check(make_posting(location="London, UK (on-site)", seniority="Senior, 8+ years"), profile)
+    assert not result.location_pass
+    assert result.seniority_pass
+    assert result.rejection_reason == "location"
+
+
+def test_rejection_reason_seniority_when_only_seniority_fails(profile):
+    result = check(make_posting(location="Remote", seniority="Junior Data Analyst"), profile)
+    assert result.location_pass
+    assert not result.seniority_pass
+    assert result.rejection_reason == "seniority"
+
+
+def test_rejection_reason_hard_constraints_when_both_fail(profile):
+    result = check(make_posting(location="London, UK", seniority="Junior"), profile)
+    assert not result.location_pass
+    assert not result.seniority_pass
+    assert result.rejection_reason == "hard_constraints"
+
+
+def test_rejection_reason_none_on_pass(profile):
+    result = check(make_posting(location="Remote", seniority="Senior, 8+ years"), profile)
+    assert result.passed
+    assert result.rejection_reason is None

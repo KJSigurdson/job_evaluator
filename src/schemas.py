@@ -32,7 +32,12 @@ class HardGateResult(BaseModel):
     passed: bool
     location_pass: bool
     seniority_pass: bool
-    reason: str | None = None  # explanation when passed=False
+    reason: str | None = None  # human-readable explanation when passed=False
+    # Diagnostic-only category for aggregation (see pipeline.py's per-user gate-
+    # rejection summary log): "location" | "seniority" | "hard_constraints" (both
+    # failed) | None (passed). Purely additive — does not affect passed/location_pass/
+    # seniority_pass or any downstream scoring/insert decision.
+    rejection_reason: str | None = None
 
 
 # ---------------------------------------------------------------------------

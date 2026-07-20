@@ -30,14 +30,24 @@ def check(posting: RawPosting, profile: dict) -> HardGateResult:
         if not seniority_pass:
             parts.append(f"seniority: {posting.seniority!r} signals below threshold")
         reason = "; ".join(parts)
+        # Diagnostic-only categorisation for pipeline.py's per-user rejection-reason
+        # summary — does not feed back into passed/location_pass/seniority_pass.
+        if not location_pass and not seniority_pass:
+            rejection_reason = "hard_constraints"
+        elif not location_pass:
+            rejection_reason = "location"
+        else:
+            rejection_reason = "seniority"
     else:
         reason = None
+        rejection_reason = None
 
     return HardGateResult(
         passed=passed,
         location_pass=location_pass,
         seniority_pass=seniority_pass,
         reason=reason,
+        rejection_reason=rejection_reason,
     )
 
 

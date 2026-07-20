@@ -277,6 +277,62 @@ def test_seen_writes_dry_run_makes_no_upsert_calls(fake_client, monkeypatch):
     assert fake_client.table("seen").rows == []
 
 
+# ---------------------------------------------------------------------------
+# Gate-rejection reason diagnostics — purely additive logging, no behavior change
+# ---------------------------------------------------------------------------
+
+def test_gate_rejection_summary_logs_breakdown_by_reason(fake_client, monkeypatch, caplog):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    postings = (
+        [make_posting(url=f"https://example.org/job/loc-{i}", source="iap",
+                      location="London, UK (on-site)", seniority="Senior, 8+ years")
+         for i in range(3)]
+        + [make_posting(url=f"https://example.org/job/sen-{i}", source="iap",
+                         location="Remote", seniority="Junior Data Analyst")
+           for i in range(2)]
+        + [make_posting(url="https://example.org/job/both", source="iap",
+                         location="London, UK", seniority="Junior")]
+    )
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    with caplog.at_level("INFO"):
+        log = pipeline.run(_client=fake_client)
+
+    assert log.user_results[0].gated_out == 6
+    assert "User u1: gated_out=6 (location=3, seniority=2, hard_constraints=1)" in caplog.text
+
+
+def test_gate_rejection_summary_logged_even_when_zero(fake_client, monkeypatch, caplog):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/passes", source="iap",
+                            location="Remote", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    with caplog.at_level("INFO"):
+        pipeline.run(_client=fake_client)
+
+    assert "User u1: gated_out=0 (location=0, seniority=0, hard_constraints=0)" in caplog.text
+
+
+def test_gate_rejection_summary_does_not_affect_scoring_or_inserts(fake_client, monkeypatch):
+    """The whole point of this feature is diagnostic-only — confirm gated/scored/
+    inserted counts are identical to what they'd be without the new categorisation."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    gated = make_posting(url="https://example.org/job/gated", source="iap", location="London, UK")
+    scored = make_posting(url="https://example.org/job/scored", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [gated, scored])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client)
+
+    result = log.user_results[0]
+    assert result.gated_out == 1
+    assert result.scored == 1
+    assert result.inserted == 1
+
+
 class _ReverseRandom:
     """Deterministic stand-in for random.Random — reverses instead of shuffling, so
     tests can assert the pool was reordered before --limit is applied without relying

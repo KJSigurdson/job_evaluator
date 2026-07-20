@@ -19,6 +19,13 @@ Usage:
             running → complete/failed status to `search_quota` for that user — the
             normal multi-user daily run never touches that table.
 
+Gate-rejection diagnostics: gate.check() tags every failed posting with
+rejection_reason ("location" | "seniority" | "hard_constraints" for both). The
+per-user gate loop aggregates these into a Counter and logs one summary line per
+user, e.g. "User <id>: gated_out=790 (location=612, seniority=140,
+hard_constraints=38)". Purely additive — does not change gating logic or which
+postings get scored/inserted.
+
 Seen-table writes are batched per user (src/seen_store.py): record_verdict() only
 queues a payload in memory during the gate/Tier1/Tier2 loops; upsert_verdicts()
 flushes everything queued for a user in one chunked call after that user's Tier 2
@@ -56,6 +63,7 @@ import logging
 import os
 import random
 import uuid
+from collections import Counter
 from datetime import date, datetime, timezone
 
 from src import gate as gate_mod
@@ -232,13 +240,23 @@ def run(
 
             # -- Hard gate --
             gate_survivors: list[tuple] = []
+            gate_rejection_reasons: Counter[str] = Counter()  # diagnostic only — see summary log below
             for p in user_postings:
                 g = gate_mod.check(p, user.profile)
                 if g.passed:
                     gate_survivors.append((p, g))
                 else:
                     result.gated_out += 1
+                    gate_rejection_reasons[g.rejection_reason] += 1
                     record_verdict(pending_verdicts, seen_map, user.user_id, p.url, "gated_out", None)
+
+            log.info(
+                "User %s: gated_out=%d (location=%d, seniority=%d, hard_constraints=%d)",
+                user.user_id, result.gated_out,
+                gate_rejection_reasons["location"],
+                gate_rejection_reasons["seniority"],
+                gate_rejection_reasons["hard_constraints"],
+            )
 
             # -- Tier 1 scoring --
             insert_candidates = []
