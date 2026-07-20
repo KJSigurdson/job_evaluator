@@ -24,7 +24,6 @@ def _profile_row(**kwargs) -> dict:
         career_goals="Data leadership",
         cause_priorities=["global health"],
         location="Berlin, Germany",
-        location_constraints="Remote preferred",
         seniority_level="Senior",
         comp_needs="Market rate",
         values_notes="GWWC pledge",
@@ -45,8 +44,8 @@ def _weights_row(**kwargs) -> dict:
         comp_adequacy=0.10,
         values_alignment=0.10,
         skill_growth=0.05,
-        location_rule=json.dumps({"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []}),
-        seniority_rule=json.dumps({"min_years_experience": 5}),
+        location_rule=json.dumps({"accept_fully_remote": True, "accept_hybrid_in": [], "accept_onsite_in": []}),
+        seniority_rule=json.dumps({"accept_levels": ["mid", "senior", "director"]}),
         insert_threshold=0.75,
         near_miss_floor=0.65,
     )
@@ -140,7 +139,7 @@ def test_fetch_users_none_only_user_id_is_unaffected(fake_client):
 # ---------------------------------------------------------------------------
 
 def test_build_profile_uses_weights_row_for_hard_constraints():
-    prow = _profile_row(location_constraints="descriptive text, not gate-shaped")
+    prow = _profile_row()
     wrow = _weights_row()
     profile = _build_profile(prow, wrow)
 
@@ -148,8 +147,23 @@ def test_build_profile_uses_weights_row_for_hard_constraints():
     # _build_profile must parse them into dicts before gate.py ever sees them.
     assert profile["hard_constraints"]["location"] == json.loads(wrow["location_rule"])
     assert profile["hard_constraints"]["seniority"] == json.loads(wrow["seniority_rule"])
-    # descriptive field carried through separately for LLM context, untouched
-    assert profile["location_constraints"] == "descriptive text, not gate-shaped"
+
+
+def test_build_profile_hard_constraints_has_both_keys():
+    """seniority is a live per-user gate input again: gate._check_seniority now takes
+    profile["hard_constraints"]["seniority"] (accept_levels), mirroring location."""
+    profile = _build_profile(_profile_row(), _weights_row())
+    assert set(profile["hard_constraints"].keys()) == {"location", "seniority"}
+
+
+def test_build_profile_does_not_expose_location_constraints():
+    """profiles.location_constraints is no longer written by the frontend, and the
+    structured hard_constraints["location"] (from scoring_weights.location_rule)
+    already rides the wholesale profile dump as the LLM's location context — so this
+    free-text field is redundant and _build_profile must not read it."""
+    prow = _profile_row(location_constraints="should be ignored even if the row has it")
+    profile = _build_profile(prow, _weights_row())
+    assert "location_constraints" not in profile
 
 
 def test_build_profile_defaults_missing_location_rule_to_empty_dict():
@@ -262,17 +276,18 @@ def test_build_profile_parses_json_string_rules_end_to_end():
     this asserts _build_profile hands gate.py a dict either way."""
     prow = _profile_row()
     wrow = _weights_row(
-        location_rule='{"accept_fully_remote": true, "accept_onsite_locations": ["Sundsvall"]}',
-        seniority_rule='{"min_years_experience": 5}',
+        location_rule='{"accept_fully_remote": true, "accept_onsite_in": ["Sundsvall"]}',
+        seniority_rule='{"accept_levels": ["senior", "director"]}',
     )
     profile = _build_profile(prow, wrow)
 
     assert isinstance(profile["hard_constraints"]["location"], dict)
     assert isinstance(profile["hard_constraints"]["seniority"], dict)
     assert profile["hard_constraints"]["location"]["accept_fully_remote"] is True
-    assert profile["hard_constraints"]["seniority"]["min_years_experience"] == 5
-    # gate.py calls .get() on this — must not raise
+    assert profile["hard_constraints"]["seniority"]["accept_levels"] == ["senior", "director"]
+    # gate.py calls .get() on these — must not raise
     profile["hard_constraints"]["location"].get("accept_fully_remote")
+    profile["hard_constraints"]["seniority"].get("accept_levels")
 
 
 def test_build_profile_malformed_rule_string_degrades_to_permissive_empty_dict():

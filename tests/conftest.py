@@ -120,7 +120,6 @@ def profile_row() -> dict:
         "career_goals": "Move into an EA-aligned data leadership role.",
         "cause_priorities": ["global health and development", "EA-aligned impact"],
         "location": "Sundsvall, Sweden",
-        "location_constraints": "Prefers remote or Sweden-based hybrid; open to relocation within Sweden.",
         "seniority_level": "10+ years, director-level",
         "comp_needs": "Flag tjänstepension replicability when comp is discussed.",
         "values_notes": "GWWC pledge, HIP IAP completed, effective giving advocacy.",
@@ -143,10 +142,11 @@ def weights_row() -> dict:
         # match that and exercise user_store._parse_rule end-to-end.
         "location_rule": json.dumps({
             "accept_fully_remote": True,
-            "accept_sweden_hybrid": True,
-            "accept_onsite_locations": ["Sundsvall"],
+            "accept_hybrid_in": ["Sweden", "Sundsvall"],
+            "accept_onsite_in": ["Sundsvall"],
         }),
-        "seniority_rule": json.dumps({"min_years_experience": 5}),
+        # 10+ years, director-level candidate — doesn't want intern/junior-level roles.
+        "seniority_rule": json.dumps({"accept_levels": ["mid", "senior", "director"]}),
         "insert_threshold": 0.75,
         "near_miss_floor": 0.65,
     }

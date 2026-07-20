@@ -27,8 +27,8 @@ def _weights_row(user_id: str, *, threshold: float, near_miss_floor: float = 0.6
         "cause_mission_fit": 1 / 7, "role_function_fit": 1 / 7,
         "location_compatibility": 1 / 7, "seniority_match": 1 / 7,
         "comp_adequacy": 1 / 7, "values_alignment": 1 / 7, "skill_growth": 1 / 7,
-        "location_rule": json.dumps({"accept_fully_remote": True, "accept_sweden_hybrid": False, "accept_onsite_locations": []}),
-        "seniority_rule": json.dumps({"min_years_experience": 5}),
+        "location_rule": json.dumps({"accept_fully_remote": True, "accept_hybrid_in": [], "accept_onsite_in": []}),
+        "seniority_rule": json.dumps({"accept_levels": ["mid", "senior", "director"]}),
         "insert_threshold": threshold,
         "near_miss_floor": near_miss_floor,
     }
@@ -39,7 +39,7 @@ def _profile_row(user_id: str, *, email_on_match: bool = False) -> dict:
         "user_id": user_id,
         "experience": ["Built a BI function"], "skills": ["sql"],
         "career_goals": "Data leadership", "cause_priorities": ["global health"],
-        "location": "Remote", "location_constraints": "Remote preferred",
+        "location": "Remote",
         "seniority_level": "Senior", "comp_needs": "Market rate",
         "values_notes": "GWWC pledge", "email_on_match": email_on_match,
     }

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.gate import check
+from src.gate import _check_location, _check_seniority, _levels_in_text, _matches_region, check
 from tests.conftest import make_posting
 
 
@@ -35,11 +35,6 @@ def test_sundsvall_onsite_passes(profile):
     result = check(make_posting(location="Sundsvall, on-site"), profile)
     assert result.location_pass
 
-def test_sweden_mention_passes(profile):
-    # Generic "Sweden" mention → pass (bias toward false-positives)
-    result = check(make_posting(location="Sweden"), profile)
-    assert result.location_pass
-
 
 # ---------------------------------------------------------------------------
 # Location — fail cases
@@ -57,6 +52,82 @@ def test_us_only_fails(profile):
 def test_nairobi_fails(profile):
     result = check(make_posting(location="Nairobi, Kenya (on-site required)"), profile)
     assert not result.location_pass
+
+
+# ---------------------------------------------------------------------------
+# Per-user location constraints — _check_location / _matches_region
+# (country-agnostic: no hardcoded Sweden fallback any more — a posting must match
+# accept_fully_remote / accept_hybrid_in / accept_onsite_in, or be unstated, to pass)
+# ---------------------------------------------------------------------------
+
+def test_matches_region_word_boundary_us_does_not_match_russia():
+    assert _matches_region("moscow, russia", ["US"]) is False
+
+def test_matches_region_word_boundary_uk_does_not_match_fukuoka():
+    assert _matches_region("fukuoka, japan", ["UK"]) is False
+
+def test_matches_region_matches_standalone_token():
+    assert _matches_region("austin, us", ["US"]) is True
+
+def test_matches_region_empty_tokens_never_matches():
+    assert _matches_region("berlin, germany", []) is False
+
+def test_matches_region_skips_falsy_tokens():
+    assert _matches_region("berlin, germany", ["", None, "germany"]) is True
+
+
+def test_check_location_hybrid_region_match_passes():
+    assert _check_location(
+        "Berlin, Germany (hybrid)",
+        {"accept_fully_remote": False, "accept_hybrid_in": ["Germany"], "accept_onsite_in": []},
+    ) is True
+
+def test_check_location_hybrid_without_region_match_fails():
+    assert _check_location(
+        "Berlin, Germany (hybrid)",
+        {"accept_fully_remote": False, "accept_hybrid_in": ["France"], "accept_onsite_in": []},
+    ) is False
+
+def test_check_location_hybrid_region_match_without_hybrid_keyword_fails():
+    """Onsite region tokens alone don't satisfy the hybrid branch — "hybrid" must
+    literally appear in the posting text."""
+    assert _check_location(
+        "Berlin, Germany",
+        {"accept_fully_remote": False, "accept_hybrid_in": ["Germany"], "accept_onsite_in": []},
+    ) is False
+
+def test_check_location_onsite_region_match_passes_without_hybrid_keyword():
+    assert _check_location(
+        "On-site in Berlin",
+        {"accept_fully_remote": False, "accept_hybrid_in": [], "accept_onsite_in": ["Berlin"]},
+    ) is True
+
+def test_check_location_empty_constraint_lists_fail_stated_non_remote_posting():
+    """No remote flag, no hybrid/onsite regions selected → a stated, non-remote
+    location fails. Bias-toward-false-positives only covers UNSTATED fields, not an
+    explicit location the user has no matching accept condition for — this is the
+    replacement for the old Sweden-mention catch-all, which is now deleted."""
+    assert _check_location(
+        "Berlin, Germany",
+        {"accept_fully_remote": False, "accept_hybrid_in": [], "accept_onsite_in": []},
+    ) is False
+
+def test_check_location_empty_constraints_dict_fails_stated_posting():
+    assert _check_location("Berlin, Germany", {}) is False
+
+def test_check_location_word_boundary_us_does_not_match_russia():
+    """Regression: a US-based user's accept_onsite_in=["US"] must not false-match
+    "Russia" via raw substring containment."""
+    assert _check_location(
+        "Moscow, Russia",
+        {"accept_fully_remote": False, "accept_hybrid_in": [], "accept_onsite_in": ["US"]},
+    ) is False
+
+def test_check_location_word_boundary_us_matches_standalone_token():
+    assert _check_location(
+        "Austin, US",
+        {"accept_fully_remote": False, "accept_hybrid_in": [], "accept_onsite_in": ["US"]},
+    ) is True
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +167,89 @@ def test_graduate_fails(profile):
 def test_intern_fails(profile):
     result = check(make_posting(seniority="Internship — 6 months"), profile)
     assert not result.seniority_pass
+
+
+# ---------------------------------------------------------------------------
+# Per-user accept_levels — _check_seniority / _levels_in_text
+# ---------------------------------------------------------------------------
+
+def test_levels_in_text_maps_lead_to_senior():
+    assert _levels_in_text("Lead Data Scientist") == {"senior"}
+
+
+def test_levels_in_text_maps_principal_to_director():
+    assert _levels_in_text("Principal Engineer") == {"director"}
+
+
+def test_levels_in_text_maps_head_of_to_director():
+    assert _levels_in_text("Head of Data") == {"director"}
+
+
+def test_levels_in_text_maps_staff_to_senior():
+    assert _levels_in_text("Staff Engineer") == {"senior"}
+
+
+def test_levels_in_text_maps_vp_to_director():
+    assert _levels_in_text("VP of Engineering") == {"director"}
+
+
+def test_levels_in_text_word_boundary_lead_does_not_match_leadership():
+    assert _levels_in_text("Leadership Coach") == set()
+
+
+def test_levels_in_text_word_boundary_mid_does_not_match_amid():
+    assert _levels_in_text("Working amid uncertainty") == set()
+
+
+def test_levels_in_text_word_boundary_sr_matches_standalone_token():
+    assert _levels_in_text("Sr Data Analyst") == {"senior"}
+
+
+def test_levels_in_text_matches_mid_level_phrase():
+    assert _levels_in_text("Mid-Level Analyst") == {"mid"}
+
+
+def test_levels_in_text_can_match_multiple_buckets():
+    assert _levels_in_text("Senior Director of Data") == {"senior", "director"}
+
+
+def test_levels_in_text_unmappable_text_returns_empty_set():
+    assert _levels_in_text("Data Analyst") == set()
+
+
+def test_check_seniority_empty_accept_levels_is_unfiltered():
+    """No selection = no filter, regardless of posting text."""
+    assert _check_seniority("Junior Data Analyst", {"accept_levels": []}) is True
+    assert _check_seniority("Junior Data Analyst", {}) is True
+
+
+def test_check_seniority_unstated_posting_passes_regardless_of_accept_levels():
+    assert _check_seniority(None, {"accept_levels": ["senior", "director"]}) is True
+
+
+def test_check_seniority_unmappable_text_passes_regardless_of_accept_levels():
+    assert _check_seniority("Data Analyst", {"accept_levels": ["senior", "director"]}) is True
+
+
+def test_check_seniority_passes_when_matched_level_in_accept_levels():
+    assert _check_seniority("Senior Data Analyst", {"accept_levels": ["senior", "director"]}) is True
+
+
+def test_check_seniority_fails_when_matched_level_not_in_accept_levels():
+    assert _check_seniority("Junior Data Analyst", {"accept_levels": ["senior", "director"]}) is False
+
+
+def test_check_seniority_passes_when_any_matched_level_in_accept_levels():
+    """A posting matching multiple buckets passes if ANY matched bucket is accepted."""
+    assert _check_seniority("Senior Director of Data", {"accept_levels": ["mid"]}) is False
+    assert _check_seniority("Senior Director of Data", {"accept_levels": ["director"]}) is True
+
+
+def test_check_seniority_user_who_only_wants_entry_level_rejects_senior_roles():
+    """Personalization cuts both ways — a user who only selected intern/junior
+    should be gated OUT of senior/director postings, unlike the old fail-list gate
+    which let everything through except its hardcoded junior/intern keywords."""
+    assert _check_seniority("Senior Data Analyst, 7+ years", {"accept_levels": ["intern", "junior"]}) is False
 
 
 # ---------------------------------------------------------------------------

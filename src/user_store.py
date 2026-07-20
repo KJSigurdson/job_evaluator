@@ -56,7 +56,7 @@ def _parse_rule(value, *, user_id=None, field=None) -> dict:
     These are `text` columns holding JSON — PostgREST returns them as plain strings, not
     parsed objects. gate.py calls `.get()` on the parsed result, so an unparsed string
     crashes with AttributeError. An empty dict is the correct permissive default: the
-    gate treats unstated constraints as a pass (see gate._check_location/_check_seniority).
+    gate treats unstated/empty constraints as a pass (see gate._check_location/_check_seniority).
     """
     if value is None:
         return {}
@@ -168,11 +168,14 @@ def _build_profile(
     gate.py reads profile["hard_constraints"]["location"] as
     {accept_fully_remote, accept_sweden_hybrid, accept_onsite_locations} — that's the
     shape scoring_weights.location_rule holds (the gate's structured pass/fail config).
-    profiles.location_constraints is separate: free-form descriptive context (e.g.
-    "prefers remote or Sweden-based hybrid") folded into the LLM prompt, not used by
-    the gate itself. Same split for seniority: scoring_weights.seniority_rule is the
-    (currently gate-inert — see gate._check_seniority) structured rule;
-    profiles.seniority_level is descriptive context.
+    This structured rule is also the only location-preference context reaching the LLM
+    prompts: it rides the wholesale profile dict dump in scoring.py/enrich.py, so
+    profiles.location_constraints (a free-text field the frontend no longer writes) is
+    not read here — it would be redundant with hard_constraints["location"]. Same split
+    for seniority: scoring_weights.seniority_rule is the structured rule
+    gate._check_seniority reads — {accept_levels: [...]}, a subset of
+    intern/junior/mid/senior/director — while profiles.seniority_level remains
+    descriptive LLM context, not consumed by the gate.
 
     location_rule/seniority_rule are `text` columns holding JSON — PostgREST returns
     them as plain strings, not parsed objects — so both are run through _parse_rule()
@@ -195,7 +198,6 @@ def _build_profile(
 
     return {
         "location": prow.get("location"),
-        "location_constraints": prow.get("location_constraints"),
         "seniority_level": prow.get("seniority_level"),
         "comp_needs": prow.get("comp_needs"),
         "cause_priorities": prow.get("cause_priorities"),

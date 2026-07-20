@@ -30,11 +30,11 @@ python -m pytest tests/test_gate.py -v
 ```
 src/
   sources/            # one module per source; all return List[RawPosting]
-  gate.py             # hard-constraint logic (location + seniority binary pass/fail) — unchanged per-user, takes a profile dict; tags rejection_reason for diagnostics only
+  gate.py             # hard-constraint logic (location + seniority binary pass/fail), both per-user via profile["hard_constraints"]; seniority classifies posting text into intern/junior/mid/senior/director buckets against the user's accept_levels; tags rejection_reason for diagnostics only
   scoring.py          # Tier 1: cheap rubric scoring via LLM structured output — unchanged per-user, takes profile+rubric dicts
   enrich.py           # Tier 2: org summary + CV guidance (only for fit >= user's insert_threshold); defensively coerces emphasize_in_cv/deemphasize back to list[str] if a model returns a JSON-array-in-a-string
   supabase_client.py  # get_client() from SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (service-role, bypasses RLS)
-  user_store.py       # fetch_users(only_user_id=None): reads `profiles` + `scoring_weights` (+ `experiences`/`experience_achievements`, incl. `publication` kind), builds the profile/rubric dicts gate/scoring/enrich expect; parses location_rule/seniority_rule from JSON text
+  user_store.py       # fetch_users(only_user_id=None): reads `profiles` + `scoring_weights` (+ `experiences`/`experience_achievements`, incl. `publication` kind), builds the profile/rubric dicts gate/scoring/enrich expect; parses location_rule + seniority_rule (per-user accept_levels) from JSON text
   seen_store.py       # per-user seen-cache backed by the Supabase `seen` table; writes are batched (record_verdict queues in memory, upsert_verdicts flushes once per user in chunks of 500)
   matches_store.py    # query-existing-URLs + upsert-only against Supabase `matches` (never touches status/user_notes/discarded)
   quota_store.py      # set_status(): running/complete/failed write-back to `search_quota` — one-off single-user runs only
@@ -52,7 +52,7 @@ tests/
 3. Shared recency filter: drop postings older than `RECENCY_DAYS`. Postings with no `posted_at` are exempt UNLESS they also have no `deadline` (e.g. IAP) — those instead get a 14-day cutoff anchored to the *earliest* `first_seen` for that URL across all users in the `seen` table (see `pipeline.py` docstring for the full reasoning)
 4. `--limit N` shuffles the fresh pool (seeded on `run_id`, reproducible per run) before slicing to N, so a capped run draws roughly proportionally across sources instead of always favoring whichever source was scraped first
 5. For EACH user: build a skip-set (their `seen` rows ∪ their existing `matches` URLs), drop already-seen postings, then:
-   - Hard-gate: binary pass/fail on location + seniority — **bias toward false-positives; when a field is unstated, pass it through**. Every rejection is tagged with `rejection_reason` (`location` / `seniority` / `hard_constraints` for both) — diagnostic only, does not change pass/fail. Aggregated into a `Counter` and logged as one summary line per user after the gate loop.
+   - Hard-gate: binary pass/fail on location + seniority, both driven by that user's `scoring_weights.location_rule`/`seniority_rule` — **bias toward false-positives; when a field is unstated, or a posting's seniority text doesn't map to any known level, pass it through**. Every rejection is tagged with `rejection_reason` (`location` / `seniority` / `hard_constraints` for both) — diagnostic only, does not change pass/fail. Aggregated into a `Counter` and logged as one summary line per user after the gate loop.
    - Tier 1 scoring: 7 soft dimensions (0–1 each), weighted by that user's `scoring_weights`, → fit %
    - Roles ≥ user's `insert_threshold` → Tier 2 enrichment → upsert into `matches`
    - Roles between `near_miss_floor` and `insert_threshold` → queued for `seen` as `below_threshold` (not inserted)
