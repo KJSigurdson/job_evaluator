@@ -199,6 +199,84 @@ def test_limit_caps_shared_pool(fake_client, monkeypatch):
     assert log.user_results[0].new_after_dedup == 2
 
 
+# ---------------------------------------------------------------------------
+# Seen-table writes are batched per user, not per posting
+# ---------------------------------------------------------------------------
+
+def test_seen_writes_batched_not_per_posting(fake_client, monkeypatch):
+    """Regression for the workflow timeout: 50 gated-out postings for one user must
+    produce ONE seen upsert() call, not 50 sequential round-trips."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    postings = [
+        # London on-site fails the hard gate — cheap way to generate many gated_out
+        # verdicts without needing 50 distinct LLM stub responses.
+        make_posting(url=f"https://example.org/job/{i}", source="iap", location="London, UK (on-site)")
+        for i in range(50)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client)
+
+    assert log.user_results[0].gated_out == 50
+    assert len(fake_client.table("seen").upsert_calls) == 1
+    assert len(fake_client.table("seen").upsert_calls[0]) == 50
+    assert len(fake_client.table("seen").rows) == 50
+
+
+def test_seen_writes_batched_across_gate_and_scoring_verdicts(fake_client, monkeypatch):
+    """gated_out (from the gate loop) and below_threshold/inserted (from Tier1/Tier2)
+    verdicts for the same user must land in the SAME batch flush, not separate calls."""
+    _seed_user(fake_client, "u1", threshold=0.9, near_miss_floor=0.5)  # 0.8 fit -> near-miss, not inserted
+    gated = make_posting(url="https://example.org/job/gated", source="iap", location="London, UK (on-site)")
+    scored = make_posting(url="https://example.org/job/scored", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [gated, scored])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client)
+
+    assert log.user_results[0].gated_out == 1
+    assert log.user_results[0].near_misses == 1
+    assert len(fake_client.table("seen").upsert_calls) == 1
+    assert len(fake_client.table("seen").upsert_calls[0]) == 2
+    verdicts = {r["canonical_url"]: r["verdict"] for r in fake_client.table("seen").rows}
+    assert verdicts[canonical_url(gated.url)] == "gated_out"
+    assert verdicts[canonical_url(scored.url)] == "below_threshold"
+
+
+def test_seen_writes_batched_separately_per_user(fake_client, monkeypatch):
+    """Each user's batch is independent — one upsert call per user, not merged."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    _seed_user(fake_client, "u2", threshold=0.5)
+    postings = [
+        make_posting(url=f"https://example.org/job/{i}", source="iap", location="London, UK (on-site)")
+        for i in range(10)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client)
+
+    assert len(fake_client.table("seen").upsert_calls) == 2
+    assert all(len(call) == 10 for call in fake_client.table("seen").upsert_calls)
+
+
+def test_seen_writes_dry_run_makes_no_upsert_calls(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    postings = [
+        make_posting(url=f"https://example.org/job/{i}", source="iap", location="London, UK (on-site)")
+        for i in range(5)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client, dry_run=True)
+
+    assert log.user_results[0].gated_out == 5
+    assert fake_client.table("seen").upsert_calls == []
+    assert fake_client.table("seen").rows == []
+
+
 class _ReverseRandom:
     """Deterministic stand-in for random.Random — reverses instead of shuffling, so
     tests can assert the pool was reordered before --limit is applied without relying

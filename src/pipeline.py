@@ -19,6 +19,13 @@ Usage:
             running → complete/failed status to `search_quota` for that user — the
             normal multi-user daily run never touches that table.
 
+Seen-table writes are batched per user (src/seen_store.py): record_verdict() only
+queues a payload in memory during the gate/Tier1/Tier2 loops; upsert_verdicts()
+flushes everything queued for a user in one chunked call after that user's Tier 2
+loop finishes, instead of one Supabase round-trip per posting. With an uncapped
+shared pool (thousands of postings) across several users, per-posting writes were
+the dominant cost and blew the workflow's time budget.
+
 Match-digest email (src/notify.py):
     At the end of each user's iteration, if profile["email_on_match"] is true and at
     least one match was inserted THIS run (not pre-existing ones filtered out by the
@@ -67,7 +74,7 @@ from src.schemas import (
     UserRunResult,
 )
 from src.scoring import ScoringError
-from src.seen_store import fetch_global_first_seen, load_seen_urls, record_verdict
+from src.seen_store import fetch_global_first_seen, load_seen_urls, record_verdict, upsert_verdicts
 from src.sources import eightyk, iap, probablygood
 from src.supabase_client import get_client
 from src.user_store import fetch_users
@@ -218,6 +225,7 @@ def run(
             user_postings = [p for p in fresh if canonical_url(p.url) not in skip_set]
             result = UserRunResult(user_id=user.user_id, new_after_dedup=len(user_postings))
             new_matches: list[dict] = []  # matches actually inserted THIS run, for the opt-in digest email
+            pending_verdicts: list[dict] = []  # queued seen-verdict payloads; flushed once below, not per posting
 
             threshold     = user.rubric["threshold"]
             near_miss_min = user.rubric["near_miss_min"]
@@ -230,7 +238,7 @@ def run(
                     gate_survivors.append((p, g))
                 else:
                     result.gated_out += 1
-                    record_verdict(client, seen_map, user.user_id, p.url, "gated_out", None, dry_run=dry_run)
+                    record_verdict(pending_verdicts, seen_map, user.user_id, p.url, "gated_out", None)
 
             # -- Tier 1 scoring --
             insert_candidates = []
@@ -249,13 +257,13 @@ def run(
                 elif scored.fit_score >= near_miss_min:
                     result.near_misses += 1
                     record_verdict(
-                        client, seen_map, user.user_id, posting.url,
-                        "below_threshold", scored.fit_score, dry_run=dry_run,
+                        pending_verdicts, seen_map, user.user_id, posting.url,
+                        "below_threshold", scored.fit_score,
                     )
                 else:
                     record_verdict(
-                        client, seen_map, user.user_id, posting.url,
-                        "below_threshold", scored.fit_score, dry_run=dry_run,
+                        pending_verdicts, seen_map, user.user_id, posting.url,
+                        "below_threshold", scored.fit_score,
                     )
 
             # -- Tier 2 enrichment + matches upsert --
@@ -294,8 +302,8 @@ def run(
 
                 upsert_match(client, user.user_id, row, dry_run=dry_run)
                 record_verdict(
-                    client, seen_map, user.user_id, scored.posting.url,
-                    "inserted", scored.fit_score, dry_run=dry_run,
+                    pending_verdicts, seen_map, user.user_id, scored.posting.url,
+                    "inserted", scored.fit_score,
                 )
                 result.inserted += 1
                 new_matches.append({
@@ -306,6 +314,9 @@ def run(
                     "why_fits": row.why_fits,
                     "url": row.url,
                 })
+
+            # -- Flush this user's queued seen-verdicts in one (or a few chunked) batch --
+            upsert_verdicts(client, pending_verdicts, dry_run=dry_run)
 
             log.info(
                 "User %s: new=%d gated_out=%d scored=%d inserted=%d near_miss=%d parse_fail=%d",

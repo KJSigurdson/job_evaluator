@@ -22,7 +22,7 @@ class _FakeResponse:
 
 
 class _FakeQuery:
-    def __init__(self, table: "_FakeTable", op: str, payload: dict | None = None, on_conflict: str | None = None):
+    def __init__(self, table: "_FakeTable", op: str, payload=None, on_conflict: str | None = None):
         self._table = table
         self._op = op
         self._payload = payload
@@ -51,16 +51,23 @@ class _FakeQuery:
             return _FakeResponse([dict(r) for r in rows])
 
         if self._op == "upsert":
+            # Supabase's real upsert() accepts either a single dict or a list of dicts
+            # (a batch upsert in one HTTP call) — mirror both here.
             key_cols = (self._on_conflict or "").split(",")
-            match = next(
-                (r for r in self._table.rows if all(r.get(c) == self._payload.get(c) for c in key_cols)),
-                None,
-            )
-            if match is not None:
-                match.update(self._payload)
-            else:
-                self._table.rows.append(dict(self._payload))
-            return _FakeResponse([dict(self._payload)])
+            rows = self._payload if isinstance(self._payload, list) else [self._payload]
+            self._table.upsert_calls.append(rows)  # one entry per .upsert().execute() — lets tests count round-trips
+            upserted = []
+            for row_payload in rows:
+                match = next(
+                    (r for r in self._table.rows if all(r.get(c) == row_payload.get(c) for c in key_cols)),
+                    None,
+                )
+                if match is not None:
+                    match.update(row_payload)
+                else:
+                    self._table.rows.append(dict(row_payload))
+                upserted.append(dict(row_payload))
+            return _FakeResponse(upserted)
 
         raise NotImplementedError(self._op)
 
@@ -68,6 +75,7 @@ class _FakeQuery:
 class _FakeTable:
     def __init__(self):
         self.rows: list[dict] = []
+        self.upsert_calls: list[list[dict]] = []  # one entry (list of rows) per .upsert().execute() call
 
     def select(self, cols: str = "*") -> _FakeQuery:
         return _FakeQuery(self, "select").select(cols)
