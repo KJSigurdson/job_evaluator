@@ -63,7 +63,15 @@ def _stub_llms(monkeypatch, *, fit: float = 0.8):
         "cause_mission_fit", "role_function_fit", "location_compatibility",
         "seniority_match", "comp_adequacy", "values_alignment", "skill_growth",
     )}
+    # pipeline.py's Tier 1 loop runs via scoring_mod.score_many -> _acall_llm (the
+    # async path); _call_llm (sync) is stubbed too for tests that call scoring.score()
+    # directly.
     monkeypatch.setattr(scoring_mod, "_call_llm", lambda posting, profile, rubric: make_tier1(**dims))
+
+    async def _fake_acall_llm(posting, profile, rubric):
+        return make_tier1(**dims)
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
     monkeypatch.setattr(
         enrich_mod, "_call_llm",
         lambda scored, profile: Tier2EnrichmentOutput(
@@ -197,6 +205,108 @@ def test_limit_caps_shared_pool(fake_client, monkeypatch):
 
     assert log.counts.shared_pool_size == 2
     assert log.user_results[0].new_after_dedup == 2
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 scoring via the concurrent score_many path
+# ---------------------------------------------------------------------------
+
+def test_tier1_scoring_runs_via_async_score_many(fake_client, monkeypatch):
+    """gate_survivors -> score_many -> same result.scored/inserted counts as the old
+    sequential score() loop produced, exercised through a fake async _acall_llm."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    postings = [
+        make_posting(url=f"https://example.org/job/{i}", source="iap", deadline=date(2030, 1, 1))
+        for i in range(5)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client)
+
+    result = log.user_results[0]
+    assert result.scored == 5
+    assert result.inserted == 5
+    assert result.parse_failures == 0
+
+
+def test_tier1_scoring_failure_via_async_path_counts_as_parse_failure(fake_client, monkeypatch):
+    """A posting whose async LLM call keeps failing must land as a parse_failure —
+    same outcome as the old sequential ScoringError handling — without affecting
+    the other postings scored in the same batch."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    good = make_posting(url="https://example.org/job/good", source="iap", deadline=date(2030, 1, 1))
+    bad = make_posting(url="https://example.org/job/bad", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [good, bad])
+
+    dims = {dim: 0.8 for dim in (
+        "cause_mission_fit", "role_function_fit", "location_compatibility",
+        "seniority_match", "comp_adequacy", "values_alignment", "skill_growth",
+    )}
+
+    async def _flaky_acall_llm(posting, profile, rubric):  # noqa: ARG001
+        if posting.url.endswith("/job/bad"):
+            raise ValueError("simulated Tier 1 failure")
+        return make_tier1(**dims)
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _flaky_acall_llm)
+    monkeypatch.setattr(
+        enrich_mod, "_call_llm",
+        lambda scored, profile: Tier2EnrichmentOutput(
+            org_summary="A great org.", why_fits="Fits well.", why_not_fits="Minor gaps.",
+            emphasize_in_cv=["BI leadership"], deemphasize=["IT portfolio"],
+        ),
+    )
+
+    log = pipeline.run(_client=fake_client)
+
+    result = log.user_results[0]
+    assert result.scored == 1
+    assert result.inserted == 1
+    assert result.parse_failures == 1
+    assert [pf.url for pf in log.parse_failures] == [bad.url]
+
+
+def test_tier1_concurrency_env_var_is_passed_to_score_many(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/concurrency", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER1_CONCURRENCY", "3")
+
+    captured = {}
+    real_score_many = scoring_mod.score_many
+
+    async def _spy_score_many(items, profile, rubric, max_concurrency=10):
+        captured["max_concurrency"] = max_concurrency
+        return await real_score_many(items, profile, rubric, max_concurrency=max_concurrency)
+
+    monkeypatch.setattr(scoring_mod, "score_many", _spy_score_many)
+
+    pipeline.run(_client=fake_client)
+
+    assert captured["max_concurrency"] == 3
+
+
+def test_tier1_concurrency_defaults_to_ten_when_unset(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/default-concurrency", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.delenv("TIER1_CONCURRENCY", raising=False)
+
+    captured = {}
+    real_score_many = scoring_mod.score_many
+
+    async def _spy_score_many(items, profile, rubric, max_concurrency=10):
+        captured["max_concurrency"] = max_concurrency
+        return await real_score_many(items, profile, rubric, max_concurrency=max_concurrency)
+
+    monkeypatch.setattr(scoring_mod, "score_many", _spy_score_many)
+
+    pipeline.run(_client=fake_client)
+
+    assert captured["max_concurrency"] == 10
 
 
 # ---------------------------------------------------------------------------

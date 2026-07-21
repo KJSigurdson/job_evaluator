@@ -19,6 +19,14 @@ Usage:
             running → complete/failed status to `search_quota` for that user — the
             normal multi-user daily run never touches that table.
 
+Tier 1 scoring runs concurrently (src/scoring.py's score_many/ascore/_acall_llm), up
+to TIER1_CONCURRENCY postings in flight at once per user (default 10; env override).
+The actual safe ceiling depends on the Anthropic account's rate-limit tier, which
+isn't knowable from the codebase — start at 10 and watch the log for "rate-limited"
+INFO lines (score_many's rate-limit backoff firing); raise or lower based on how
+often they appear. The existing sequential score()/_call_llm()/_invoke_with_retry()
+are untouched — tests inject against them; score_many is a separate, additive path.
+
 Gate-rejection diagnostics: gate.check() tags every failed posting with
 rejection_reason ("location" | "seniority" | "hard_constraints" for both). The
 per-user gate loop aggregates these into a Counter and logs one summary line per
@@ -59,6 +67,7 @@ Staleness note (14-day cutoff for deadline-less postings):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -258,17 +267,20 @@ def run(
                 gate_rejection_reasons["hard_constraints"],
             )
 
-            # -- Tier 1 scoring --
+            # -- Tier 1 scoring — concurrent, bounded by TIER1_CONCURRENCY --
             insert_candidates = []
-            for posting, g in gate_survivors:
-                try:
-                    scored = scoring_mod.score(posting, g, user.profile, user.rubric)
-                    result.scored += 1
-                except ScoringError as exc:
-                    log.error("Tier 1 failed for user %s, %s: %s", user.user_id, posting.url, exc)
+            tier1_concurrency = int(os.environ.get("TIER1_CONCURRENCY") or 10)
+            results = asyncio.run(scoring_mod.score_many(
+                gate_survivors, user.profile, user.rubric, max_concurrency=tier1_concurrency
+            ))
+            for (posting, g), outcome in zip(gate_survivors, results):
+                if isinstance(outcome, ScoringError):
+                    log.error("Tier 1 failed for user %s, %s: %s", user.user_id, posting.url, outcome)
                     result.parse_failures += 1
                     parse_failures.append(ParseFailure(user_id=user.user_id, url=posting.url))
                     continue  # don't cache parse failures — retry next run
+                scored = outcome
+                result.scored += 1
 
                 if scored.fit_score >= threshold:
                     insert_candidates.append(scored)

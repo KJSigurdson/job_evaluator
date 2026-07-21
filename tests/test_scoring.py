@@ -1,10 +1,15 @@
 """Tests for weighted-sum scoring logic (scoring.py) and rubric.yaml integrity."""
 from __future__ import annotations
 
-import pytest
+import asyncio
 
+import httpx
+import pytest
+from anthropic import RateLimitError
+
+from src import scoring as scoring_mod
 from src.schemas import HardGateResult
-from src.scoring import ScoringError, score, weighted_sum
+from src.scoring import ScoringError, score, score_many, weighted_sum
 from tests.conftest import make_posting, make_tier1
 
 
@@ -106,3 +111,178 @@ def test_score_succeeds_on_second_attempt(profile, rubric):
     result = score(make_posting(), _PASSED_GATE, profile, rubric, _llm_fn=_fails_once)
     assert len(calls) == 2
     assert 0.0 <= result.fit_score <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# score_many — concurrent Tier 1 scoring (additive async path)
+# ---------------------------------------------------------------------------
+
+def test_score_many_preserves_input_order(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(20)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    async def _fake_acall_llm(posting, profile, rubric):  # noqa: ARG001
+        return make_tier1()
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
+
+    results = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
+    assert [r.posting.url for r in results] == [p.url for p in postings]
+
+
+def test_score_many_scoring_error_does_not_abort_others(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(5)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    async def _fake_acall_llm(posting, profile, rubric):  # noqa: ARG001
+        if posting.url.endswith("/job/2"):
+            raise ValueError("simulated LLM failure")  # exhausts _ainvoke_with_retry -> ScoringError
+        return make_tier1()
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
+
+    results = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
+
+    assert len(results) == 5
+    for i, result in enumerate(results):
+        if i == 2:
+            assert isinstance(result, ScoringError)
+        else:
+            assert not isinstance(result, ScoringError)
+
+
+def test_score_many_non_scoring_error_propagates_and_aborts(monkeypatch, profile, rubric):
+    """A non-ScoringError exception is a real bug, not an expected parse/rate-limit
+    failure — score_many must not swallow it. Patches ascore() itself (rather than
+    _acall_llm, which _ainvoke_with_retry would convert to ScoringError either way)
+    to exercise score_many's own catch-only-ScoringError contract directly."""
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(3)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    async def _fake_ascore(posting, gate, profile, rubric, _allm_fn=None):  # noqa: ARG001
+        if posting.url.endswith("/job/1"):
+            raise RuntimeError("a real bug, not a scoring failure")
+        return score(posting, gate, profile, rubric, _llm_fn=lambda p, prof: make_tier1())
+
+    monkeypatch.setattr(scoring_mod, "ascore", _fake_ascore)
+
+    with pytest.raises(RuntimeError, match="a real bug"):
+        asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
+
+
+def test_score_many_respects_max_concurrency(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(20)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    max_concurrency = 3
+    current = 0
+    peak = 0
+
+    async def _fake_acall_llm(posting, profile, rubric):  # noqa: ARG001
+        nonlocal current, peak
+        current += 1
+        peak = max(peak, current)
+        await asyncio.sleep(0.01)  # hold the slot briefly so overlaps are observable
+        current -= 1
+        return make_tier1()
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
+
+    asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=max_concurrency))
+
+    assert peak <= max_concurrency
+    assert peak > 1  # sanity: concurrency actually happened, this isn't accidentally serial
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit backoff — _acall_llm's inner retry loop, separate from the outer
+# one-shot parse/validation retry (_ainvoke_with_retry)
+# ---------------------------------------------------------------------------
+
+def _rate_limit_error() -> RateLimitError:
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=429, request=request)
+    return RateLimitError("rate limited", response=response, body=None)
+
+
+class _FakeMessages:
+    def __init__(self, responses):
+        self._responses = list(responses)
+        self.call_count = 0
+
+    async def create(self, **kwargs):  # noqa: ARG002
+        self.call_count += 1
+        item = self._responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
+
+
+class _FakeAsyncClient:
+    def __init__(self, responses):
+        self.messages = _FakeMessages(responses)
+
+
+class _FakeContentBlock:
+    def __init__(self, input_data):
+        self.input = input_data
+
+
+class _FakeResponse:
+    def __init__(self, input_data):
+        self.content = [_FakeContentBlock(input_data)]
+        self.stop_reason = "tool_use"
+
+    def model_dump_json(self):
+        return "{}"
+
+
+def _valid_tier1_response() -> _FakeResponse:
+    return _FakeResponse(make_tier1().model_dump())
+
+
+def test_acall_llm_succeeds_after_rate_limit_retries(monkeypatch, profile, rubric):
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    fake_client = _FakeAsyncClient([
+        _rate_limit_error(), _rate_limit_error(), _valid_tier1_response(),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    result = asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert result is not None
+    assert fake_client.messages.call_count == 3  # 2 rate-limited attempts + 1 success
+
+
+def test_acall_llm_persistent_rate_limit_raises(monkeypatch, profile, rubric):
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_ATTEMPTS", 3)
+
+    fake_client = _FakeAsyncClient([_rate_limit_error(), _rate_limit_error(), _rate_limit_error()])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(RateLimitError):
+        asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert fake_client.messages.call_count == 3
+
+
+def test_persistent_rate_limit_surfaces_as_scoring_error_via_ainvoke_with_retry(monkeypatch, profile, rubric):
+    """No third error path: a RateLimitError that survives _acall_llm's backoff loop
+    is just a normal exception to _ainvoke_with_retry, which retries once (calling
+    _acall_llm — and its backoff loop — again) then raises ScoringError as usual."""
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_ATTEMPTS", 2)
+
+    # 2 attempts per _acall_llm call, 2 calls total (initial + one retry) = 4 errors.
+    fake_client = _FakeAsyncClient([_rate_limit_error() for _ in range(4)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(ScoringError):
+        asyncio.run(scoring_mod.ascore(make_posting(), _PASSED_GATE, profile, rubric))
+
+    assert fake_client.messages.call_count == 4
