@@ -77,22 +77,49 @@ def upsert_verdicts(client, pending: list[dict], *, dry_run: bool = False) -> No
     per call to stay under payload/row limits. On_conflict is (user_id, canonical_url) —
     identical to the old per-item upsert, just batched.
 
-    dry_run logs the count that would have been written and skips the network call
-    entirely (no chunking, no upsert calls of any kind).
+    *pending* is deduped by (user_id, canonical_url) before chunking, keeping the
+    LAST occurrence for any duplicate key — last-write-wins, consistent with
+    record_verdict's own seen_map mutation, which already treats a later call for
+    the same URL as authoritative. Duplicates happen when the same posting appears
+    more than once in the shared scraped pool (e.g. cross-listed on two sources
+    whose URLs canonicalize identically) and gets gated/scored independently each
+    time for a user, each producing its own record_verdict() call. Postgres's bulk
+    upsert can't apply ON CONFLICT DO UPDATE twice to the same row in one statement
+    ("ON CONFLICT DO UPDATE command cannot affect row a second time"), so an
+    undeduped duplicate anywhere in a chunk would crash that whole chunk. Dedup is
+    NOT done in record_verdict() itself — it needs the true per-call count here to
+    log how many were collapsed.
+
+    dry_run logs the (deduped) count that would have been written and skips the
+    network call entirely (no chunking, no upsert calls of any kind). Dedup runs
+    before the dry_run check, so the dry-run preview reflects the same collapsed
+    count a real run would actually send.
     """
     if not pending:
         return
 
+    deduped_by_key: dict[tuple[str, str], dict] = {}
+    for payload in pending:
+        deduped_by_key[(payload["user_id"], payload["canonical_url"])] = payload
+    deduped = list(deduped_by_key.values())
+
+    duplicates_collapsed = len(pending) - len(deduped)
+    if duplicates_collapsed > 0:
+        log.info(
+            "Collapsed %d duplicate seen-verdict payload(s) (same user_id+canonical_url) before upsert",
+            duplicates_collapsed,
+        )
+
     if dry_run:
-        log.info("DRY RUN — would upsert %d seen verdict(s)", len(pending))
+        log.info("DRY RUN — would upsert %d seen verdict(s)", len(deduped))
         return
 
-    for i in range(0, len(pending), _CHUNK_SIZE):
-        chunk = pending[i:i + _CHUNK_SIZE]
+    for i in range(0, len(deduped), _CHUNK_SIZE):
+        chunk = deduped[i:i + _CHUNK_SIZE]
         client.table("seen").upsert(chunk, on_conflict="user_id,canonical_url").execute()
 
-    batches = -(-len(pending) // _CHUNK_SIZE)  # ceil division
-    log.info("Upserted %d seen verdict(s) in %d batch(es)", len(pending), batches)
+    batches = -(-len(deduped) // _CHUNK_SIZE)  # ceil division
+    log.info("Upserted %d seen verdict(s) in %d batch(es)", len(deduped), batches)
 
 
 def fetch_global_first_seen(client) -> dict[str, datetime]:

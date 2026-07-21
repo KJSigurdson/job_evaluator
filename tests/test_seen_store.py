@@ -230,6 +230,107 @@ def test_upsert_verdicts_on_conflict_is_user_id_canonical_url(fake_client):
 
 
 # ---------------------------------------------------------------------------
+# upsert_verdicts — dedupes same-(user_id, canonical_url) payloads before sending
+# (the same posting can appear twice in the shared pool, e.g. cross-listed on two
+# sources with URLs that canonicalize identically, producing two record_verdict()
+# calls for the same key within one user's pending list before a single flush)
+# ---------------------------------------------------------------------------
+
+def test_upsert_verdicts_dedupes_same_key_keeping_last(fake_client):
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.6)
+
+    assert len(pending) == 2  # record_verdict itself does NOT dedupe — that's upsert_verdicts' job
+
+    upsert_verdicts(fake_client, pending)
+
+    call = fake_client.table("seen").upsert_calls[0]
+    assert len(call) == 1
+    assert call[0]["verdict"] == "below_threshold"
+    assert call[0]["fit_score"] == pytest.approx(0.6)
+
+    rows = fake_client.table("seen").rows
+    assert len(rows) == 1
+    assert rows[0]["verdict"] == "below_threshold"
+
+
+def test_upsert_verdicts_dedupes_three_way_collision_keeping_last(fake_client):
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.5)
+    record_verdict(pending, seen_map, "u1", _URL, "inserted", 0.9)
+
+    assert len(pending) == 3
+
+    upsert_verdicts(fake_client, pending)
+
+    call = fake_client.table("seen").upsert_calls[0]
+    assert len(call) == 1
+    assert call[0]["verdict"] == "inserted"
+    assert call[0]["fit_score"] == pytest.approx(0.9)
+
+
+def test_upsert_verdicts_no_duplicates_passes_through_unchanged(fake_client):
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL2, "below_threshold", 0.6)
+
+    upsert_verdicts(fake_client, pending)
+
+    call = fake_client.table("seen").upsert_calls[0]
+    assert len(call) == 2
+    assert [row["canonical_url"] for row in call] == [canonical_url(_URL), canonical_url(_URL2)]
+    assert call[0]["verdict"] == "gated_out"
+    assert call[1]["verdict"] == "below_threshold"
+
+
+def test_upsert_verdicts_logs_collapsed_duplicate_count(fake_client, caplog):
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.6)
+    record_verdict(pending, seen_map, "u1", _URL2, "gated_out", None)
+
+    with caplog.at_level("INFO"):
+        upsert_verdicts(fake_client, pending)
+
+    assert "Collapsed 1 duplicate" in caplog.text
+
+
+def test_upsert_verdicts_no_collapse_log_when_no_duplicates(fake_client, caplog):
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL2, "below_threshold", 0.6)
+
+    with caplog.at_level("INFO"):
+        upsert_verdicts(fake_client, pending)
+
+    assert "Collapsed" not in caplog.text
+
+
+def test_upsert_verdicts_dry_run_with_duplicates_logs_deduped_count(fake_client, caplog):
+    """Proves dedup runs before the dry_run early-return: the dry-run preview count
+    must reflect the collapsed total, not the raw pending length."""
+    seen_map: dict[str, dict] = {}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)
+    record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.6)  # duplicate key
+
+    with caplog.at_level("INFO"):
+        upsert_verdicts(fake_client, pending, dry_run=True)
+
+    assert fake_client.table("seen").upsert_calls == []
+    assert fake_client.table("seen").rows == []
+    assert "would upsert 1 seen verdict" in caplog.text
+    assert "Collapsed 1 duplicate" in caplog.text
+
+
+# ---------------------------------------------------------------------------
 # first_seen preservation across separate upsert_verdicts flushes (i.e. across runs)
 # ---------------------------------------------------------------------------
 
