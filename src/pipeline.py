@@ -21,11 +21,17 @@ Usage:
 
 Tier 1 scoring runs concurrently (src/scoring.py's score_many/ascore/_acall_llm), up
 to TIER1_CONCURRENCY postings in flight at once per user (default 10; env override).
-The actual safe ceiling depends on the Anthropic account's rate-limit tier, which
-isn't knowable from the codebase — start at 10 and watch the log for "rate-limited"
-INFO lines (score_many's rate-limit backoff firing); raise or lower based on how
-often they appear. The existing sequential score()/_call_llm()/_invoke_with_retry()
-are untouched — tests inject against them; score_many is a separate, additive path.
+Tier 2 enrichment runs concurrently the same way (src/enrich.py's
+enrich_many/aenrich/_acall_llm, TIER2_CONCURRENCY, default 10) — it's the slower call
+(Sonnet, ~25s) and was the dominant wall-clock cost once Tier 1 stopped being one.
+The subsequent matches upsert / seen-verdict queuing / new_matches bookkeeping stays
+sequential: those are cheap Supabase writes, not the bottleneck. For both tiers, the
+actual safe concurrency ceiling depends on the Anthropic account's rate-limit tier,
+which isn't knowable from the codebase — start at 10 and watch the log for
+"rate-limited" INFO lines; raise or lower based on how often they appear. The
+existing sequential score()/_call_llm()/_invoke_with_retry() and
+enrich()/_call_llm() are untouched — tests inject/monkeypatch against them;
+score_many/enrich_many are separate, additive paths.
 
 Gate-rejection diagnostics: gate.check() tags every failed posting with
 rejection_reason ("location" | "seniority" | "hard_constraints" for both). The
@@ -75,10 +81,11 @@ import uuid
 from collections import Counter
 from datetime import date, datetime, timezone
 
+from src import enrich as enrich_mod
 from src import gate as gate_mod
 from src import scoring as scoring_mod
 from src.dedup import canonical_url
-from src.enrich import EnrichmentError, enrich
+from src.enrich import EnrichmentError
 from src.matches_store import fetch_existing_match_urls, upsert_match
 from src.notify import send_match_digest
 from src.quota_store import set_status
@@ -296,16 +303,20 @@ def run(
                         "below_threshold", scored.fit_score,
                     )
 
-            # -- Tier 2 enrichment + matches upsert --
-            for scored in insert_candidates:
-                try:
-                    enrichment = enrich(scored, user.profile)
-                except EnrichmentError as exc:
-                    log.error("Tier 2 failed for user %s, %s: %s", user.user_id, scored.posting.url, exc)
+            # -- Tier 2 enrichment — concurrent, bounded by TIER2_CONCURRENCY --
+            tier2_concurrency = int(os.environ.get("TIER2_CONCURRENCY") or 10)
+            enrichments = asyncio.run(enrich_mod.enrich_many(
+                insert_candidates, user.profile, max_concurrency=tier2_concurrency
+            ))
+            for scored, outcome in zip(insert_candidates, enrichments):
+                if isinstance(outcome, EnrichmentError):
+                    log.error("Tier 2 failed for user %s, %s: %s", user.user_id, scored.posting.url, outcome)
                     result.parse_failures += 1
                     parse_failures.append(ParseFailure(user_id=user.user_id, url=scored.posting.url))
                     continue  # don't cache Tier 2 failures — retry next run
+                enrichment = outcome
 
+                # -- matches upsert (sequential — cheap Supabase writes, not the bottleneck) --
                 row = MatchRow(
                     title=scored.posting.title,
                     org=scored.posting.org,

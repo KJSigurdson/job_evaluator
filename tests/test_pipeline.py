@@ -72,13 +72,22 @@ def _stub_llms(monkeypatch, *, fit: float = 0.8):
         return make_tier1(**dims)
 
     monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
-    monkeypatch.setattr(
-        enrich_mod, "_call_llm",
-        lambda scored, profile: Tier2EnrichmentOutput(
+
+    def _fake_enrichment(scored, profile):  # noqa: ARG001
+        return Tier2EnrichmentOutput(
             org_summary="A great org.", why_fits="Fits well.", why_not_fits="Minor gaps.",
             emphasize_in_cv=["BI leadership"], deemphasize=["IT portfolio"],
-        ),
-    )
+        )
+
+    # pipeline.py's Tier 2 loop runs via enrich_mod.enrich_many -> _acall_llm (the
+    # async path); _call_llm (sync) is stubbed too for tests that call enrich.enrich()
+    # directly.
+    monkeypatch.setattr(enrich_mod, "_call_llm", _fake_enrichment)
+
+    async def _fake_acall_llm_tier2(scored, profile):
+        return _fake_enrichment(scored, profile)
+
+    monkeypatch.setattr(enrich_mod, "_acall_llm", _fake_acall_llm_tier2)
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +259,14 @@ def test_tier1_scoring_failure_via_async_path_counts_as_parse_failure(fake_clien
         return make_tier1(**dims)
 
     monkeypatch.setattr(scoring_mod, "_acall_llm", _flaky_acall_llm)
-    monkeypatch.setattr(
-        enrich_mod, "_call_llm",
-        lambda scored, profile: Tier2EnrichmentOutput(
+
+    async def _fake_tier2_acall_llm(scored, profile):  # noqa: ARG001
+        return Tier2EnrichmentOutput(
             org_summary="A great org.", why_fits="Fits well.", why_not_fits="Minor gaps.",
             emphasize_in_cv=["BI leadership"], deemphasize=["IT portfolio"],
-        ),
-    )
+        )
+
+    monkeypatch.setattr(enrich_mod, "_acall_llm", _fake_tier2_acall_llm)
 
     log = pipeline.run(_client=fake_client)
 
@@ -303,6 +313,102 @@ def test_tier1_concurrency_defaults_to_ten_when_unset(fake_client, monkeypatch):
         return await real_score_many(items, profile, rubric, max_concurrency=max_concurrency)
 
     monkeypatch.setattr(scoring_mod, "score_many", _spy_score_many)
+
+    pipeline.run(_client=fake_client)
+
+    assert captured["max_concurrency"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 enrichment via the concurrent enrich_many path
+# ---------------------------------------------------------------------------
+
+def test_tier2_enrichment_runs_via_async_enrich_many(fake_client, monkeypatch):
+    """insert_candidates -> enrich_many -> same result.inserted/parse_failures counts
+    as the old sequential enrich() loop produced, exercised through a fake async
+    enrichment stub matching the pattern test_enrich.py already uses."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    postings = [
+        make_posting(url=f"https://example.org/job/{i}", source="iap", deadline=date(2030, 1, 1))
+        for i in range(5)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    log = pipeline.run(_client=fake_client)
+
+    result = log.user_results[0]
+    assert result.inserted == 5
+    assert result.parse_failures == 0
+    assert fetch_match_urls(fake_client, "u1") == {canonical_url(p.url) for p in postings}
+
+
+def test_tier2_enrichment_failure_via_async_path_counts_as_parse_failure(fake_client, monkeypatch):
+    """A posting whose async Tier 2 call keeps failing must land as a parse_failure —
+    same outcome as the old sequential EnrichmentError handling — without affecting
+    the other postings enriched in the same batch."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    good = make_posting(url="https://example.org/job/good", source="iap", deadline=date(2030, 1, 1))
+    bad = make_posting(url="https://example.org/job/bad", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [good, bad])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    async def _flaky_tier2_acall_llm(scored, profile):  # noqa: ARG001
+        if scored.posting.url.endswith("/job/bad"):
+            raise ValueError("simulated Tier 2 failure")
+        return Tier2EnrichmentOutput(
+            org_summary="A great org.", why_fits="Fits well.", why_not_fits="Minor gaps.",
+            emphasize_in_cv=["BI leadership"], deemphasize=["IT portfolio"],
+        )
+
+    monkeypatch.setattr(enrich_mod, "_acall_llm", _flaky_tier2_acall_llm)
+
+    log = pipeline.run(_client=fake_client)
+
+    result = log.user_results[0]
+    assert result.scored == 2
+    assert result.inserted == 1
+    assert result.parse_failures == 1
+    assert [pf.url for pf in log.parse_failures] == [bad.url]
+    assert fetch_match_urls(fake_client, "u1") == {canonical_url(good.url)}
+
+
+def test_tier2_concurrency_env_var_is_passed_to_enrich_many(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/tier2-concurrency", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER2_CONCURRENCY", "3")
+
+    captured = {}
+    real_enrich_many = enrich_mod.enrich_many
+
+    async def _spy_enrich_many(items, profile, max_concurrency=10):
+        captured["max_concurrency"] = max_concurrency
+        return await real_enrich_many(items, profile, max_concurrency=max_concurrency)
+
+    monkeypatch.setattr(enrich_mod, "enrich_many", _spy_enrich_many)
+
+    pipeline.run(_client=fake_client)
+
+    assert captured["max_concurrency"] == 3
+
+
+def test_tier2_concurrency_defaults_to_ten_when_unset(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/tier2-default-concurrency", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.delenv("TIER2_CONCURRENCY", raising=False)
+
+    captured = {}
+    real_enrich_many = enrich_mod.enrich_many
+
+    async def _spy_enrich_many(items, profile, max_concurrency=10):
+        captured["max_concurrency"] = max_concurrency
+        return await real_enrich_many(items, profile, max_concurrency=max_concurrency)
+
+    monkeypatch.setattr(enrich_mod, "enrich_many", _spy_enrich_many)
 
     pipeline.run(_client=fake_client)
 

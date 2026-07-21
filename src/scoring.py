@@ -89,6 +89,36 @@ def _invoke_with_retry(
 
 
 # ---------------------------------------------------------------------------
+# Response parsing — pure, unit-testable without hitting the Anthropic API
+# ---------------------------------------------------------------------------
+
+def _merge_tool_use_blocks(response, tool_name: str) -> dict:
+    """Merge every tool_use content block named *tool_name* into one dict.
+
+    A response should normally be one tool_use block with every scoring key, but a
+    model can occasionally split it across multiple tool_use blocks (one or a few
+    keys each) instead of one block with all of them. response.content[0].input
+    alone would then only see a fragment and fail validation identically on both
+    retry attempts — a silent, permanent loss. Collecting and merging every
+    matching block fixes that. Later blocks' keys win on conflict, though the same
+    key appearing in two blocks shouldn't happen in practice.
+
+    Raises IndexError if no matching block is found — same failure mode as the old
+    response.content[0].input on an empty/unexpected response, so the existing
+    (IndexError, AttributeError, ValidationError) handling downstream still catches it.
+    """
+    merged: dict = {}
+    found = False
+    for block in response.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            merged.update(block.input)
+            found = True
+    if not found:
+        raise IndexError(f"No tool_use block named {tool_name!r} found in response.content")
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Real LLM call
 # ---------------------------------------------------------------------------
 
@@ -128,7 +158,7 @@ def _call_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1ScoreOut
     )
 
     try:
-        tool_input = response.content[0].input
+        tool_input = _merge_tool_use_blocks(response, "score_posting")
         return Tier1ScoreOutput.model_validate(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
         log.error(
@@ -216,7 +246,7 @@ async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1S
             await asyncio.sleep(delay)
 
     try:
-        tool_input = response.content[0].input
+        tool_input = _merge_tool_use_blocks(response, "score_posting")
         return Tier1ScoreOutput.model_validate(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
         log.error(

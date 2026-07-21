@@ -9,7 +9,7 @@ from anthropic import RateLimitError
 
 from src import scoring as scoring_mod
 from src.schemas import HardGateResult
-from src.scoring import ScoringError, score, score_many, weighted_sum
+from src.scoring import ScoringError, _merge_tool_use_blocks, score, score_many, weighted_sum
 from tests.conftest import make_posting, make_tier1
 
 
@@ -224,13 +224,18 @@ class _FakeAsyncClient:
 
 
 class _FakeContentBlock:
-    def __init__(self, input_data):
+    def __init__(self, input_data, *, type="tool_use", name="score_posting"):  # noqa: A002
         self.input = input_data
+        self.type = type
+        self.name = name
 
 
 class _FakeResponse:
-    def __init__(self, input_data):
-        self.content = [_FakeContentBlock(input_data)]
+    """*blocks* is one _FakeContentBlock or a list of them — supports both the
+    normal single-block case and the multi-block-split regression case."""
+
+    def __init__(self, blocks):
+        self.content = blocks if isinstance(blocks, list) else [blocks]
         self.stop_reason = "tool_use"
 
     def model_dump_json(self):
@@ -238,7 +243,75 @@ class _FakeResponse:
 
 
 def _valid_tier1_response() -> _FakeResponse:
-    return _FakeResponse(make_tier1().model_dump())
+    return _FakeResponse(_FakeContentBlock(make_tier1().model_dump()))
+
+
+# ---------------------------------------------------------------------------
+# _merge_tool_use_blocks — multi-block tool-response parsing (regression: a model
+# occasionally splits one response across several tool_use blocks instead of one
+# block with every key)
+# ---------------------------------------------------------------------------
+
+def test_merge_tool_use_blocks_single_block():
+    full = make_tier1().model_dump()
+    response = _FakeResponse(_FakeContentBlock(full))
+    assert _merge_tool_use_blocks(response, "score_posting") == full
+
+
+def test_merge_tool_use_blocks_merges_multiple_blocks():
+    full = make_tier1().model_dump()
+    keys = list(full.keys())
+    # split into 7 single-key blocks, one per dimension
+    blocks = [_FakeContentBlock({k: full[k]}) for k in keys]
+    response = _FakeResponse(blocks)
+
+    merged = _merge_tool_use_blocks(response, "score_posting")
+
+    assert merged == full
+
+
+def test_merge_tool_use_blocks_ignores_non_matching_blocks():
+    full = make_tier1().model_dump()
+    other_tool_block = _FakeContentBlock({"unrelated": "data"}, name="some_other_tool")
+    response = _FakeResponse([other_tool_block, _FakeContentBlock(full)])
+
+    assert _merge_tool_use_blocks(response, "score_posting") == full
+
+
+def test_merge_tool_use_blocks_ignores_non_tool_use_blocks():
+    full = make_tier1().model_dump()
+    text_block = _FakeContentBlock("some preamble text", type="text", name=None)
+    response = _FakeResponse([text_block, _FakeContentBlock(full)])
+
+    assert _merge_tool_use_blocks(response, "score_posting") == full
+
+
+def test_merge_tool_use_blocks_raises_index_error_when_no_match():
+    response = _FakeResponse([_FakeContentBlock({"x": 1}, name="unrelated_tool")])
+    with pytest.raises(IndexError):
+        _merge_tool_use_blocks(response, "score_posting")
+
+
+def test_merge_tool_use_blocks_raises_index_error_on_empty_content():
+    response = _FakeResponse([])
+    with pytest.raises(IndexError):
+        _merge_tool_use_blocks(response, "score_posting")
+
+
+def test_acall_llm_succeeds_with_response_split_across_multiple_blocks(monkeypatch, profile, rubric):
+    """End-to-end regression for the real bug: a Tier 1 response split across seven
+    single-key tool_use blocks must still validate successfully via _acall_llm."""
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    full = make_tier1().model_dump()
+    split_blocks = [_FakeContentBlock({k: v}) for k, v in full.items()]
+    fake_client = _FakeAsyncClient([_FakeResponse(split_blocks)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    result = asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert result.model_dump() == full
 
 
 def test_acall_llm_succeeds_after_rate_limit_retries(monkeypatch, profile, rubric):
