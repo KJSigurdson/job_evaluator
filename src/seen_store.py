@@ -45,17 +45,28 @@ def record_verdict(
     """Queue the terminal verdict for *url* for this user — no network call here.
 
     Appends the upsert payload to *pending* (flush with upsert_verdicts once the
-    caller is done accumulating, typically once per user). first_seen is preserved
-    across runs exactly as before: only included in the payload the first time a URL
-    is recorded for this user (per the in-memory *seen_map*, loaded once at the start
-    of that user's loop). Mutates *seen_map* so a URL touched twice in the same run
-    still gets first_seen preserved correctly, though in practice each posting is
-    visited at most once per user per run.
+    caller is done accumulating, typically once per user). first_seen is ALWAYS
+    present in the payload — sourced from *seen_map* when the URL was already seen
+    for this user, otherwise set fresh — never conditionally omitted.
+
+    This matters because upsert_verdicts() batches every payload for a user into ONE
+    PostgREST bulk upsert call, and PostgREST builds bulk upserts from a uniform
+    column set: a row missing a key gets that column explicitly written as NULL in
+    the generated SQL, not "leave unchanged." Omitting first_seen for already-seen
+    URLs (to "preserve" it) only worked by accident when a chunk happened to be
+    entirely new-URL or entirely already-seen rows; a chunk mixing both — a
+    brand-new URL alongside an already-seen one — would NULL out the already-seen
+    row's first_seen and violate the NOT NULL constraint. Always including the
+    correct value in every payload keeps every row in a chunk uniform regardless of
+    composition, so PostgREST never NULL-fills it.
     """
     key = canonical_url(url)
-    payload = {"user_id": user_id, "canonical_url": key, "verdict": verdict, "fit_score": fit_score}
-    if key not in seen_map:
-        payload["first_seen"] = datetime.now(timezone.utc).isoformat()
+    existing = seen_map.get(key)
+    first_seen = existing.get("first_seen") if existing else datetime.now(timezone.utc).isoformat()
+    payload = {
+        "user_id": user_id, "canonical_url": key, "verdict": verdict,
+        "fit_score": fit_score, "first_seen": first_seen,
+    }
 
     pending.append(payload)
     seen_map[key] = {**seen_map.get(key, {}), **payload}

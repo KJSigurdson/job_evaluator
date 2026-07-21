@@ -65,11 +65,67 @@ def test_record_verdict_appends_payload_with_first_seen():
     assert payload["first_seen"]
 
 
-def test_record_verdict_omits_first_seen_when_already_in_seen_map():
-    seen_map = {canonical_url(_URL): {"first_seen": "2020-01-01T00:00:00+00:00"}}
+def test_record_verdict_new_url_gets_a_fresh_first_seen():
+    pending: list[dict] = []
+    record_verdict(pending, {}, "u1", _URL, "gated_out", None)
+    assert "first_seen" in pending[0]
+    assert pending[0]["first_seen"] is not None
+
+
+def test_record_verdict_already_seen_url_preserves_exact_first_seen():
+    """first_seen must ALWAYS be present in the payload — never omitted — even when
+    the URL was already seen, so every row in a batch has a uniform key set (see
+    module docstring: PostgREST NULL-fills any column missing from a row in a bulk
+    upsert; a heterogeneous batch would NULL out an already-seen row's first_seen)."""
+    original_first_seen = "2020-01-01T00:00:00+00:00"
+    seen_map = {canonical_url(_URL): {"first_seen": original_first_seen}}
     pending: list[dict] = []
     record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.5)
-    assert "first_seen" not in pending[0]
+
+    assert "first_seen" in pending[0]
+    assert pending[0]["first_seen"] == original_first_seen
+
+
+def test_record_verdict_uniform_keys_across_mixed_batch(fake_client):
+    """A pending list containing one brand-new URL and one already-seen URL must
+    produce payloads with the IDENTICAL key set — no PostgREST NULL-fill regardless
+    of chunk composition."""
+    seen_map = {canonical_url(_URL2): {"first_seen": "2020-01-01T00:00:00+00:00"}}
+    pending: list[dict] = []
+    record_verdict(pending, seen_map, "u1", _URL, "gated_out", None)        # brand-new
+    record_verdict(pending, seen_map, "u1", _URL2, "below_threshold", 0.5)  # already seen
+
+    assert len(pending) == 2
+    assert set(pending[0].keys()) == set(pending[1].keys())
+
+    upsert_verdicts(fake_client, pending)
+
+    call = fake_client.table("seen").upsert_calls[0]
+    assert len(call) == 2
+    assert set(call[0].keys()) == set(call[1].keys())
+    for row in call:
+        assert row["first_seen"] is not None
+
+
+def test_record_verdict_mixed_batch_regression_matches_production_crash():
+    """Regression for the exact production scenario: seed seen_map with one
+    pre-existing URL, then record_verdict for it AND a brand-new URL into the same
+    pending list. Both payloads must have non-null first_seen, and the already-seen
+    one must match its original value exactly (not a fresh timestamp, not NULL)."""
+    original_first_seen = "2019-06-15T12:00:00+00:00"
+    seen_map = {canonical_url(_URL): {"first_seen": original_first_seen, "verdict": "gated_out", "fit_score": None}}
+    pending: list[dict] = []
+
+    record_verdict(pending, seen_map, "u1", _URL, "below_threshold", 0.6)   # pre-existing
+    record_verdict(pending, seen_map, "u1", _URL2, "gated_out", None)       # brand-new
+
+    existing_payload = next(p for p in pending if p["canonical_url"] == canonical_url(_URL))
+    new_payload = next(p for p in pending if p["canonical_url"] == canonical_url(_URL2))
+
+    assert existing_payload["first_seen"] is not None
+    assert existing_payload["first_seen"] == original_first_seen
+    assert new_payload["first_seen"] is not None
+    assert new_payload["first_seen"] != original_first_seen
 
 
 def test_record_verdict_updates_seen_map_in_memory():
