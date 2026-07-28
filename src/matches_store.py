@@ -35,3 +35,44 @@ def upsert_match(client, user_id: str, row: MatchRow, *, dry_run: bool = False) 
 
     client.table("matches").upsert(payload, on_conflict="user_id,canonical_url").execute()
     log.info("MATCH: %s @ %s  fit=%.3f  url=%s", row.title, row.org, row.fit_score, row.url)
+
+
+def update_enrichment(
+    client,
+    user_id: str,
+    canonical_url: str,
+    *,
+    why_fits: str,
+    why_not_fits: str,
+    emphasize_in_cv: list[str],
+    deemphasize: list[str],
+    dry_run: bool = False,
+) -> None:
+    """Targeted update of ONLY why_fits/why_not_fits/emphasize_in_cv/deemphasize on an
+    existing match row, scoped to (user_id, canonical_url). Used by the one-off
+    src/reformat_match_enrichment.py migration to rewrite enrichment text on rows that
+    already exist — never fit_score/dimension_scores/org_summary/status/user_notes/
+    discarded/anything else. Uses .update() (not .upsert()): a non-matching row is a
+    no-op rather than creating a new, incomplete row the way an upsert would.
+    """
+    payload = {
+        "why_fits": why_fits,
+        "why_not_fits": why_not_fits,
+        "emphasize_in_cv": emphasize_in_cv,
+        "deemphasize": deemphasize,
+    }
+
+    if dry_run:
+        log.info(
+            "DRY RUN — would update enrichment for user=%s url=%s", user_id, canonical_url,
+        )
+        return
+
+    (
+        client.table("matches")
+        .update(payload)
+        .eq("user_id", user_id)
+        .eq("canonical_url", canonical_url)
+        .execute()
+    )
+    log.info("Updated enrichment for user=%s url=%s", user_id, canonical_url)
