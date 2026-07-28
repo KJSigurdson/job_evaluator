@@ -5,8 +5,9 @@ for pipeline.py's real run — it exists alongside enrich() and friends, which s
 exactly as they were (tests monkeypatch _call_llm directly against the sync path;
 enrich() has no _llm_fn injection parameter, so aenrich() doesn't add one either —
 tests monkeypatch _acall_llm the same way). Mirrors scoring.py's Tier 1 concurrency
-pattern, including the same RateLimitError-specific backoff loop (duplicated, not
-imported — see _merge_tool_use_blocks's docstring for why).
+pattern, including the same transient-error backoff loop (429/529/5xx, via
+_is_retryable_status; duplicated, not imported — see _merge_tool_use_blocks's
+docstring for why).
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ import os
 import random
 
 import yaml
-from anthropic import Anthropic, AsyncAnthropic, RateLimitError
+from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 from pydantic import ValidationError
 
 from src.schemas import ScoredPosting, Tier2EnrichmentOutput
@@ -194,17 +195,29 @@ def _backoff_delay(attempt: int) -> float:
     return max(0.0, base + jitter)
 
 
+def _is_retryable_status(status_code: int | None) -> bool:
+    """True for transient, retry-worthy HTTP statuses: 429 (rate limit) and any 5xx
+    (500/502/503 + 529 overloaded_error). Every other status — notably 4xx client
+    errors like 400 invalid_request/401/403/404 — is permanent for a given request
+    and must fail fast rather than burn the backoff budget. Duplicated from
+    scoring.py's identical helper — see _merge_tool_use_blocks's docstring for why
+    duplicated rather than shared."""
+    return status_code == 429 or (status_code is not None and status_code >= 500)
+
+
 async def _acall_llm(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOutput:
     """Async twin of _call_llm — identical prompt construction, tool schema, and
     parse-error handling (including the multi-block merge fix), via AsyncAnthropic
     so many enrichments can run concurrently under a semaphore (see enrich_many).
 
-    The actual API call is wrapped in its own retry loop for anthropic.RateLimitError
-    specifically — up to _RATE_LIMIT_MAX_ATTEMPTS attempts with exponential backoff +
-    jitter, same pattern as scoring.py's _acall_llm. Separate from aenrich's one-shot
-    parse/validation retry: a RateLimitError that survives all backoff attempts here
-    still just raises and lets that existing retry-then-EnrichmentError pattern
-    handle it — no third error path.
+    The actual API call is wrapped in its own retry loop for transient server-side
+    conditions — 429 (rate limit), 529 (overloaded), and 5xx generally, via
+    _is_retryable_status — up to _RATE_LIMIT_MAX_ATTEMPTS attempts with exponential
+    backoff + jitter, same pattern as scoring.py's _acall_llm. Separate from aenrich's
+    one-shot parse/validation retry: a transient error that survives all backoff
+    attempts here still just raises and lets that existing retry-then-EnrichmentError
+    pattern handle it — no third error path. A non-transient status (any other 4xx —
+    400/401/403/404) is re-raised immediately, never retried by this loop.
     """
     model = os.environ.get("TIER2_MODEL") or _TIER2_MODEL_DEFAULT
     profile_text = yaml.dump(profile, allow_unicode=True, default_flow_style=False)
@@ -255,13 +268,18 @@ async def _acall_llm(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOut
                 messages=[{"role": "user", "content": prompt}],
             )
             break
-        except RateLimitError:
+        except APIStatusError as exc:
+            # Retry only transient server-side conditions (429/529/5xx). Any other
+            # status — permanent 4xx client errors — re-raises immediately and fails
+            # fast through aenrich's one-shot retry instead of burning 5 backoffs.
+            if not _is_retryable_status(exc.status_code):
+                raise
             if attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1:
                 raise
             delay = _backoff_delay(attempt)
             log.info(
-                "Tier 2 rate-limited for %s (attempt %d/%d) — backing off %.1fs",
-                scored.posting.url, attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
+                "Tier 2 transient API error %s for %s (attempt %d/%d) — backing off %.1fs",
+                exc.status_code, scored.posting.url, attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
             )
             await asyncio.sleep(delay)
 

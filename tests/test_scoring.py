@@ -5,7 +5,7 @@ import asyncio
 
 import httpx
 import pytest
-from anthropic import RateLimitError
+from anthropic import BadRequestError, OverloadedError, RateLimitError
 
 from src import scoring as scoring_mod
 from src.schemas import HardGateResult
@@ -205,6 +205,23 @@ def _rate_limit_error() -> RateLimitError:
     return RateLimitError("rate limited", response=response, body=None)
 
 
+def _overloaded_error() -> OverloadedError:
+    """529 overloaded_error — a transient Anthropic-side capacity condition. Distinct
+    exception class from RateLimitError (429), so the pre-fix backoff loop, which only
+    caught RateLimitError, let it fall straight through to the one-shot retry."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=529, request=request)
+    return OverloadedError("overloaded", response=response, body=None)
+
+
+def _bad_request_error() -> BadRequestError:
+    """400 invalid_request — a permanent client error (e.g. credit exhaustion). Must
+    NOT be retried by the backoff loop; it should fail fast through the outer path."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=400, request=request)
+    return BadRequestError("invalid_request", response=response, body=None)
+
+
 class _FakeMessages:
     def __init__(self, responses):
         self._responses = list(responses)
@@ -359,3 +376,74 @@ def test_persistent_rate_limit_surfaces_as_scoring_error_via_ainvoke_with_retry(
         asyncio.run(scoring_mod.ascore(make_posting(), _PASSED_GATE, profile, rubric))
 
     assert fake_client.messages.call_count == 4
+
+
+# ---------------------------------------------------------------------------
+# 529 overloaded / 5xx backoff — the broadened clause must treat these exactly
+# like 429s (same 5-attempt cap, same backoff), while 4xx client errors fail fast.
+# ---------------------------------------------------------------------------
+
+def test_acall_llm_succeeds_after_overloaded_retries(monkeypatch, profile, rubric):
+    """529s are now retried by the same backoff loop as 429s — N overloaded errors
+    then a success resolves after N retries, not a permanent drop."""
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    fake_client = _FakeAsyncClient([
+        _overloaded_error(), _overloaded_error(), _valid_tier1_response(),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    result = asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert result is not None
+    assert fake_client.messages.call_count == 3  # 2 overloaded attempts + 1 success
+
+
+def test_acall_llm_persistent_overloaded_raises(monkeypatch, profile, rubric):
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_ATTEMPTS", 3)
+
+    fake_client = _FakeAsyncClient([_overloaded_error(), _overloaded_error(), _overloaded_error()])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(OverloadedError):
+        asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert fake_client.messages.call_count == 3
+
+
+def test_persistent_overloaded_surfaces_as_scoring_error(monkeypatch, profile, rubric):
+    """A 529 that survives _acall_llm's backoff is just a normal exception to
+    _ainvoke_with_retry — no new error type; it still becomes ScoringError."""
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_ATTEMPTS", 2)
+
+    # 2 attempts per _acall_llm call, 2 calls total (initial + one retry) = 4 errors.
+    fake_client = _FakeAsyncClient([_overloaded_error() for _ in range(4)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(ScoringError):
+        asyncio.run(scoring_mod.ascore(make_posting(), _PASSED_GATE, profile, rubric))
+
+    assert fake_client.messages.call_count == 4
+
+
+def test_acall_llm_bad_request_not_retried_by_backoff(monkeypatch, profile, rubric):
+    """A 400 is permanent for this request — the backoff loop must re-raise it
+    immediately (call_count == 1), never consuming further attempts. It falls through
+    to the outer one-shot-retry path exactly as any non-transient error always did."""
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    # If the 400 were (wrongly) retried, the loop would go on to consume the valid
+    # response; asserting call_count == 1 proves it fails fast on the first attempt.
+    fake_client = _FakeAsyncClient([_bad_request_error(), _valid_tier1_response()])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(BadRequestError):
+        asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    assert fake_client.messages.call_count == 1

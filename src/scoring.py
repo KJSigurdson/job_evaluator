@@ -19,7 +19,7 @@ import random
 from typing import Awaitable, Callable
 
 import yaml
-from anthropic import Anthropic, AsyncAnthropic, RateLimitError
+from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 from pydantic import ValidationError
 
 from src.schemas import HardGateResult, RawPosting, ScoredPosting, Tier1ScoreOutput
@@ -185,18 +185,28 @@ def _backoff_delay(attempt: int) -> float:
     return max(0.0, base + jitter)
 
 
+def _is_retryable_status(status_code: int | None) -> bool:
+    """True for transient, retry-worthy HTTP statuses: 429 (rate limit) and any 5xx
+    (500/502/503 + 529 overloaded_error). Every other status — notably 4xx client
+    errors like 400 invalid_request/401/403/404 — is permanent for a given request
+    and must fail fast rather than burn the backoff budget."""
+    return status_code == 429 or (status_code is not None and status_code >= 500)
+
+
 async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1ScoreOutput:
     """Async twin of _call_llm — identical prompt construction, tool schema, and
     parse-error handling, via AsyncAnthropic so many calls can run concurrently under
     a semaphore (see score_many).
 
-    The actual API call is wrapped in its own retry loop for anthropic.RateLimitError
-    specifically — up to _RATE_LIMIT_MAX_ATTEMPTS attempts with exponential backoff +
-    jitter. This is separate from _ainvoke_with_retry's one-shot parse/validation
-    retry: concurrency produces 429s the existing one-shot retry isn't designed for,
-    but a RateLimitError that survives all backoff attempts here still just raises
-    and lets _ainvoke_with_retry's existing retry-then-ScoringError pattern handle it
-    — no third error path.
+    The actual API call is wrapped in its own retry loop for transient server-side
+    conditions — 429 (rate limit), 529 (overloaded), and 5xx generally, via
+    _is_retryable_status — up to _RATE_LIMIT_MAX_ATTEMPTS attempts with exponential
+    backoff + jitter. This is separate from _ainvoke_with_retry's one-shot
+    parse/validation retry: concurrency produces 429s/529s the existing one-shot retry
+    isn't designed for, but a transient error that survives all backoff attempts here
+    still just raises and lets _ainvoke_with_retry's existing retry-then-ScoringError
+    pattern handle it — no third error path. A non-transient status (any other 4xx —
+    400/401/403/404) is re-raised immediately, never retried by this loop.
     """
     model = os.environ.get("TIER1_MODEL") or _TIER1_MODEL_DEFAULT
 
@@ -235,13 +245,18 @@ async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1S
                 messages=[{"role": "user", "content": prompt}],
             )
             break
-        except RateLimitError:
+        except APIStatusError as exc:
+            # Retry only transient server-side conditions (429/529/5xx). Any other
+            # status — permanent 4xx client errors — re-raises immediately and fails
+            # fast through _ainvoke_with_retry instead of burning 5 backoff attempts.
+            if not _is_retryable_status(exc.status_code):
+                raise
             if attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1:
                 raise
             delay = _backoff_delay(attempt)
             log.info(
-                "Tier 1 rate-limited for %s (attempt %d/%d) — backing off %.1fs",
-                posting.url, attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
+                "Tier 1 transient API error %s for %s (attempt %d/%d) — backing off %.1fs",
+                exc.status_code, posting.url, attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
             )
             await asyncio.sleep(delay)
 

@@ -11,7 +11,7 @@ import asyncio
 
 import httpx
 import pytest
-from anthropic import RateLimitError
+from anthropic import BadRequestError, OverloadedError, RateLimitError
 from pydantic import ValidationError
 
 from src import enrich as enrich_mod
@@ -159,6 +159,21 @@ def _rate_limit_error() -> RateLimitError:
     return RateLimitError("rate limited", response=response, body=None)
 
 
+def _overloaded_error() -> OverloadedError:
+    """529 overloaded_error — transient Anthropic-side capacity condition, a distinct
+    class from RateLimitError (429) that the pre-fix backoff loop didn't catch."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=529, request=request)
+    return OverloadedError("overloaded", response=response, body=None)
+
+
+def _bad_request_error() -> BadRequestError:
+    """400 invalid_request — permanent; must fail fast, not retry through the loop."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(status_code=400, request=request)
+    return BadRequestError("invalid_request", response=response, body=None)
+
+
 # ---------------------------------------------------------------------------
 # _merge_tool_use_blocks — multi-block tool-response parsing (regression: a model
 # occasionally splits one response across several tool_use blocks instead of one
@@ -242,6 +257,54 @@ def test_acall_llm_succeeds_after_rate_limit_retry(monkeypatch):
 
     assert result is not None
     assert fake_client.messages.call_count == 2
+
+
+def test_acall_llm_succeeds_after_overloaded_retries(monkeypatch):
+    """529s are now retried by the same backoff loop as 429s."""
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    fake_client = _FakeAsyncClient([
+        _overloaded_error(), _overloaded_error(), _FakeResponse(_FakeContentBlock(_tool_input())),
+    ])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    result = asyncio.run(enrich_mod._acall_llm(_make_scored(), {}))
+
+    assert result is not None
+    assert fake_client.messages.call_count == 3  # 2 overloaded + 1 success
+
+
+def test_persistent_overloaded_surfaces_as_enrichment_error(monkeypatch):
+    """A 529 that survives _acall_llm's backoff is just a normal exception to
+    aenrich's one-shot retry — no new error type; it still becomes EnrichmentError."""
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_MAX_ATTEMPTS", 2)
+
+    # 2 attempts per _acall_llm call, 2 calls total (initial + one retry) = 4 errors.
+    fake_client = _FakeAsyncClient([_overloaded_error() for _ in range(4)])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(EnrichmentError):
+        asyncio.run(enrich_mod.aenrich(_make_scored(), {}))
+
+    assert fake_client.messages.call_count == 4
+
+
+def test_acall_llm_bad_request_not_retried_by_backoff(monkeypatch):
+    """A 400 is permanent — the backoff loop re-raises it on the first attempt
+    (call_count == 1), never consuming further attempts or the valid response."""
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(enrich_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+
+    fake_client = _FakeAsyncClient([_bad_request_error(), _FakeResponse(_FakeContentBlock(_tool_input()))])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    with pytest.raises(BadRequestError):
+        asyncio.run(enrich_mod._acall_llm(_make_scored(), {}))
+
+    assert fake_client.messages.call_count == 1
 
 
 # ---------------------------------------------------------------------------
