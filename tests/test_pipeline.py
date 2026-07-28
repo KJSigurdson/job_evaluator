@@ -865,3 +865,99 @@ def test_email_digest_failure_does_not_interrupt_other_users(fake_client, monkey
     assert results["u1"].inserted == 1
     assert results["u2"].inserted == 1
     assert calls == ["u1", "u2"]
+
+
+# ---------------------------------------------------------------------------
+# Run-history telemetry (run_store) — additive, failure-isolated from the run
+# ---------------------------------------------------------------------------
+
+def test_run_history_writes_complete_parent_and_child_rows(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/hist", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client)
+
+    parents = fake_client.table("pipeline_runs").rows
+    assert len(parents) == 1
+    assert parents[0]["status"] == "complete"
+    assert parents[0]["user_count"] == 1
+    assert parents[0]["total_inserted"] == 1
+    assert parents[0]["scraped"] == 1
+
+    children = fake_client.table("pipeline_run_users").rows
+    assert len(children) == 1
+    assert children[0]["user_id"] == "u1"
+    assert children[0]["inserted"] == 1
+    assert children[0]["run_id"] == parents[0]["run_id"]
+
+
+def test_run_history_dry_run_writes_nothing(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/hist-dry", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client, dry_run=True)
+
+    assert fake_client.table("pipeline_runs").rows == []
+    assert fake_client.table("pipeline_run_users").rows == []
+
+
+def test_run_wide_crash_still_writes_failed_parent_row(fake_client, monkeypatch):
+    """A run-wide exception (here: fetch_users blows up after the run row is opened)
+    must re-raise AND leave a visible 'failed' parent row, not no row."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+
+    def boom(*a, **k):
+        raise RuntimeError("supabase read exploded mid-run")
+
+    monkeypatch.setattr(pipeline, "fetch_users", boom)
+
+    with pytest.raises(RuntimeError, match="exploded mid-run"):
+        pipeline.run(_client=fake_client)
+
+    parents = fake_client.table("pipeline_runs").rows
+    assert len(parents) == 1
+    assert parents[0]["status"] == "failed"
+
+
+class _TelemetryFailingClient:
+    """Wraps a fake client but makes every write to the run-history tables raise —
+    the real-world failure mode run_store must absorb. All other tables behave
+    normally, so the actual pipeline work still runs."""
+
+    class _RaisingTable:
+        def upsert(self, *a, **k):
+            raise RuntimeError("run-history table is unavailable")
+
+        def update(self, *a, **k):
+            raise RuntimeError("run-history table is unavailable")
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def table(self, name):
+        if name in ("pipeline_runs", "pipeline_run_users"):
+            return self._RaisingTable()
+        return self._inner.table(name)
+
+    def seed(self, *a, **k):
+        return self._inner.seed(*a, **k)
+
+
+def test_telemetry_write_failure_does_not_break_the_run(fake_client, monkeypatch):
+    """A Supabase error on the run-history tables is swallowed inside run_store — the
+    pipeline run itself still completes and returns a normal RunLog with real work
+    done (the match is still inserted into the matches table)."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/telemetry-down", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    client = _TelemetryFailingClient(fake_client)
+    log = pipeline.run(_client=client)
+
+    assert log.user_results[0].inserted == 1
+    assert fetch_match_urls(fake_client, "u1") == {canonical_url(posting.url)}

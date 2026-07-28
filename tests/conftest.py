@@ -69,6 +69,18 @@ class _FakeQuery:
                 upserted.append(dict(row_payload))
             return _FakeResponse(upserted)
 
+        if self._op == "update":
+            self._table.update_calls.append(dict(self._payload))  # payload only, for assertions
+            rows = self._table.rows
+            for kind, col, val in self._filters:
+                if kind == "eq":
+                    rows = [r for r in rows if r.get(col) == val]
+                elif kind == "in":
+                    rows = [r for r in rows if r.get(col) in val]
+            for r in rows:
+                r.update(self._payload)
+            return _FakeResponse([dict(r) for r in rows])
+
         raise NotImplementedError(self._op)
 
 
@@ -76,12 +88,16 @@ class _FakeTable:
     def __init__(self):
         self.rows: list[dict] = []
         self.upsert_calls: list[list[dict]] = []  # one entry (list of rows) per .upsert().execute() call
+        self.update_calls: list[dict] = []  # one entry (payload dict) per .update().execute() call
 
     def select(self, cols: str = "*") -> _FakeQuery:
         return _FakeQuery(self, "select").select(cols)
 
     def upsert(self, payload: dict, on_conflict: str | None = None) -> _FakeQuery:
         return _FakeQuery(self, "upsert", payload=payload, on_conflict=on_conflict)
+
+    def update(self, payload: dict) -> _FakeQuery:
+        return _FakeQuery(self, "update", payload=payload)
 
 
 class FakeSupabaseClient:

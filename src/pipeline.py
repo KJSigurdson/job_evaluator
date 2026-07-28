@@ -89,6 +89,7 @@ from src.enrich import EnrichmentError
 from src.matches_store import fetch_existing_match_urls, upsert_match
 from src.notify import send_match_digest
 from src.quota_store import set_status
+from src.run_store import complete_run, start_run
 from src.schemas import (
     MatchRow,
     ParseFailure,
@@ -144,6 +145,18 @@ def run(
     track_quota = only_user_id is not None and not dry_run
     succeeded = False
 
+    # Open a run-history row (best-effort telemetry; None on dry-run or write failure).
+    # GITHUB_EVENT_NAME is set by GitHub Actions ('schedule' for cron, 'workflow_dispatch'
+    # for a manual dispatch); absent for local runs → trigger=None.
+    db_run_id = start_run(client, trigger=os.environ.get("GITHUB_EVENT_NAME"), dry_run=dry_run)
+
+    # Hoisted above the try so a run-wide crash can still finalize the run-history row
+    # with whatever partial state exists. run_status is pessimistic ('failed') by
+    # default: only the explicit success paths below flip it to 'complete'.
+    run_status = "failed"
+    counts: RunCounts = RunCounts()
+    user_results: list[UserRunResult] = []
+
     try:
         if track_quota:
             set_status(client, only_user_id, "running")
@@ -160,6 +173,7 @@ def run(
                     f"only_user_id={only_user_id}: no profile+scoring_weights row found"
                 )
             log.warning("No users with both a profile and scoring_weights row — nothing to do")
+            run_status = "complete"  # ran fine, just nothing to process
             return RunLog(
                 run_id=run_id, timestamp=started_at,
                 model=f"tier1={tier1_model},tier2={tier2_model}", temperature=0.0,
@@ -169,7 +183,6 @@ def run(
         # -------------------------------------------------------------------------
         # 1. Scrape sources — ONCE, shared across every user. Each in its own try/except.
         # -------------------------------------------------------------------------
-        counts: RunCounts = RunCounts()
         source_results: list[SourceResult] = []
         all_postings = []
 
@@ -238,7 +251,6 @@ def run(
         # -------------------------------------------------------------------------
         # 4. Per-user loop: skip-set → gate → Tier 1 → Tier 2 → matches/seen writes
         # -------------------------------------------------------------------------
-        user_results: list[UserRunResult] = []
         parse_failures: list[ParseFailure] = []
 
         for user in users:
@@ -273,6 +285,7 @@ def run(
                 gate_rejection_reasons["seniority"],
                 gate_rejection_reasons["hard_constraints"],
             )
+            result.gate_breakdown = dict(gate_rejection_reasons)  # diagnostic, for run-history child row
 
             # -- Tier 1 scoring — concurrent, bounded by TIER1_CONCURRENCY --
             insert_candidates = []
@@ -372,6 +385,7 @@ def run(
             if user.profile.get("email_on_match") and new_matches and not dry_run:
                 try:
                     send_match_digest(user.user_id, new_matches)
+                    result.notified = True
                 except Exception as exc:
                     log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
 
@@ -396,6 +410,7 @@ def run(
         )
 
         succeeded = True
+        run_status = "complete"
         return run_log
 
     except Exception:
@@ -405,6 +420,15 @@ def run(
     finally:
         if track_quota and succeeded:
             set_status(client, only_user_id, "complete", completed=True)
+        # Finalize run-history on EVERY exit path (success, no-users, or crash). This
+        # is best-effort telemetry — complete_run never raises — so a run-wide crash
+        # still leaves a visible 'failed' parent row with whatever partial results
+        # were collected, and this must not mask the original exception being re-raised.
+        complete_run(
+            client, db_run_id, status=run_status, results=user_results,
+            scraped=counts.scraped, shared_pool=(counts.shared_pool_size or None),
+            dry_run=dry_run,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -157,6 +157,10 @@ class UserRunResult(BaseModel):
     inserted: int = 0
     near_misses: int = 0
     parse_failures: int = 0
+    # Diagnostic-only extras, surfaced to run-history telemetry (see run_store.py).
+    # Additive — the JSON run-log line and every existing consumer ignore them.
+    gate_breakdown: dict[str, int] = Field(default_factory=dict)  # gated_out split by rejection_reason
+    notified: bool = False  # True iff a match-digest email was actually sent for this user this run
 
 
 class ParseFailure(BaseModel):
