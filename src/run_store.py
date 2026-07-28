@@ -62,9 +62,21 @@ def complete_run(
 
     No-op (log only) when run_id is None or dry_run — either means start_run never
     opened a row. Updates the parent with terminal status/completed_at, the run-wide
-    scraped/shared_pool/user_count, and totals summed across *results*; then bulk-
-    upserts one child row per UserRunResult. Wrapped in try/except: a telemetry write
-    failure logs a warning and returns, never raising into run().
+    scraped/shared_pool/user_count, totals summed across *results*, and
+    children_written (see below); then bulk-upserts one child row per UserRunResult.
+
+    Child-row writes are attempted and caught in their OWN try/except, separate from
+    the parent update: a child-write failure must not also skip the parent's
+    finalization or its "completed run" log line — those are two independent Supabase
+    calls and a failure in the second should not erase evidence that the first
+    succeeded. children_written on the parent row records which case happened, so the
+    admin page can distinguish "healthy run with per-user drill-down" from "run
+    finished but per-user telemetry failed" instead of silently showing an empty
+    child table as if that were normal. Requires a `children_written boolean` column
+    on `pipeline_runs` (not yet in any DDL this repo tracks — add it before relying on
+    this field). Every write here is wrapped: a failure logs a WARNING (with the
+    exception repr, so it's actually greppable in the Actions log) and returns/continues
+    — never raises into run().
     """
     if run_id is None or dry_run:
         log.info(
@@ -73,21 +85,9 @@ def complete_run(
         )
         return
 
-    try:
-        parent = {
-            "status": status,
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-            "scraped": scraped,
-            "shared_pool": shared_pool,
-            "user_count": len(results),
-            "total_gated_out": sum(r.gated_out for r in results),
-            "total_scored": sum(r.scored for r in results),
-            "total_inserted": sum(r.inserted for r in results),
-            "total_parse_failures": sum(r.parse_failures for r in results),
-        }
-        client.table("pipeline_runs").update(parent).eq("run_id", run_id).execute()
-
-        if results:
+    children_written = True
+    if results:
+        try:
             child_rows = [
                 {
                     "run_id": run_id,
@@ -106,10 +106,33 @@ def complete_run(
             client.table("pipeline_run_users").upsert(
                 child_rows, on_conflict="run_id,user_id"
             ).execute()
+        except Exception as exc:
+            children_written = False
+            log.warning(
+                "pipeline_run_users child-row write failed for run %s (telemetry only, ignored): %r",
+                run_id, exc,
+            )
 
+    try:
+        parent = {
+            "status": status,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "scraped": scraped,
+            "shared_pool": shared_pool,
+            "user_count": len(results),
+            "total_gated_out": sum(r.gated_out for r in results),
+            "total_scored": sum(r.scored for r in results),
+            "total_inserted": sum(r.inserted for r in results),
+            "total_parse_failures": sum(r.parse_failures for r in results),
+            "children_written": children_written,
+        }
+        client.table("pipeline_runs").update(parent).eq("run_id", run_id).execute()
         log.info(
-            "pipeline_runs: completed run %s status=%s users=%d inserted=%d",
-            run_id, status, len(results), parent["total_inserted"],
+            "pipeline_runs: completed run %s status=%s users=%d inserted=%d children_written=%s",
+            run_id, status, len(results), parent["total_inserted"], children_written,
         )
     except Exception as exc:
-        log.warning("pipeline_runs complete_run write failed (telemetry only, ignored): %s", exc)
+        log.warning(
+            "pipeline_runs parent-row write failed for run %s (telemetry only, ignored): %r",
+            run_id, exc,
+        )

@@ -31,6 +31,23 @@ class _RaisingClient:
         return self._RaisingTable()
 
 
+class _ChildFailingClient:
+    """Wraps a fake client but makes ONLY pipeline_run_users writes raise — isolates
+    the "child insert fails, parent must still finalize" case from a total outage."""
+
+    class _RaisingTable:
+        def upsert(self, *a, **k):
+            raise RuntimeError("pipeline_run_users is unavailable")
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def table(self, name):
+        if name == "pipeline_run_users":
+            return self._RaisingTable()
+        return self._inner.table(name)
+
+
 # ---------------------------------------------------------------------------
 # start_run
 # ---------------------------------------------------------------------------
@@ -80,15 +97,21 @@ def test_complete_run_updates_parent_totals(fake_client):
     assert parent["total_scored"] == 6
     assert parent["total_inserted"] == 2
     assert parent["total_parse_failures"] == 1
+    assert parent["children_written"] is True
 
 
 def test_complete_run_writes_child_rows_with_correct_field_mapping(fake_client):
+    """Uses real UserRunResult objects, exactly as pipeline.py's call site passes
+    (results=user_results, the raw per-user objects appended during the run loop) —
+    not pre-converted dicts. This is the fixture-vs-reality gap to guard against: the
+    test input must match what the real caller actually hands complete_run."""
     run_id = start_run(fake_client, trigger="workflow_dispatch")
     results = [
         _result("u1", new_after_dedup=10, gated_out=6, scored=4, inserted=2, near_misses=1,
                 parse_failures=1, gate_breakdown={"location": 4, "seniority": 2}, notified=True),
         _result("u2", new_after_dedup=3, gated_out=1, scored=2),
     ]
+    assert all(isinstance(r, UserRunResult) for r in results)  # locks in the real call shape
 
     complete_run(fake_client, run_id, status="complete", results=results, scraped=9, shared_pool=None)
 
@@ -141,3 +164,36 @@ def test_complete_run_write_failure_is_isolated():
     # A real run_id + a client that raises on write → must be swallowed, not raised.
     complete_run(_RaisingClient(), "run-123", status="complete",
                  results=[_result("u1", inserted=1)], scraped=10, shared_pool=5)
+
+
+# ---------------------------------------------------------------------------
+# children_written — parent row must still finalize (with terminal status) when
+# only the child-row write fails, and must record that fact rather than silently
+# looking like a healthy run with an empty pipeline_run_users table.
+# ---------------------------------------------------------------------------
+
+def test_complete_run_marks_children_written_false_when_child_write_fails(fake_client):
+    run_id = start_run(fake_client, trigger="schedule")
+    failing_client = _ChildFailingClient(fake_client)
+
+    complete_run(failing_client, run_id, status="complete",
+                 results=[_result("u1", inserted=1)], scraped=5, shared_pool=5)
+
+    # Parent row still finalizes with the correct terminal status and totals —
+    # a child-write failure must not also swallow the parent write or its "completed" log.
+    parent = fake_client.table("pipeline_runs").rows[0]
+    assert parent["status"] == "complete"
+    assert parent["total_inserted"] == 1
+    assert parent["children_written"] is False
+
+    # And the child table is (correctly) empty — this is now visible via the flag
+    # above rather than looking like a silently-healthy run.
+    assert fake_client.table("pipeline_run_users").rows == []
+
+
+def test_complete_run_children_written_true_when_results_empty(fake_client):
+    """No users to write children for isn't a failure — children_written stays True."""
+    run_id = start_run(fake_client, trigger="schedule")
+    complete_run(fake_client, run_id, status="complete", results=[], scraped=0, shared_pool=None)
+
+    assert fake_client.table("pipeline_runs").rows[0]["children_written"] is True
