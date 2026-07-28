@@ -48,71 +48,72 @@ def start_run(client, *, trigger: str | None, dry_run: bool = False) -> str | No
         return None
 
 
-def complete_run(
-    client,
-    run_id: str | None,
-    *,
-    status: str,
-    results: list[UserRunResult],
-    scraped: int,
-    shared_pool: int | None,
-    dry_run: bool = False,
-) -> None:
-    """Finalize the `pipeline_runs` row and write per-user `pipeline_run_users` children.
+def _build_child_row(run_id: str, r: UserRunResult) -> dict:
+    """One pipeline_run_users row for *r*. gate_breakdown is coerced to a plain
+    str-keyed, int-valued dict before it goes anywhere near JSON — defensive even
+    though today's only producer (pipeline.py's gate loop, via gate.py's
+    rejection_reason) can only ever put "location"/"seniority"/"hard_constraints"
+    string keys in there; this stops that guarantee from becoming a silent landmine
+    if that ever changes."""
+    gate_breakdown = {str(k): int(v) for k, v in (r.gate_breakdown or {}).items()}
+    return {
+        "run_id": run_id,
+        "user_id": r.user_id,
+        "after_seen_skip": r.new_after_dedup,
+        "gated_out": r.gated_out,
+        "gate_breakdown": gate_breakdown,
+        "scored": r.scored,
+        "parse_failures": r.parse_failures,
+        "inserted": r.inserted,
+        "near_misses": r.near_misses,
+        "notified": r.notified,
+    }
 
-    No-op (log only) when run_id is None or dry_run — either means start_run never
-    opened a row. Updates the parent with terminal status/completed_at, the run-wide
-    scraped/shared_pool/user_count, totals summed across *results*, and
-    children_written (see below); then bulk-upserts one child row per UserRunResult.
 
-    Child-row writes are attempted and caught in their OWN try/except, separate from
-    the parent update: a child-write failure must not also skip the parent's
-    finalization or its "completed run" log line — those are two independent Supabase
-    calls and a failure in the second should not erase evidence that the first
-    succeeded. children_written on the parent row records which case happened, so the
-    admin page can distinguish "healthy run with per-user drill-down" from "run
-    finished but per-user telemetry failed" instead of silently showing an empty
-    child table as if that were normal. Requires a `children_written boolean` column
-    on `pipeline_runs` (not yet in any DDL this repo tracks — add it before relying on
-    this field). Every write here is wrapped: a failure logs a WARNING (with the
-    exception repr, so it's actually greppable in the Actions log) and returns/continues
-    — never raises into run().
+def _write_children(client, run_id: str, results: list[UserRunResult]) -> bool:
+    """Bulk-upsert one pipeline_run_users row per result. Returns True on success
+    (including the trivial case of zero results — nothing to write is not a
+    failure). Row construction happens INSIDE this try, not just the network call:
+    a bad field on a UserRunResult would throw during _build_child_row, not during
+    .execute(), and that must be caught and attributed here too.
+
+    On failure: logs at ERROR (not WARNING — a swallowed telemetry failure that
+    isn't at least ERROR-level is functionally invisible) with the exception repr
+    AND, best-effort, the first row's payload — rebuilt in isolation so a
+    genuinely-malformed results[0] doesn't also hide the sample. Never raises.
     """
-    if run_id is None or dry_run:
-        log.info(
-            "pipeline_runs: skipping completion (run_id=%s, dry_run=%s, status=%s)",
-            run_id, dry_run, status,
-        )
-        return
+    if not results:
+        return True
 
-    children_written = True
-    if results:
+    try:
+        child_rows = [_build_child_row(run_id, r) for r in results]
+        client.table("pipeline_run_users").upsert(child_rows, on_conflict="run_id,user_id").execute()
+        return True
+    except Exception as exc:
         try:
-            child_rows = [
-                {
-                    "run_id": run_id,
-                    "user_id": r.user_id,
-                    "after_seen_skip": r.new_after_dedup,
-                    "gated_out": r.gated_out,
-                    "gate_breakdown": dict(r.gate_breakdown),
-                    "scored": r.scored,
-                    "parse_failures": r.parse_failures,
-                    "inserted": r.inserted,
-                    "near_misses": r.near_misses,
-                    "notified": r.notified,
-                }
-                for r in results
-            ]
-            client.table("pipeline_run_users").upsert(
-                child_rows, on_conflict="run_id,user_id"
-            ).execute()
-        except Exception as exc:
-            children_written = False
-            log.warning(
-                "pipeline_run_users child-row write failed for run %s (telemetry only, ignored): %r",
-                run_id, exc,
-            )
+            first_payload = _build_child_row(run_id, results[0])
+        except Exception:
+            first_payload = None  # even the isolated rebuild failed; log without a sample
+        log.error(
+            "pipeline_run_users child-row write FAILED for run %s (telemetry only, ignored): "
+            "%r  first_payload=%r",
+            run_id, exc, first_payload,
+        )
+        return False
 
+
+def _write_parent(
+    client, run_id: str, *, status: str, results: list[UserRunResult],
+    scraped: int, shared_pool: int | None, children_written: bool,
+) -> bool:
+    """Update the pipeline_runs parent row. Returns True on success.
+
+    On failure: logs at ERROR with the exception repr, then makes a best-effort
+    second attempt to at least flip status to 'failed' — so this run_id doesn't sit
+    stuck at 'running' with a null completed_at forever, which is a worse outcome
+    than a correctly-labeled failure. That fallback write is itself wrapped and
+    logged-not-raised; if it also fails there's nothing further telemetry can do.
+    """
     try:
         parent = {
             "status": status,
@@ -127,12 +128,74 @@ def complete_run(
             "children_written": children_written,
         }
         client.table("pipeline_runs").update(parent).eq("run_id", run_id).execute()
-        log.info(
-            "pipeline_runs: completed run %s status=%s users=%d inserted=%d children_written=%s",
-            run_id, status, len(results), parent["total_inserted"], children_written,
-        )
+        return True
     except Exception as exc:
-        log.warning(
-            "pipeline_runs parent-row write failed for run %s (telemetry only, ignored): %r",
+        log.error(
+            "pipeline_runs parent-row update FAILED for run %s — row may be stuck at "
+            "its previous status without this fallback (telemetry only, ignored): %r",
             run_id, exc,
+        )
+        try:
+            client.table("pipeline_runs").update({"status": "failed"}).eq("run_id", run_id).execute()
+        except Exception as exc2:
+            log.error(
+                "pipeline_runs fallback status='failed' write ALSO failed for run %s: %r",
+                run_id, exc2,
+            )
+        return False
+
+
+def complete_run(
+    client,
+    run_id: str | None,
+    *,
+    status: str,
+    results: list[UserRunResult],
+    scraped: int,
+    shared_pool: int | None,
+    dry_run: bool = False,
+) -> None:
+    """Finalize the `pipeline_runs` row and write per-user `pipeline_run_users` children.
+
+    No-op (log only) when run_id is None or dry_run — either means start_run never
+    opened a row.
+
+    Order: children are written first (_write_children), then the parent
+    (_write_parent) — folding children_written, and a status downgrade to
+    'complete_partial' when the run itself succeeded but its child rows didn't, into
+    the SAME parent update rather than a separate follow-up write. A run that
+    genuinely failed (status='failed' from the caller) is never overwritten to
+    'complete_partial' just because children also failed — that would hide a real
+    failure behind a "partial success" label. Requires a 'complete_partial' status
+    value to be a valid string in `pipeline_runs.status` (plain text column already,
+    no enum/DDL change needed) and a `children_written boolean` column (not yet in
+    any DDL this repo tracks — add before an admin panel reads it).
+
+    The "run complete" INFO log only fires once BOTH writes have actually succeeded
+    — never before, and never if either failed silently, since a failure already got
+    its own ERROR log above. Every write in this function is isolated: nothing here
+    ever raises into pipeline.run().
+    """
+    if run_id is None or dry_run:
+        log.info(
+            "pipeline_runs: skipping completion (run_id=%s, dry_run=%s, status=%s)",
+            run_id, dry_run, status,
+        )
+        return
+
+    children_ok = _write_children(client, run_id, results)
+
+    effective_status = status
+    if not children_ok and status == "complete":
+        effective_status = "complete_partial"
+
+    parent_ok = _write_parent(
+        client, run_id, status=effective_status, results=results,
+        scraped=scraped, shared_pool=shared_pool, children_written=children_ok,
+    )
+
+    if parent_ok and children_ok:
+        log.info(
+            "pipeline_runs: completed run %s status=%s users=%d inserted=%d",
+            run_id, effective_status, len(results), sum(r.inserted for r in results),
         )
