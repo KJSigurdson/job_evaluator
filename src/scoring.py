@@ -13,6 +13,7 @@ existing one-shot parse-retry, which the async path also preserves unchanged).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import random
@@ -22,7 +23,7 @@ import yaml
 from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 from pydantic import ValidationError
 
-from src.schemas import HardGateResult, RawPosting, ScoredPosting, Tier1ScoreOutput
+from src.schemas import HardGateResult, RawPosting, ScoredPosting, Tier1ScoreOutput, TokenUsage
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,18 @@ _TIER1_MODEL_DEFAULT = "claude-haiku-4-5-20251001"
 _RATE_LIMIT_MAX_ATTEMPTS = 5
 _RATE_LIMIT_BASE_DELAY_SECONDS = 1.0
 _RATE_LIMIT_MAX_DELAY_SECONDS = 30.0
+
+# Set by _acall_llm right after a successful response, read back by score_many's
+# per-item task once ascore() returns — see score_many's docstring for why a
+# ContextVar (not a changed return type) is how usage is threaded out of the async
+# path without touching ascore()'s/_acall_llm's existing return contracts, which
+# would otherwise ripple into every test that monkeypatches _acall_llm directly.
+# asyncio.gather() wraps each coroutine argument in its own Task, and each Task gets
+# an isolated COPY of the context (contextvars.copy_context()) — so concurrent items
+# under score_many's semaphore never see each other's usage, and a stubbed/
+# monkeypatched _acall_llm (which never touches this var) correctly leaves it unset,
+# read back as a zero-usage default — exactly right, since a stub makes no real call.
+_last_usage: contextvars.ContextVar[TokenUsage] = contextvars.ContextVar("scoring._last_usage")
 
 
 class ScoringError(Exception):
@@ -185,6 +198,21 @@ def _backoff_delay(attempt: int) -> float:
     return max(0.0, base + jitter)
 
 
+def _extract_usage(response) -> TokenUsage:
+    """Build a TokenUsage from a real Anthropic response.usage. cache_read_input_tokens
+    / cache_creation_input_tokens are None (not 0) on the SDK's Usage object when
+    caching isn't used for that call — normalized to 0 here so downstream summing
+    never has to null-check."""
+    usage = response.usage
+    return TokenUsage(
+        calls=1,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_creation_tokens=usage.cache_creation_input_tokens or 0,
+    )
+
+
 def _is_retryable_status(status_code: int | None) -> bool:
     """True for transient, retry-worthy HTTP statuses: 429 (rate limit) and any 5xx
     (500/502/503 + 529 overloaded_error). Every other status — notably 4xx client
@@ -262,7 +290,7 @@ async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1S
 
     try:
         tool_input = _merge_tool_use_blocks(response, "score_posting")
-        return Tier1ScoreOutput.model_validate(tool_input)
+        result = Tier1ScoreOutput.model_validate(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
         log.error(
             "Tier 1 parse failure for %s (stop_reason=%s): %s\nraw response: %s",
@@ -272,6 +300,13 @@ async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1S
             response.model_dump_json() if hasattr(response, "model_dump_json") else repr(response),
         )
         raise ValueError(f"Tier 1 response parse error: {exc}") from exc
+
+    # Only set on a response that actually parsed successfully — a discarded
+    # parse-failure-then-retry attempt's tokens aren't separately tracked (the item
+    # either ends in this same call's usage, or in ScoringError with zero usage; see
+    # score_many's docstring).
+    _last_usage.set(_extract_usage(response))
+    return result
 
 
 async def _ainvoke_with_retry(
@@ -316,7 +351,7 @@ async def score_many(
     profile: dict,
     rubric: dict,
     max_concurrency: int = 10,
-) -> list[ScoredPosting | ScoringError]:
+) -> tuple[list[ScoredPosting | ScoringError], TokenUsage]:
     """Score every (posting, gate) pair in *items* concurrently, bounded by
     max_concurrency via an asyncio.Semaphore. Preserves *items*' input order in the
     returned list (one output per input, same index).
@@ -327,14 +362,26 @@ async def score_many(
     parse/rate-limit failure, and is NOT caught here: it propagates out of gather
     (default return_exceptions=False) and aborts the whole batch, same severity as an
     uncaught exception today.
+
+    Also returns a TokenUsage aggregated across every item that scored successfully
+    in this batch — a ScoringError contributes zero usage (see _last_usage's
+    docstring). This is purely observational: it augments the return value with a
+    second element but does not change scoring/gating/caching behavior or how many
+    API calls are made.
     """
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _score_one(posting: RawPosting, gate: HardGateResult) -> ScoredPosting | ScoringError:
+    async def _score_one(posting: RawPosting, gate: HardGateResult) -> tuple[ScoredPosting | ScoringError, TokenUsage]:
         async with semaphore:
             try:
-                return await ascore(posting, gate, profile, rubric)
+                scored = await ascore(posting, gate, profile, rubric)
+                return scored, _last_usage.get(TokenUsage())
             except ScoringError as exc:
-                return exc
+                return exc, TokenUsage()
 
-    return await asyncio.gather(*(_score_one(posting, gate) for posting, gate in items))
+    outcomes = await asyncio.gather(*(_score_one(posting, gate) for posting, gate in items))
+    results = [outcome for outcome, _usage in outcomes]
+    total_usage = TokenUsage()
+    for _outcome, usage in outcomes:
+        total_usage = total_usage + usage
+    return results, total_usage

@@ -123,13 +123,27 @@ class _FakeContentBlock:
         self.name = name
 
 
+class _FakeUsage:
+    """Mirrors anthropic.types.Usage's field names that _extract_usage reads.
+    cache_*_input_tokens default to None, matching the real SDK when caching isn't
+    used for a given call — _extract_usage normalizes that to 0."""
+
+    def __init__(self, input_tokens=100, output_tokens=50,
+                 cache_read_input_tokens=None, cache_creation_input_tokens=None):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cache_read_input_tokens = cache_read_input_tokens
+        self.cache_creation_input_tokens = cache_creation_input_tokens
+
+
 class _FakeResponse:
     """*blocks* is one _FakeContentBlock or a list of them — supports both the
     normal single-block case and the multi-block-split regression case."""
 
-    def __init__(self, blocks):
+    def __init__(self, blocks, *, usage=None):
         self.content = blocks if isinstance(blocks, list) else [blocks]
         self.stop_reason = "tool_use"
+        self.usage = usage if usage is not None else _FakeUsage()
 
     def model_dump_json(self):
         return "{}"
@@ -308,6 +322,85 @@ def test_acall_llm_bad_request_not_retried_by_backoff(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Token usage aggregation — audit-only, additive to enrich_many's return value.
+# Mirrors scoring.py's identical test coverage; see that file's comment on why
+# set-and-read must happen within the same asyncio Task.
+# ---------------------------------------------------------------------------
+
+def test_acall_llm_sets_usage_from_real_response(monkeypatch):
+    fake_client = _FakeAsyncClient([_FakeResponse(
+        _FakeContentBlock(_tool_input()),
+        usage=_FakeUsage(input_tokens=123, output_tokens=45, cache_read_input_tokens=7, cache_creation_input_tokens=9),
+    )])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    async def _call_and_read_usage():
+        await enrich_mod._acall_llm(_make_scored(), {})
+        return enrich_mod._last_usage.get()
+
+    usage = asyncio.run(_call_and_read_usage())
+    assert usage.calls == 1
+    assert usage.input_tokens == 123
+    assert usage.output_tokens == 45
+    assert usage.cache_read_tokens == 7
+    assert usage.cache_creation_tokens == 9
+
+
+def test_acall_llm_usage_defaults_cache_fields_to_zero_when_none(monkeypatch):
+    fake_client = _FakeAsyncClient([_FakeResponse(
+        _FakeContentBlock(_tool_input()),
+        usage=_FakeUsage(cache_read_input_tokens=None, cache_creation_input_tokens=None),
+    )])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    async def _call_and_read_usage():
+        await enrich_mod._acall_llm(_make_scored(), {})
+        return enrich_mod._last_usage.get()
+
+    usage = asyncio.run(_call_and_read_usage())
+    assert usage.cache_read_tokens == 0
+    assert usage.cache_creation_tokens == 0
+
+
+def test_enrich_many_aggregates_usage_across_batch(monkeypatch):
+    items = [_make_scored(url=f"https://example.org/job/{i}") for i in range(3)]
+
+    fake_client = _FakeAsyncClient([
+        _FakeResponse(_FakeContentBlock(_tool_input()), usage=_FakeUsage(input_tokens=100, output_tokens=10)),
+        _FakeResponse(_FakeContentBlock(_tool_input()), usage=_FakeUsage(input_tokens=200, output_tokens=20)),
+        _FakeResponse(_FakeContentBlock(_tool_input()), usage=_FakeUsage(input_tokens=300, output_tokens=30)),
+    ])
+    monkeypatch.setattr(enrich_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=1))
+
+    assert len(results) == 3
+    assert usage.calls == 3
+    assert usage.input_tokens == 600
+    assert usage.output_tokens == 60
+
+
+def test_enrich_many_enrichment_error_contributes_zero_usage(monkeypatch):
+    """A batch with one persistently-failing item: that item's EnrichmentError
+    contributes no usage, but other items' usage still aggregates correctly —
+    mirrors enrich_many's existing error-isolation test pattern."""
+    items = [_make_scored(url=f"https://example.org/job/{i}") for i in range(3)]
+
+    async def _fake_acall_llm(scored, profile):  # noqa: ARG001
+        if scored.posting.url.endswith("/job/1"):
+            raise ValueError("simulated LLM failure")  # exhausts retry -> EnrichmentError, no usage set
+        return Tier2EnrichmentOutput(**_tool_input())
+
+    monkeypatch.setattr(enrich_mod, "_acall_llm", _fake_acall_llm)
+
+    results, usage = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=1))
+
+    assert isinstance(results[1], EnrichmentError)
+    assert usage.calls == 0
+    assert usage.input_tokens == 0
+
+
+# ---------------------------------------------------------------------------
 # enrich_many — concurrent Tier 2 enrichment (mirrors scoring.py's score_many
 # test coverage exactly)
 # ---------------------------------------------------------------------------
@@ -320,7 +413,7 @@ def test_enrich_many_preserves_input_order(monkeypatch):
 
     monkeypatch.setattr(enrich_mod, "_acall_llm", _fake_acall_llm)
 
-    results = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=5))
+    results, _usage = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=5))
     assert [r.org_summary for r in results] == [item.posting.url for item in items]
 
 
@@ -334,7 +427,7 @@ def test_enrich_many_enrichment_error_does_not_abort_others(monkeypatch):
 
     monkeypatch.setattr(enrich_mod, "_acall_llm", _fake_acall_llm)
 
-    results = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=5))
+    results, _usage = asyncio.run(enrich_mod.enrich_many(items, {}, max_concurrency=5))
 
     assert len(results) == 5
     for i, result in enumerate(results):

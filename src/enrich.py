@@ -12,6 +12,7 @@ docstring for why).
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import yaml
 from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 from pydantic import ValidationError
 
-from src.schemas import ScoredPosting, Tier2EnrichmentOutput
+from src.schemas import ScoredPosting, Tier2EnrichmentOutput, TokenUsage
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +31,13 @@ _LIST_FIELDS = ("emphasize_in_cv", "deemphasize")
 _RATE_LIMIT_MAX_ATTEMPTS = 5
 _RATE_LIMIT_BASE_DELAY_SECONDS = 1.0
 _RATE_LIMIT_MAX_DELAY_SECONDS = 30.0
+
+# Set by _acall_llm right after a successful response, read back by enrich_many's
+# per-item task once aenrich() returns. Duplicated from scoring.py's identical
+# ContextVar rather than shared — see _merge_tool_use_blocks's docstring for why
+# this codebase keeps each module's private helpers self-contained. See
+# scoring.py's _last_usage docstring for the full asyncio-task-isolation rationale.
+_last_usage: contextvars.ContextVar[TokenUsage] = contextvars.ContextVar("enrich._last_usage")
 
 
 class EnrichmentError(Exception):
@@ -195,6 +203,20 @@ def _backoff_delay(attempt: int) -> float:
     return max(0.0, base + jitter)
 
 
+def _extract_usage(response) -> TokenUsage:
+    """Build a TokenUsage from a real Anthropic response.usage. Duplicated from
+    scoring.py's identical helper — see _merge_tool_use_blocks's docstring for why
+    duplicated rather than shared."""
+    usage = response.usage
+    return TokenUsage(
+        calls=1,
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_creation_tokens=usage.cache_creation_input_tokens or 0,
+    )
+
+
 def _is_retryable_status(status_code: int | None) -> bool:
     """True for transient, retry-worthy HTTP statuses: 429 (rate limit) and any 5xx
     (500/502/503 + 529 overloaded_error). Every other status — notably 4xx client
@@ -285,9 +307,15 @@ async def _acall_llm(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOut
 
     try:
         tool_input = _merge_tool_use_blocks(response, "enrich_posting")
-        return _parse_enrichment_output(tool_input)
+        result = _parse_enrichment_output(tool_input)
     except (IndexError, AttributeError, ValidationError) as exc:
         raise ValueError(f"Tier 2 response parse error: {exc}") from exc
+
+    # Only set on a response that actually parsed successfully — see scoring.py's
+    # identical comment in _acall_llm for why a discarded retry attempt's usage
+    # isn't separately tracked.
+    _last_usage.set(_extract_usage(response))
+    return result
 
 
 async def aenrich(scored: ScoredPosting, profile: dict) -> Tier2EnrichmentOutput:
@@ -311,7 +339,7 @@ async def enrich_many(
     items: list[ScoredPosting],
     profile: dict,
     max_concurrency: int = 10,
-) -> list[Tier2EnrichmentOutput | EnrichmentError]:
+) -> tuple[list[Tier2EnrichmentOutput | EnrichmentError], TokenUsage]:
     """Enrich every ScoredPosting in *items* concurrently, bounded by max_concurrency
     via an asyncio.Semaphore. Preserves *items*' input order in the returned list
     (one output per input, same index).
@@ -322,14 +350,24 @@ async def enrich_many(
     OTHER exception is a real bug, not an expected parse/rate-limit failure, and is
     NOT caught here: it propagates out of gather (default return_exceptions=False)
     and aborts the whole batch, same severity as an uncaught exception today.
+
+    Also returns a TokenUsage aggregated across every item that enriched
+    successfully in this batch — an EnrichmentError contributes zero usage. Purely
+    observational — see scoring.py's score_many for the full rationale.
     """
     semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def _enrich_one(scored: ScoredPosting) -> Tier2EnrichmentOutput | EnrichmentError:
+    async def _enrich_one(scored: ScoredPosting) -> tuple[Tier2EnrichmentOutput | EnrichmentError, TokenUsage]:
         async with semaphore:
             try:
-                return await aenrich(scored, profile)
+                enriched = await aenrich(scored, profile)
+                return enriched, _last_usage.get(TokenUsage())
             except EnrichmentError as exc:
-                return exc
+                return exc, TokenUsage()
 
-    return await asyncio.gather(*(_enrich_one(scored) for scored in items))
+    outcomes = await asyncio.gather(*(_enrich_one(scored) for scored in items))
+    results = [outcome for outcome, _usage in outcomes]
+    total_usage = TokenUsage()
+    for _outcome, usage in outcomes:
+        total_usage = total_usage + usage
+    return results, total_usage

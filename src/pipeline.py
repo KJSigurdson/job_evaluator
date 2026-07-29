@@ -40,6 +40,16 @@ user, e.g. "User <id>: gated_out=790 (location=612, seniority=140,
 hard_constraints=38)". Purely additive — does not change gating logic or which
 postings get scored/inserted.
 
+Audit-only cost/dedup visibility (no behavior change): score_many/enrich_many each
+also return a TokenUsage aggregated across their batch (src/schemas.py), summed
+into run-wide tier1_usage_total/tier2_usage_total and logged as two "TOKEN USAGE"
+lines after the per-user loop, plus a best-effort write to pipeline_runs via
+run_store.record_token_usage() (see that function's docstring for the required
+DDL). A "DEDUP AUDIT" line right after the shared pool is sized logs the cross-
+source duplicate rate of `fresh` by canonical URL — log only, `fresh` itself is not
+deduped by this. Neither of these changes scoring, enrichment, gating, caching,
+dedup, or how many LLM calls are made.
+
 Seen-table writes are batched per user (src/seen_store.py): record_verdict() only
 queues a payload in memory during the gate/Tier1/Tier2 loops; upsert_verdicts()
 flushes everything queued for a user in one chunked call after that user's Tier 2
@@ -89,13 +99,14 @@ from src.enrich import EnrichmentError
 from src.matches_store import fetch_existing_match_urls, upsert_match
 from src.notify import send_match_digest
 from src.quota_store import set_status
-from src.run_store import complete_run, start_run
+from src.run_store import complete_run, record_token_usage, start_run
 from src.schemas import (
     MatchRow,
     ParseFailure,
     RunCounts,
     RunLog,
     SourceResult,
+    TokenUsage,
     UserRunResult,
 )
 from src.scoring import ScoringError
@@ -156,6 +167,8 @@ def run(
     run_status = "failed"
     counts: RunCounts = RunCounts()
     user_results: list[UserRunResult] = []
+    tier1_usage_total = TokenUsage()  # audit-only cost aggregation, see TOKEN USAGE log lines below
+    tier2_usage_total = TokenUsage()
 
     try:
         if track_quota:
@@ -248,6 +261,14 @@ def run(
 
         counts.shared_pool_size = len(fresh)
 
+        # Audit-only: cross-source duplicate rate in the shared pool. LOG ONLY — does
+        # not dedup `fresh`; this measures the rate before any dedup-of-fresh change.
+        unique = len({canonical_url(p.url) for p in fresh})
+        log.info(
+            "DEDUP AUDIT: shared_pool=%d unique_canonical=%d duplicates=%d (%.1f%%)",
+            len(fresh), unique, len(fresh) - unique, 100 * (len(fresh) - unique) / max(len(fresh), 1),
+        )
+
         # -------------------------------------------------------------------------
         # 4. Per-user loop: skip-set → gate → Tier 1 → Tier 2 → matches/seen writes
         # -------------------------------------------------------------------------
@@ -290,9 +311,10 @@ def run(
             # -- Tier 1 scoring — concurrent, bounded by TIER1_CONCURRENCY --
             insert_candidates = []
             tier1_concurrency = int(os.environ.get("TIER1_CONCURRENCY") or 10)
-            results = asyncio.run(scoring_mod.score_many(
+            results, tier1_usage = asyncio.run(scoring_mod.score_many(
                 gate_survivors, user.profile, user.rubric, max_concurrency=tier1_concurrency
             ))
+            tier1_usage_total = tier1_usage_total + tier1_usage
             for (posting, g), outcome in zip(gate_survivors, results):
                 if isinstance(outcome, ScoringError):
                     log.error("Tier 1 failed for user %s, %s: %s", user.user_id, posting.url, outcome)
@@ -318,9 +340,10 @@ def run(
 
             # -- Tier 2 enrichment — concurrent, bounded by TIER2_CONCURRENCY --
             tier2_concurrency = int(os.environ.get("TIER2_CONCURRENCY") or 10)
-            enrichments = asyncio.run(enrich_mod.enrich_many(
+            enrichments, tier2_usage = asyncio.run(enrich_mod.enrich_many(
                 insert_candidates, user.profile, max_concurrency=tier2_concurrency
             ))
+            tier2_usage_total = tier2_usage_total + tier2_usage
             for scored, outcome in zip(insert_candidates, enrichments):
                 if isinstance(outcome, EnrichmentError):
                     log.error("Tier 2 failed for user %s, %s: %s", user.user_id, scored.posting.url, outcome)
@@ -389,6 +412,18 @@ def run(
                 except Exception as exc:
                     log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
 
+        # Audit-only: per-run token/cost breakdown, aggregated across all users.
+        log.info(
+            "TOKEN USAGE tier1: calls=%d input=%d output=%d cache_read=%d cache_creation=%d",
+            tier1_usage_total.calls, tier1_usage_total.input_tokens, tier1_usage_total.output_tokens,
+            tier1_usage_total.cache_read_tokens, tier1_usage_total.cache_creation_tokens,
+        )
+        log.info(
+            "TOKEN USAGE tier2: calls=%d input=%d output=%d cache_read=%d cache_creation=%d",
+            tier2_usage_total.calls, tier2_usage_total.input_tokens, tier2_usage_total.output_tokens,
+            tier2_usage_total.cache_read_tokens, tier2_usage_total.cache_creation_tokens,
+        )
+
         # -------------------------------------------------------------------------
         # 5. Emit RunLog
         # -------------------------------------------------------------------------
@@ -427,6 +462,13 @@ def run(
         complete_run(
             client, db_run_id, status=run_status, results=user_results,
             scraped=counts.scraped, shared_pool=(counts.shared_pool_size or None),
+            dry_run=dry_run,
+        )
+        # Audit-only, fully isolated from complete_run (see record_token_usage's
+        # docstring) — reports whatever partial usage was accumulated even on a
+        # mid-run crash, since real tokens were already spent before the crash.
+        record_token_usage(
+            client, db_run_id, tier1_usage=tier1_usage_total, tier2_usage=tier2_usage_total,
             dry_run=dry_run,
         )
 

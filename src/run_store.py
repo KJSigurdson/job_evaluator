@@ -8,6 +8,25 @@ MONITORING, so a telemetry write failure must NEVER crash or abort a real pipeli
 run. Every write is wrapped: on any error it logs a warning and returns, never
 raising into pipeline.run(). start_run failing (or dry_run) simply yields run_id=None,
 which complete_run treats as "nothing to finalize".
+
+record_token_usage() writes tier1_*/tier2_* token totals onto the pipeline_runs
+parent row. Those columns are NOT in any DDL this repo tracks yet — run the
+following in Supabase before relying on this data (nullable, so old rows are simply
+NULL there, and the write is defensively isolated from complete_run's already-
+verified parent write, so a missing column here can't take that down too — see
+record_token_usage's docstring):
+
+    ALTER TABLE pipeline_runs
+      ADD COLUMN IF NOT EXISTS tier1_calls integer,
+      ADD COLUMN IF NOT EXISTS tier1_input_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier1_output_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier1_cache_read_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier1_cache_creation_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier2_calls integer,
+      ADD COLUMN IF NOT EXISTS tier2_input_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier2_output_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier2_cache_read_tokens integer,
+      ADD COLUMN IF NOT EXISTS tier2_cache_creation_tokens integer;
 """
 from __future__ import annotations
 
@@ -15,7 +34,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from src.schemas import UserRunResult
+from src.schemas import TokenUsage, UserRunResult
 
 log = logging.getLogger(__name__)
 
@@ -198,4 +217,53 @@ def complete_run(
         log.info(
             "pipeline_runs: completed run %s status=%s users=%d inserted=%d",
             run_id, effective_status, len(results), sum(r.inserted for r in results),
+        )
+
+
+def record_token_usage(
+    client, run_id: str | None, *, tier1_usage: TokenUsage, tier2_usage: TokenUsage,
+    dry_run: bool = False,
+) -> None:
+    """Best-effort write of aggregated token-usage totals onto the pipeline_runs
+    parent row. Deliberately a SEPARATE .update() call from complete_run/_write_parent
+    rather than folded into that payload: tier1_*/tier2_* are new columns that may
+    not exist in the live schema yet (see this module's docstring for the ALTER
+    TABLE statements), and a missing-column failure here must not be able to take
+    down the already-working status/totals/children_written write the way bundling
+    it into one shared payload would.
+
+    No-op (log only) when run_id is None or dry_run — same guard as complete_run.
+    Never raises into pipeline.run(); a failure here is logged and swallowed.
+    """
+    if run_id is None or dry_run:
+        log.info(
+            "pipeline_runs: skipping token-usage write (run_id=%s, dry_run=%s)",
+            run_id, dry_run,
+        )
+        return
+
+    payload = {
+        "tier1_calls": tier1_usage.calls,
+        "tier1_input_tokens": tier1_usage.input_tokens,
+        "tier1_output_tokens": tier1_usage.output_tokens,
+        "tier1_cache_read_tokens": tier1_usage.cache_read_tokens,
+        "tier1_cache_creation_tokens": tier1_usage.cache_creation_tokens,
+        "tier2_calls": tier2_usage.calls,
+        "tier2_input_tokens": tier2_usage.input_tokens,
+        "tier2_output_tokens": tier2_usage.output_tokens,
+        "tier2_cache_read_tokens": tier2_usage.cache_read_tokens,
+        "tier2_cache_creation_tokens": tier2_usage.cache_creation_tokens,
+    }
+    try:
+        client.table("pipeline_runs").update(payload).eq("run_id", run_id).execute()
+        log.info(
+            "pipeline_runs: recorded token usage for run %s (tier1 calls=%d, tier2 calls=%d)",
+            run_id, tier1_usage.calls, tier2_usage.calls,
+        )
+    except Exception as exc:
+        log.warning(
+            "pipeline_runs token-usage write failed for run %s — requires tier1_*/tier2_* "
+            "columns on pipeline_runs (see this module's docstring for ALTER TABLE); "
+            "telemetry only, ignored: %r",
+            run_id, exc,
         )

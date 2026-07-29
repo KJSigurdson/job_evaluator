@@ -131,6 +131,32 @@ class MatchRow(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Token usage — purely observational cost-visibility bookkeeping (see scoring.py's
+# and enrich.py's score_many/enrich_many, and pipeline.py's TOKEN USAGE log lines).
+# ---------------------------------------------------------------------------
+
+class TokenUsage(BaseModel):
+    """Aggregated Anthropic API token usage for a batch of calls. cache_read/
+    cache_creation default to 0 since prompt caching isn't enabled yet — once it is,
+    real non-zero values flow through _extract_usage() automatically, no code change
+    needed here."""
+    calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_creation_tokens: int = 0
+
+    def __add__(self, other: "TokenUsage") -> "TokenUsage":
+        return TokenUsage(
+            calls=self.calls + other.calls,
+            input_tokens=self.input_tokens + other.input_tokens,
+            output_tokens=self.output_tokens + other.output_tokens,
+            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            cache_creation_tokens=self.cache_creation_tokens + other.cache_creation_tokens,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Observability / run log
 # ---------------------------------------------------------------------------
 

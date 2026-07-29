@@ -126,7 +126,7 @@ def test_score_many_preserves_input_order(monkeypatch, profile, rubric):
 
     monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
 
-    results = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
+    results, _usage = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
     assert [r.posting.url for r in results] == [p.url for p in postings]
 
 
@@ -141,7 +141,7 @@ def test_score_many_scoring_error_does_not_abort_others(monkeypatch, profile, ru
 
     monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
 
-    results = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
+    results, _usage = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=5))
 
     assert len(results) == 5
     for i, result in enumerate(results):
@@ -247,13 +247,27 @@ class _FakeContentBlock:
         self.name = name
 
 
+class _FakeUsage:
+    """Mirrors anthropic.types.Usage's field names that _extract_usage reads.
+    cache_*_input_tokens default to None, matching the real SDK when caching isn't
+    used for a given call — _extract_usage normalizes that to 0."""
+
+    def __init__(self, input_tokens=100, output_tokens=50,
+                 cache_read_input_tokens=None, cache_creation_input_tokens=None):
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.cache_read_input_tokens = cache_read_input_tokens
+        self.cache_creation_input_tokens = cache_creation_input_tokens
+
+
 class _FakeResponse:
     """*blocks* is one _FakeContentBlock or a list of them — supports both the
     normal single-block case and the multi-block-split regression case."""
 
-    def __init__(self, blocks):
+    def __init__(self, blocks, *, usage=None):
         self.content = blocks if isinstance(blocks, list) else [blocks]
         self.stop_reason = "tool_use"
+        self.usage = usage if usage is not None else _FakeUsage()
 
     def model_dump_json(self):
         return "{}"
@@ -447,3 +461,96 @@ def test_acall_llm_bad_request_not_retried_by_backoff(monkeypatch, profile, rubr
         asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
 
     assert fake_client.messages.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Token usage aggregation — audit-only, additive to score_many's return value.
+# Uses the real _acall_llm (via _FakeAsyncClient/_FakeResponse) rather than
+# monkeypatching it away, since the usage-capture ContextVar is set inside the real
+# function — a stubbed _acall_llm correctly contributes zero usage (see below).
+# ---------------------------------------------------------------------------
+
+def test_acall_llm_sets_usage_from_real_response(monkeypatch, profile, rubric):
+    """_last_usage is a ContextVar scoped to the asyncio Task that sets it — reading
+    it back must happen within that same task (a read from outside the task, e.g.
+    after asyncio.run() has already returned, would see nothing: Task context
+    mutations don't propagate to the caller). Hence the set-and-read both happen
+    inside one wrapper coroutine driven by a single asyncio.run() call."""
+    fake_client = _FakeAsyncClient([_FakeResponse(
+        _FakeContentBlock(make_tier1().model_dump()),
+        usage=_FakeUsage(input_tokens=123, output_tokens=45, cache_read_input_tokens=7, cache_creation_input_tokens=9),
+    )])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    async def _call_and_read_usage():
+        await scoring_mod._acall_llm(make_posting(), profile, rubric)
+        return scoring_mod._last_usage.get()
+
+    usage = asyncio.run(_call_and_read_usage())
+    assert usage.calls == 1
+    assert usage.input_tokens == 123
+    assert usage.output_tokens == 45
+    assert usage.cache_read_tokens == 7
+    assert usage.cache_creation_tokens == 9
+
+
+def test_acall_llm_usage_defaults_cache_fields_to_zero_when_none(monkeypatch, profile, rubric):
+    """Real SDK Usage objects have cache_*_input_tokens=None when caching isn't used
+    for that call (it isn't yet, anywhere in this codebase) — must normalize to 0,
+    not leak None into the aggregate."""
+    fake_client = _FakeAsyncClient([_FakeResponse(
+        _FakeContentBlock(make_tier1().model_dump()),
+        usage=_FakeUsage(cache_read_input_tokens=None, cache_creation_input_tokens=None),
+    )])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    async def _call_and_read_usage():
+        await scoring_mod._acall_llm(make_posting(), profile, rubric)
+        return scoring_mod._last_usage.get()
+
+    usage = asyncio.run(_call_and_read_usage())
+    assert usage.cache_read_tokens == 0
+    assert usage.cache_creation_tokens == 0
+
+
+def test_score_many_aggregates_usage_across_batch(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(3)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    fake_client = _FakeAsyncClient([
+        _FakeResponse(_FakeContentBlock(make_tier1().model_dump()), usage=_FakeUsage(input_tokens=100, output_tokens=10)),
+        _FakeResponse(_FakeContentBlock(make_tier1().model_dump()), usage=_FakeUsage(input_tokens=200, output_tokens=20)),
+        _FakeResponse(_FakeContentBlock(make_tier1().model_dump()), usage=_FakeUsage(input_tokens=300, output_tokens=30)),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=1))
+
+    assert len(results) == 3
+    assert usage.calls == 3
+    assert usage.input_tokens == 600
+    assert usage.output_tokens == 60
+
+
+def test_score_many_scoring_error_contributes_zero_usage(monkeypatch, profile, rubric):
+    """A batch with one persistently-failing item: that item's ScoringError
+    contributes no usage, but the other items' usage still aggregates correctly —
+    mirrors score_many's existing error-isolation test pattern."""
+    postings = [make_posting(url=f"https://example.org/job/{i}") for i in range(3)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    async def _fake_acall_llm(posting, profile, rubric):  # noqa: ARG001
+        if posting.url.endswith("/job/1"):
+            raise ValueError("simulated LLM failure")  # exhausts retry -> ScoringError, no usage set
+        return make_tier1()
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm", _fake_acall_llm)
+
+    results, usage = asyncio.run(scoring_mod.score_many(items, profile, rubric, max_concurrency=1))
+
+    assert isinstance(results[1], ScoringError)
+    # Stubbed _acall_llm never touches _last_usage, so even the 2 successful items
+    # correctly report zero usage here — this test only locks in that a failing item
+    # doesn't crash or corrupt the aggregate, not that stubs report nonzero usage.
+    assert usage.calls == 0
+    assert usage.input_tokens == 0

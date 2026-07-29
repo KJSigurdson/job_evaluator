@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.run_store import complete_run, start_run
-from src.schemas import UserRunResult
+from src.run_store import complete_run, record_token_usage, start_run
+from src.schemas import TokenUsage, UserRunResult
 
 
 def _result(user_id: str, **kwargs) -> UserRunResult:
@@ -355,5 +355,71 @@ def test_complete_run_success_log_absent_when_parent_write_fails(fake_client, ca
     with caplog.at_level("INFO"):
         complete_run(failing_client, run_id, status="complete",
                      results=[_result("u1", inserted=1)], scraped=1, shared_pool=1)
+
+
+# ---------------------------------------------------------------------------
+# record_token_usage — separate, isolated write; must be null-safe against
+# tier1_*/tier2_* columns not existing on pipeline_runs yet (no DDL applied).
+# ---------------------------------------------------------------------------
+
+def _usage(**kwargs) -> TokenUsage:
+    defaults = dict(calls=1, input_tokens=100, output_tokens=10, cache_read_tokens=0, cache_creation_tokens=0)
+    defaults.update(kwargs)
+    return TokenUsage(**defaults)
+
+
+def test_record_token_usage_writes_tier1_and_tier2_totals(fake_client):
+    run_id = start_run(fake_client, trigger="schedule")
+
+    record_token_usage(
+        fake_client, run_id,
+        tier1_usage=_usage(calls=3, input_tokens=300, output_tokens=30, cache_read_tokens=5, cache_creation_tokens=2),
+        tier2_usage=_usage(calls=2, input_tokens=500, output_tokens=80, cache_read_tokens=0, cache_creation_tokens=0),
+    )
+
+    row = fake_client.table("pipeline_runs").rows[0]
+    assert row["tier1_calls"] == 3
+    assert row["tier1_input_tokens"] == 300
+    assert row["tier1_output_tokens"] == 30
+    assert row["tier1_cache_read_tokens"] == 5
+    assert row["tier1_cache_creation_tokens"] == 2
+    assert row["tier2_calls"] == 2
+    assert row["tier2_input_tokens"] == 500
+    assert row["tier2_output_tokens"] == 80
+
+
+def test_record_token_usage_noop_when_run_id_none(fake_client):
+    record_token_usage(fake_client, None, tier1_usage=_usage(), tier2_usage=_usage())
+    assert fake_client.table("pipeline_runs").rows == []
+
+
+def test_record_token_usage_dry_run_writes_nothing(fake_client):
+    run_id = start_run(fake_client, trigger="schedule")
+    fake_client.table("pipeline_runs").update_calls.clear()
+
+    record_token_usage(fake_client, run_id, tier1_usage=_usage(), tier2_usage=_usage(), dry_run=True)
+
+    assert fake_client.table("pipeline_runs").update_calls == []
+
+
+def test_record_token_usage_missing_columns_is_isolated_and_null_safe(fake_client, caplog):
+    """Simulates the exact real-world failure this function is designed for: the
+    tier1_*/tier2_* columns don't exist yet in the live schema (DDL not applied).
+    The write must fail loudly (logged) but never raise, and — critically — must
+    not touch or undo anything complete_run already wrote (status/totals/
+    children_written), since this is a completely separate .update() call."""
+    run_id = start_run(fake_client, trigger="schedule")
+    complete_run(fake_client, run_id, status="complete", results=[_result("u1", inserted=1)], scraped=1, shared_pool=1)
+    parent_before = dict(fake_client.table("pipeline_runs").rows[0])
+
+    failing_client = _ParentFailingClient(fake_client)
+    with caplog.at_level("WARNING"):
+        record_token_usage(failing_client, run_id, tier1_usage=_usage(), tier2_usage=_usage())
+
+    assert any(r.levelname == "WARNING" and "token-usage write failed" in r.message for r in caplog.records)
+    # complete_run's already-written fields are completely untouched by the failure.
+    parent_after = fake_client.table("pipeline_runs").rows[0]
+    for key, value in parent_before.items():
+        assert parent_after[key] == value
 
     assert not any("completed run" in r.message for r in caplog.records if r.levelname == "INFO")

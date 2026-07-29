@@ -14,7 +14,7 @@ from src import scoring as scoring_mod
 from src.dedup import canonical_url
 from src.sources import eightyk, iap, probablygood
 from tests.conftest import make_posting, make_tier1
-from src.schemas import Tier2EnrichmentOutput
+from src.schemas import TokenUsage, Tier2EnrichmentOutput
 
 
 def _weights_row(user_id: str, *, threshold: float, near_miss_floor: float = 0.6) -> dict:
@@ -961,3 +961,106 @@ def test_telemetry_write_failure_does_not_break_the_run(fake_client, monkeypatch
 
     assert log.user_results[0].inserted == 1
     assert fetch_match_urls(fake_client, "u1") == {canonical_url(posting.url)}
+
+
+# ---------------------------------------------------------------------------
+# Audit-only: token usage aggregation + logging, dedup-rate logging. Neither
+# changes scoring/enrichment/gating/dedup behavior or call counts — these tests
+# lock in the *observational* additions only.
+# ---------------------------------------------------------------------------
+
+def test_token_usage_logged_and_aggregated_across_users(fake_client, monkeypatch, caplog):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    _seed_user(fake_client, "u2", threshold=0.5)
+    postings = [
+        make_posting(url=f"https://example.org/job/{i}", source="iap", deadline=date(2030, 1, 1))
+        for i in range(2)
+    ]
+    _stub_sources(monkeypatch, postings)
+    _stub_llms(monkeypatch, fit=0.8)
+
+    async def _fake_score_many(items, profile, rubric, max_concurrency=10):
+        real = scoring_mod.ascore
+        results = [await real(p, g, profile, rubric) for p, g in items]
+        return results, TokenUsage(calls=len(items), input_tokens=100 * len(items), output_tokens=10 * len(items))
+
+    async def _fake_enrich_many(items, profile, max_concurrency=10):
+        real = enrich_mod.aenrich
+        results = [await real(s, profile) for s in items]
+        return results, TokenUsage(calls=len(items), input_tokens=200 * len(items), output_tokens=50 * len(items))
+
+    monkeypatch.setattr(scoring_mod, "score_many", _fake_score_many)
+    monkeypatch.setattr(enrich_mod, "enrich_many", _fake_enrich_many)
+
+    with caplog.at_level("INFO"):
+        pipeline.run(_client=fake_client)
+
+    # 2 postings x 2 users = 4 Tier 1 calls, 4 Tier 2 calls (all pass gate/threshold).
+    tier1_lines = [r.message for r in caplog.records if r.message.startswith("TOKEN USAGE tier1")]
+    tier2_lines = [r.message for r in caplog.records if r.message.startswith("TOKEN USAGE tier2")]
+    assert len(tier1_lines) == 1
+    assert len(tier2_lines) == 1
+    assert "calls=4" in tier1_lines[0]
+    assert "input=400" in tier1_lines[0]
+    assert "output=40" in tier1_lines[0]
+    assert "calls=4" in tier2_lines[0]
+    assert "input=800" in tier2_lines[0]
+    assert "output=200" in tier2_lines[0]
+
+
+def test_token_usage_persisted_to_pipeline_runs(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/usage-persist", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    async def _fake_score_many(items, profile, rubric, max_concurrency=10):
+        real = scoring_mod.ascore
+        results = [await real(p, g, profile, rubric) for p, g in items]
+        return results, TokenUsage(calls=1, input_tokens=111, output_tokens=22)
+
+    monkeypatch.setattr(scoring_mod, "score_many", _fake_score_many)
+
+    pipeline.run(_client=fake_client)
+
+    row = fake_client.table("pipeline_runs").rows[0]
+    assert row["tier1_calls"] == 1
+    assert row["tier1_input_tokens"] == 111
+    assert row["tier1_output_tokens"] == 22
+
+
+def test_token_usage_zero_when_llm_stubbed_without_setting_it(fake_client, monkeypatch):
+    """_stub_llms replaces _acall_llm entirely, so the real usage-capture code never
+    runs — correctly reports zero usage rather than fabricating a nonzero number."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/usage-zero", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    pipeline.run(_client=fake_client)
+
+    row = fake_client.table("pipeline_runs").rows[0]
+    assert row["tier1_calls"] == 0
+    assert row["tier1_input_tokens"] == 0
+
+
+def test_dedup_audit_log_line_reports_duplicate_rate(fake_client, monkeypatch, caplog):
+    """Two postings that canonicalize to the SAME URL (cross-source duplicate) must
+    be counted as one duplicate — and, critically, both must still flow through the
+    rest of the pipeline unchanged (LOG ONLY, `fresh` itself is not deduped)."""
+    dup_a = make_posting(url="https://example.org/job/dup?utm_source=80k", source="80k", deadline=date(2030, 1, 1))
+    dup_b = make_posting(url="https://example.org/job/dup?utm_source=iap", source="iap", deadline=date(2030, 1, 1))
+    _seed_user(fake_client, "u1", threshold=0.99)  # keep them out of matches; only log math matters here
+    monkeypatch.setattr(iap, "fetch", lambda: [dup_b])
+    monkeypatch.setattr(eightyk, "fetch", lambda: [dup_a])
+    monkeypatch.setattr(probablygood, "fetch", lambda: [])
+    _stub_llms(monkeypatch, fit=0.5)
+
+    with caplog.at_level("INFO"):
+        pipeline.run(_client=fake_client)
+
+    dedup_lines = [r.message for r in caplog.records if r.message.startswith("DEDUP AUDIT")]
+    assert len(dedup_lines) == 1
+    assert "shared_pool=2" in dedup_lines[0]
+    assert "unique_canonical=1" in dedup_lines[0]
+    assert "duplicates=1" in dedup_lines[0]
