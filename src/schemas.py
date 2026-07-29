@@ -61,6 +61,28 @@ class Tier1ScoreOutput(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Tier 1 batched scoring — scores N postings in one call to amortize the static
+# prompt prefix (tools schema + profile + rubric) across postings instead of
+# paying it once per posting. See src/scoring.py's score_many_batched.
+# Tier1ScoreOutput above is UNCHANGED and stays the sync score()/_call_llm and
+# Tier 2 contract; these are additive, batch-only types.
+# ---------------------------------------------------------------------------
+
+class Tier1BatchItem(Tier1ScoreOutput):
+    """One posting's score within a Tier 1 batch call — same 7 dimensions as
+    Tier1ScoreOutput, plus posting_index to map this entry back to its posting
+    (its 0-based position in the batch prompt's "=== POSTING N ===" list)."""
+    posting_index: int
+
+
+class Tier1BatchOutput(BaseModel):
+    """Structured JSON output from a batched Tier 1 LLM call: one entry per posting
+    in the batch, each tagged with posting_index. The model may return fewer than
+    len(batch) entries (an omitted posting) — callers must not assume completeness."""
+    scores: list[Tier1BatchItem]
+
+
+# ---------------------------------------------------------------------------
 # Scored posting — internal object after Tier 1
 # ---------------------------------------------------------------------------
 

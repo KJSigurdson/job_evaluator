@@ -21,6 +21,15 @@ Usage:
 
 Tier 1 scoring runs concurrently (src/scoring.py's score_many/ascore/_acall_llm), up
 to TIER1_CONCURRENCY postings in flight at once per user (default 10; env override).
+Tier 1 is also BATCHED when TIER1_BATCH_SIZE > 1 (default 5): score_many_batched()
+scores TIER1_BATCH_SIZE postings per Anthropic call instead of one, amortizing the
+static prompt prefix (tools schema + profile + rubric — measured ~2,801 tokens,
+paid once per posting today) across every posting in the batch. TIER1_BATCH_SIZE=1
+is the kill switch — pipeline.py falls back to the original score_many() path
+exactly, unchanged. A batch call failing (or omitting a posting from its response)
+falls back to individual scoring for just the affected posting(s), via the same
+ascore()/_acall_llm() path score_many() already uses — see scoring.py's
+score_many_batched docstring for the full fallback contract.
 Tier 2 enrichment runs concurrently the same way (src/enrich.py's
 enrich_many/aenrich/_acall_llm, TIER2_CONCURRENCY, default 10) — it's the slower call
 (Sonnet, ~25s) and was the dominant wall-clock cost once Tier 1 stopped being one.
@@ -308,12 +317,23 @@ def run(
             )
             result.gate_breakdown = dict(gate_rejection_reasons)  # diagnostic, for run-history child row
 
-            # -- Tier 1 scoring — concurrent, bounded by TIER1_CONCURRENCY --
+            # -- Tier 1 scoring — concurrent, bounded by TIER1_CONCURRENCY. Batched
+            # into TIER1_BATCH_SIZE postings/call when > 1 (amortizes the static
+            # prompt prefix across postings — see scoring.score_many_batched);
+            # TIER1_BATCH_SIZE=1 is the zero-risk kill switch back to the original
+            # one-posting-per-call score_many() path. --
             insert_candidates = []
             tier1_concurrency = int(os.environ.get("TIER1_CONCURRENCY") or 10)
-            results, tier1_usage = asyncio.run(scoring_mod.score_many(
-                gate_survivors, user.profile, user.rubric, max_concurrency=tier1_concurrency
-            ))
+            tier1_batch_size = int(os.environ.get("TIER1_BATCH_SIZE") or 5)
+            if tier1_batch_size > 1:
+                results, tier1_usage = asyncio.run(scoring_mod.score_many_batched(
+                    gate_survivors, user.profile, user.rubric,
+                    batch_size=tier1_batch_size, max_concurrency=tier1_concurrency,
+                ))
+            else:
+                results, tier1_usage = asyncio.run(scoring_mod.score_many(
+                    gate_survivors, user.profile, user.rubric, max_concurrency=tier1_concurrency
+                ))
             tier1_usage_total = tier1_usage_total + tier1_usage
             for (posting, g), outcome in zip(gate_survivors, results):
                 if isinstance(outcome, ScoringError):

@@ -283,6 +283,7 @@ def test_tier1_concurrency_env_var_is_passed_to_score_many(fake_client, monkeypa
     _stub_sources(monkeypatch, [posting])
     _stub_llms(monkeypatch, fit=0.8)
     monkeypatch.setenv("TIER1_CONCURRENCY", "3")
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "1")  # force the plain score_many path this test exercises
 
     captured = {}
     real_score_many = scoring_mod.score_many
@@ -304,6 +305,7 @@ def test_tier1_concurrency_defaults_to_ten_when_unset(fake_client, monkeypatch):
     _stub_sources(monkeypatch, [posting])
     _stub_llms(monkeypatch, fit=0.8)
     monkeypatch.delenv("TIER1_CONCURRENCY", raising=False)
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "1")  # force the plain score_many path this test exercises
 
     captured = {}
     real_score_many = scoring_mod.score_many
@@ -317,6 +319,95 @@ def test_tier1_concurrency_defaults_to_ten_when_unset(fake_client, monkeypatch):
     pipeline.run(_client=fake_client)
 
     assert captured["max_concurrency"] == 10
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 batching — TIER1_BATCH_SIZE branch selection at the pipeline call site
+# ---------------------------------------------------------------------------
+
+def test_tier1_batch_size_one_routes_to_plain_score_many_unchanged(fake_client, monkeypatch):
+    """TIER1_BATCH_SIZE=1 is the documented kill switch: pipeline.py must call
+    score_many() exactly, never score_many_batched(), when it's set."""
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/killswitch", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "1")
+
+    score_many_called = {"value": False}
+    score_many_batched_called = {"value": False}
+    real_score_many = scoring_mod.score_many
+
+    async def _spy_score_many(*args, **kwargs):
+        score_many_called["value"] = True
+        return await real_score_many(*args, **kwargs)
+
+    async def _spy_score_many_batched(*args, **kwargs):  # noqa: ARG001
+        score_many_batched_called["value"] = True
+        raise AssertionError("score_many_batched must not be called when TIER1_BATCH_SIZE=1")
+
+    monkeypatch.setattr(scoring_mod, "score_many", _spy_score_many)
+    monkeypatch.setattr(scoring_mod, "score_many_batched", _spy_score_many_batched)
+
+    log = pipeline.run(_client=fake_client)
+
+    assert score_many_called["value"] is True
+    assert score_many_batched_called["value"] is False
+    assert log.user_results[0].inserted == 1
+
+
+def test_tier1_batch_size_greater_than_one_routes_to_batched_path(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/batched-path", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "5")
+
+    score_many_called = {"value": False}
+
+    async def _spy_score_many(*args, **kwargs):  # noqa: ARG001
+        score_many_called["value"] = True
+        raise AssertionError("score_many (unbatched) must not be called when TIER1_BATCH_SIZE > 1")
+
+    real_score_many_batched = scoring_mod.score_many_batched
+    captured = {}
+
+    async def _spy_score_many_batched(items, profile, rubric, batch_size=5, max_concurrency=10):
+        captured["batch_size"] = batch_size
+        return await real_score_many_batched(
+            items, profile, rubric, batch_size=batch_size, max_concurrency=max_concurrency,
+        )
+
+    monkeypatch.setattr(scoring_mod, "score_many", _spy_score_many)
+    monkeypatch.setattr(scoring_mod, "score_many_batched", _spy_score_many_batched)
+
+    pipeline.run(_client=fake_client)
+
+    assert score_many_called["value"] is False
+    assert captured["batch_size"] == 5
+
+
+def test_tier1_batch_size_defaults_to_five_when_unset(fake_client, monkeypatch):
+    _seed_user(fake_client, "u1", threshold=0.5)
+    posting = make_posting(url="https://example.org/job/default-batch-size", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.delenv("TIER1_BATCH_SIZE", raising=False)
+
+    captured = {}
+    real_score_many_batched = scoring_mod.score_many_batched
+
+    async def _spy_score_many_batched(items, profile, rubric, batch_size=5, max_concurrency=10):
+        captured["batch_size"] = batch_size
+        return await real_score_many_batched(
+            items, profile, rubric, batch_size=batch_size, max_concurrency=max_concurrency,
+        )
+
+    monkeypatch.setattr(scoring_mod, "score_many_batched", _spy_score_many_batched)
+
+    pipeline.run(_client=fake_client)
+
+    assert captured["batch_size"] == 5
 
 
 # ---------------------------------------------------------------------------
@@ -978,6 +1069,7 @@ def test_token_usage_logged_and_aggregated_across_users(fake_client, monkeypatch
     ]
     _stub_sources(monkeypatch, postings)
     _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "1")  # force the plain score_many path this test stubs
 
     async def _fake_score_many(items, profile, rubric, max_concurrency=10):
         real = scoring_mod.ascore
@@ -1013,6 +1105,7 @@ def test_token_usage_persisted_to_pipeline_runs(fake_client, monkeypatch):
     posting = make_posting(url="https://example.org/job/usage-persist", source="iap", deadline=date(2030, 1, 1))
     _stub_sources(monkeypatch, [posting])
     _stub_llms(monkeypatch, fit=0.8)
+    monkeypatch.setenv("TIER1_BATCH_SIZE", "1")  # force the plain score_many path this test stubs
 
     async def _fake_score_many(items, profile, rubric, max_concurrency=10):
         real = scoring_mod.ascore

@@ -9,6 +9,14 @@ friends, which stay exactly as they were (tests inject _llm_fn against the sync 
 score_many() runs many postings concurrently under a bounded semaphore, with a
 rate-limit-specific backoff loop around the actual API call (separate from the
 existing one-shot parse-retry, which the async path also preserves unchanged).
+
+Batched Tier 1 path (score_many_batched/_acall_llm_batch) is a further, also
+additive, alternative to score_many(): it scores several postings per Anthropic
+call to amortize the static prompt prefix (tools schema + profile + rubric) that
+score_many() otherwise pays once per posting. pipeline.py opts into it via
+TIER1_BATCH_SIZE (>1); TIER1_BATCH_SIZE=1 keeps using score_many() unchanged. Falls
+back to score_many's exact single-posting path (ascore/_acall_llm) per-posting
+whenever a batch call fails or a posting_index is missing from its response.
 """
 from __future__ import annotations
 
@@ -23,7 +31,14 @@ import yaml
 from anthropic import Anthropic, APIStatusError, AsyncAnthropic
 from pydantic import ValidationError
 
-from src.schemas import HardGateResult, RawPosting, ScoredPosting, Tier1ScoreOutput, TokenUsage
+from src.schemas import (
+    HardGateResult,
+    RawPosting,
+    ScoredPosting,
+    Tier1BatchOutput,
+    Tier1ScoreOutput,
+    TokenUsage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +72,28 @@ _TIER1_STRIP_KEYS = frozenset({
     "user_id", "is_admin", "archived_at", "created_at", "updated_at",
     "email_on_match", "display_name",
 })
+
+# Batched Tier 1 scoring (score_many_batched/_acall_llm_batch): amortizes the
+# ~2,801-token static prefix (tools schema + profile + rubric — see
+# scripts/measure_tier1_tokens.py) across every posting in a batch instead of
+# paying it once per posting. At the pilot batch_size=5, measured input
+# tokens/posting drop from ~2,952 to ~710 (~76%); output tokens/posting are
+# unchanged (each posting still gets its own full score+rationale set).
+_TIER1_BATCH_TOOL_NAME = "score_postings"
+# Validated ceiling for the batch_size=5 pilot: ~5 x ~561 observed output
+# tokens/posting + headroom for JSON/tool-call structural overhead (repeated field
+# names, rationale length variance). At the old single-posting max_tokens=2048,
+# a 5-posting batch's response truncates mid-tool_use and the whole batch fails —
+# this must scale with batch size, not stay fixed.
+_TIER1_BATCH_MAX_TOKENS_PILOT = 8192
+_TIER1_BATCH_PILOT_SIZE = 5
+
+
+def _tier1_batch_max_tokens(batch_size: int) -> int:
+    """Scale _TIER1_BATCH_MAX_TOKENS_PILOT linearly with batch_size, floored at the
+    single-posting call's own max_tokens (2048) so a small batch is never given
+    less headroom than a single posting already gets today."""
+    return max(2048, round(_TIER1_BATCH_MAX_TOKENS_PILOT * batch_size / _TIER1_BATCH_PILOT_SIZE))
 
 # Set by _acall_llm right after a successful response, read back by score_many's
 # per-item task once ascore() returns — see score_many's docstring for why a
@@ -113,6 +150,38 @@ def _build_profile_text(profile: dict) -> str:
     profile or _tier1_profile_view(profile)) so scripts/measure_tier1_tokens.py can
     reuse the exact real rendering instead of re-deriving it."""
     return yaml.dump(profile, allow_unicode=True, default_flow_style=False)
+
+
+def _build_batch_prompt(postings: list[RawPosting], profile: dict, rubric: dict) -> str:
+    """Batched Tier 1 prompt: the same static prefix as the single-posting prompt
+    (profile_text via _tier1_profile_view + _build_profile_text, dimensions_text,
+    _COMP_ADEQUACY_RULE — byte-identical pieces, reused not re-derived) followed by
+    every posting in the batch, each under an explicit "=== POSTING N ===" header
+    matching its 0-based index. Includes an explicit instruction to score each
+    posting independently — without it, a model given several postings in one
+    prompt could plausibly start comparing/ranking them against each other, which
+    would silently change what fit_score means relative to today's one-posting-
+    at-a-time calls.
+    """
+    dimensions_text = _build_dimensions_text(rubric)
+    profile_text = _build_profile_text(_tier1_profile_view(profile))
+
+    postings_text = "\n\n".join(
+        f"=== POSTING {i} ===\n{posting.raw_text}" for i, posting in enumerate(postings)
+    )
+
+    return (
+        "Score each of the following job postings against the candidate profile.\n\n"
+        f"CANDIDATE PROFILE:\n{profile_text}\n\n"
+        f"SCORING DIMENSIONS (score 0.0–1.0 each, one-line rationale required):\n"
+        f"{dimensions_text}\n\n"
+        f"{_COMP_ADEQUACY_RULE}"
+        "JOB POSTINGS (score each independently): score each posting INDEPENDENTLY "
+        "on its own merits — do NOT compare or rank postings against each other. "
+        "Return exactly one entry per posting, with its posting_index matching the "
+        "number in that posting's \"=== POSTING N ===\" header below.\n\n"
+        f"{postings_text}"
+    )
 
 
 def score(
@@ -182,6 +251,44 @@ def _merge_tool_use_blocks(response, tool_name: str) -> dict:
             found = True
     if not found:
         raise IndexError(f"No tool_use block named {tool_name!r} found in response.content")
+    return merged
+
+
+def _merge_tool_use_blocks_list(response, tool_name: str, list_key: str) -> dict:
+    """Variant of _merge_tool_use_blocks for a tool output whose payload is a single
+    LIST-valued key (Tier1BatchOutput's "scores"). _merge_tool_use_blocks's
+    merged.update() OVERWRITES on key collision — correct for a single-object
+    output where every block should carry the SAME keys, but wrong here: if the
+    model splits the batch's "scores" array across multiple tool_use blocks
+    (one or a few score entries each), .update() would silently keep only the
+    LAST block's list and drop every entry from the others — the exact same class
+    of silent data loss _merge_tool_use_blocks was written to fix for the
+    single-posting path, just at the list-element level instead of the key level.
+
+    Concatenates *list_key*'s value across every matching block instead. Any OTHER
+    (non-list_key) key is still merged via .update() as before, so this stays a
+    drop-in generalization rather than a special case — Tier1BatchOutput only has
+    "scores" today, but this doesn't assume that.
+
+    Raises IndexError if no matching block is found — same failure mode as
+    _merge_tool_use_blocks, so the existing (IndexError, AttributeError,
+    ValidationError) handling downstream still catches it. _merge_tool_use_blocks
+    itself is unchanged; the single-posting path does not use this variant.
+    """
+    merged: dict = {}
+    concatenated: list = []
+    found = False
+    for block in response.content:
+        if block.type == "tool_use" and block.name == tool_name:
+            found = True
+            block_input = dict(block.input)
+            value = block_input.pop(list_key, None)
+            if isinstance(value, list):
+                concatenated.extend(value)
+            merged.update(block_input)
+    if not found:
+        raise IndexError(f"No tool_use block named {tool_name!r} found in response.content")
+    merged[list_key] = concatenated
     return merged
 
 
@@ -426,4 +533,192 @@ async def score_many(
     total_usage = TokenUsage()
     for _outcome, usage in outcomes:
         total_usage = total_usage + usage
+    return results, total_usage
+
+
+# ---------------------------------------------------------------------------
+# Batched Tier 1 scoring — scores multiple postings per API call to amortize the
+# static prefix (tools schema + profile + rubric). Additive: score(), _call_llm(),
+# _invoke_with_retry(), ascore(), _acall_llm(), and score_many() above are
+# UNCHANGED — this is a separate path pipeline.py opts into via TIER1_BATCH_SIZE.
+# ---------------------------------------------------------------------------
+
+async def _acall_llm_batch(
+    postings: list[RawPosting], profile: dict, rubric: dict,
+) -> list[Tier1ScoreOutput | None]:
+    """Score every posting in *postings* in ONE Anthropic call. Returns a list
+    positionally aligned to *postings* — None at any index the model omitted, or
+    whose posting_index was out of range (logged as a WARNING and skipped, not
+    raised — score_many_batched's per-posting fallback handles filling the gap).
+
+    Reuses _acall_llm's retry-loop machinery verbatim (_is_retryable_status,
+    _backoff_delay, _RATE_LIMIT_MAX_ATTEMPTS) rather than duplicating it — same
+    429/529/5xx transient backoff, same fail-fast on permanent 4xx. There is
+    deliberately NO one-shot parse-retry here (unlike _ainvoke_with_retry wrapping
+    _acall_llm): a parse failure or exhausted backoff here raises straight out to
+    score_many_batched, whose fallback re-scores every posting in the batch
+    individually via the existing ascore()/_acall_llm path — that path already has
+    its own one-shot retry, so retrying the batch itself here would be redundant
+    with, not additive to, the fallback.
+    """
+    model = os.environ.get("TIER1_MODEL") or _TIER1_MODEL_DEFAULT
+    max_tokens = _tier1_batch_max_tokens(len(postings))
+    prompt = _build_batch_prompt(postings, profile, rubric)
+
+    client = AsyncAnthropic()
+    response = None
+    for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
+        try:
+            response = await client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                temperature=0,
+                tools=[{
+                    "name": _TIER1_BATCH_TOOL_NAME,
+                    "description": "Output the seven-dimension rubric score for each job posting in the batch.",
+                    "input_schema": Tier1BatchOutput.model_json_schema(),
+                }],
+                tool_choice={"type": "tool", "name": _TIER1_BATCH_TOOL_NAME},
+                messages=[{"role": "user", "content": prompt}],
+            )
+            break
+        except APIStatusError as exc:
+            if not _is_retryable_status(exc.status_code):
+                raise
+            if attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1:
+                raise
+            delay = _backoff_delay(attempt)
+            log.info(
+                "Tier 1 batch transient API error %s (%d posting(s), attempt %d/%d) — backing off %.1fs",
+                exc.status_code, len(postings), attempt + 1, _RATE_LIMIT_MAX_ATTEMPTS, delay,
+            )
+            await asyncio.sleep(delay)
+
+    try:
+        tool_input = _merge_tool_use_blocks_list(response, _TIER1_BATCH_TOOL_NAME, "scores")
+        batch_output = Tier1BatchOutput.model_validate(tool_input)
+    except (IndexError, AttributeError, ValidationError) as exc:
+        log.error(
+            "Tier 1 batch parse failure (%d posting(s), stop_reason=%s): %s\nraw response: %s",
+            len(postings), response.stop_reason, exc,
+            response.model_dump_json() if hasattr(response, "model_dump_json") else repr(response),
+        )
+        raise ValueError(f"Tier 1 batch response parse error: {exc}") from exc
+
+    _last_usage.set(_extract_usage(response))  # per-batch, not per-posting — one call, one usage record
+
+    results: list[Tier1ScoreOutput | None] = [None] * len(postings)
+    for item in batch_output.scores:
+        if 0 <= item.posting_index < len(postings):
+            # Last-write-wins on a duplicate posting_index — same convention as
+            # _merge_tool_use_blocks's "later blocks' keys win" — and never
+            # corrupts any OTHER index, since each write targets its own slot.
+            results[item.posting_index] = Tier1ScoreOutput(**item.model_dump(exclude={"posting_index"}))
+        else:
+            log.warning(
+                "Tier 1 batch: model returned out-of-range posting_index=%d for a %d-posting batch, ignored",
+                item.posting_index, len(postings),
+            )
+    return results
+
+
+async def score_many_batched(
+    items: list[tuple[RawPosting, HardGateResult]],
+    profile: dict,
+    rubric: dict,
+    batch_size: int = 5,
+    max_concurrency: int = 10,
+) -> tuple[list[ScoredPosting | ScoringError], TokenUsage]:
+    """Score every (posting, gate) pair in *items*, batching *batch_size* postings
+    into each Anthropic call to amortize the ~2,801-token static prefix (tools
+    schema + profile + rubric — see scripts/measure_tier1_tokens.py) that
+    score_many() pays once PER POSTING. At the pilot batch_size=5, measured input
+    tokens/posting drop from ~2,952 to ~710 (~76%); output tokens/posting are
+    unchanged.
+
+    Batches run concurrently under the existing asyncio.Semaphore(max_concurrency)
+    — note this means up to max_concurrency * batch_size postings can be in flight
+    at once. That's fewer, larger calls rather than more calls, so it reduces
+    rate-limit pressure rather than increasing it, but is logged here so the actual
+    in-flight ceiling is visible in the run log.
+
+    PER-POSTING FALLBACK (preserves score_many's existing per-posting isolation
+    guarantee): if a batch call raises for ANY reason (parse failure, exhausted
+    rate-limit backoff, etc.), every posting in that batch falls back to
+    individual scoring via the existing ascore()/_acall_llm path. If the batch
+    call succeeds but is missing some posting_index values (the model omitted
+    one, or returned one out of range), ONLY those specific postings fall back —
+    postings the batch DID score keep their batch result. A posting that also
+    fails on its individual fallback becomes a ScoringError at its position,
+    exactly as score_many() already does. Both fallback cases are logged at
+    WARNING with the batch index and how many postings fell back.
+
+    Fallback calls within a chunk run sequentially, not concurrently: this is the
+    rare/exceptional path (a healthy batch call needs none), and keeping it
+    sequential keeps the _last_usage ContextVar's per-call set/read pairing
+    trivially correct without needing a nested semaphore.
+
+    Returns the same (results, TokenUsage) contract as score_many(): *items*'
+    input order is preserved (one output per input, same index), and TokenUsage is
+    aggregated across every batch call AND every fallback call.
+    """
+    if not items:
+        return [], TokenUsage()
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+    chunks = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
+    log.info(
+        "Tier 1 batching: %d posting(s) in %d batch(es) of up to %d, max_concurrency=%d "
+        "(up to %d posting(s) in flight)",
+        len(items), len(chunks), batch_size, max_concurrency, max_concurrency * batch_size,
+    )
+
+    async def _score_chunk(
+        chunk_index: int, chunk: list[tuple[RawPosting, HardGateResult]],
+    ) -> tuple[list[ScoredPosting | ScoringError], TokenUsage]:
+        async with semaphore:
+            postings = [posting for posting, _gate in chunk]
+            chunk_usage = TokenUsage()
+            try:
+                batch_scores = await _acall_llm_batch(postings, profile, rubric)
+                chunk_usage = chunk_usage + _last_usage.get(TokenUsage())
+            except Exception as exc:
+                log.warning(
+                    "Tier 1 batch %d (%d posting(s)) failed entirely (%s) — falling back to "
+                    "individual scoring for all of them",
+                    chunk_index, len(chunk), exc,
+                )
+                batch_scores = [None] * len(chunk)
+
+            missing = sum(1 for s in batch_scores if s is None)
+            if 0 < missing < len(chunk):
+                log.warning(
+                    "Tier 1 batch %d: %d/%d posting(s) missing from the batch response — "
+                    "falling back to individual scoring for those",
+                    chunk_index, missing, len(chunk),
+                )
+
+            outcomes: list[ScoredPosting | ScoringError] = []
+            for (posting, gate), tier1 in zip(chunk, batch_scores):
+                if tier1 is not None:
+                    fit = weighted_sum(tier1, rubric)
+                    outcomes.append(ScoredPosting(posting=posting, gate=gate, scores=tier1, fit_score=fit))
+                    continue
+                try:
+                    scored = await ascore(posting, gate, profile, rubric)
+                    outcomes.append(scored)
+                    chunk_usage = chunk_usage + _last_usage.get(TokenUsage())
+                except ScoringError as exc:
+                    outcomes.append(exc)
+            return outcomes, chunk_usage
+
+    chunk_results = await asyncio.gather(
+        *(_score_chunk(i, chunk) for i, chunk in enumerate(chunks))
+    )
+
+    results: list[ScoredPosting | ScoringError] = []
+    total_usage = TokenUsage()
+    for outcomes, chunk_usage in chunk_results:
+        results.extend(outcomes)
+        total_usage = total_usage + chunk_usage
     return results, total_usage

@@ -8,15 +8,18 @@ import pytest
 from anthropic import BadRequestError, OverloadedError, RateLimitError
 
 from src import scoring as scoring_mod
-from src.schemas import HardGateResult
+from src.schemas import HardGateResult, TokenUsage
 from src.scoring import (
     ScoringError,
+    _build_batch_prompt,
     _build_dimensions_text,
     _build_profile_text,
     _merge_tool_use_blocks,
+    _merge_tool_use_blocks_list,
     _tier1_profile_view,
     score,
     score_many,
+    score_many_batched,
     weighted_sum,
 )
 from tests.conftest import make_posting, make_tier1
@@ -672,3 +675,387 @@ def test_call_llm_prompt_excludes_stripped_profile_keys(monkeypatch, rubric):
     prompt = captured["messages"][0]["content"]
     assert "email_on_match" not in prompt
     assert "location: Remote" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Batched Tier 1 scoring — _build_batch_prompt / _merge_tool_use_blocks_list /
+# _acall_llm_batch / score_many_batched. score()/_call_llm()/_invoke_with_retry()/
+# ascore()/_acall_llm()/score_many() above are untouched by any of this.
+# ---------------------------------------------------------------------------
+
+def _batch_item_dict(posting_index: int, **tier1_kwargs) -> dict:
+    d = make_tier1(**tier1_kwargs).model_dump()
+    d["posting_index"] = posting_index
+    return d
+
+
+def _batch_response(scores: list[dict], *, usage=None) -> "_FakeResponse":
+    return _FakeResponse(
+        _FakeContentBlock({"scores": scores}, name=scoring_mod._TIER1_BATCH_TOOL_NAME),
+        usage=usage,
+    )
+
+
+def test_build_batch_prompt_contains_all_postings_with_indices(rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"POSTING TEXT {i}") for i in range(3)]
+    prompt = _build_batch_prompt(postings, {"location": "Remote"}, rubric)
+    for i in range(3):
+        assert f"=== POSTING {i} ===" in prompt
+        assert f"POSTING TEXT {i}" in prompt
+
+
+def test_build_batch_prompt_includes_independence_instruction(rubric):
+    postings = [make_posting(raw_text="text")]
+    prompt = _build_batch_prompt(postings, {"location": "Remote"}, rubric)
+    assert "INDEPENDENTLY" in prompt
+    assert "do NOT compare or rank" in prompt
+    assert "posting_index" in prompt
+
+
+def test_build_batch_prompt_excludes_stripped_profile_keys(rubric):
+    postings = [make_posting(raw_text="text")]
+    prompt = _build_batch_prompt(postings, {"location": "Remote", "email_on_match": True}, rubric)
+    assert "email_on_match" not in prompt
+    assert "location: Remote" in prompt
+
+
+# --- _merge_tool_use_blocks_list -------------------------------------------
+
+def test_merge_tool_use_blocks_list_single_block():
+    response = _FakeResponse(_FakeContentBlock(
+        {"scores": [{"posting_index": 0, "x": 1}]}, name="score_postings",
+    ))
+    merged = _merge_tool_use_blocks_list(response, "score_postings", "scores")
+    assert merged["scores"] == [{"posting_index": 0, "x": 1}]
+
+
+def test_merge_tool_use_blocks_list_concatenates_across_blocks():
+    """The regression this variant exists for: .update()-based merging would keep
+    only the LAST block's "scores" list, silently dropping every entry from
+    earlier blocks. Concatenation must preserve all of them."""
+    block1 = _FakeContentBlock({"scores": [{"posting_index": 0, "x": 1}]}, name="score_postings")
+    block2 = _FakeContentBlock({"scores": [{"posting_index": 1, "x": 2}]}, name="score_postings")
+    response = _FakeResponse([block1, block2])
+
+    merged = _merge_tool_use_blocks_list(response, "score_postings", "scores")
+
+    assert merged["scores"] == [{"posting_index": 0, "x": 1}, {"posting_index": 1, "x": 2}]
+
+
+def test_merge_tool_use_blocks_list_three_way_split_no_entries_lost():
+    blocks = [
+        _FakeContentBlock({"scores": [{"posting_index": i, "x": i}]}, name="score_postings")
+        for i in range(3)
+    ]
+    response = _FakeResponse(blocks)
+    merged = _merge_tool_use_blocks_list(response, "score_postings", "scores")
+    assert merged["scores"] == [{"posting_index": 0, "x": 0}, {"posting_index": 1, "x": 1}, {"posting_index": 2, "x": 2}]
+
+
+def test_merge_tool_use_blocks_list_merges_non_list_keys_too():
+    block1 = _FakeContentBlock({"scores": [{"a": 1}], "other": "x"}, name="score_postings")
+    block2 = _FakeContentBlock({"scores": [{"a": 2}]}, name="score_postings")
+    response = _FakeResponse([block1, block2])
+    merged = _merge_tool_use_blocks_list(response, "score_postings", "scores")
+    assert merged["scores"] == [{"a": 1}, {"a": 2}]
+    assert merged["other"] == "x"
+
+
+def test_merge_tool_use_blocks_list_ignores_non_matching_blocks():
+    full = [{"posting_index": 0, "x": 1}]
+    other = _FakeContentBlock({"scores": [{"unrelated": True}]}, name="some_other_tool")
+    response = _FakeResponse([other, _FakeContentBlock({"scores": full}, name="score_postings")])
+    merged = _merge_tool_use_blocks_list(response, "score_postings", "scores")
+    assert merged["scores"] == full
+
+
+def test_merge_tool_use_blocks_list_raises_index_error_when_no_match():
+    response = _FakeResponse([_FakeContentBlock({"scores": []}, name="unrelated_tool")])
+    with pytest.raises(IndexError):
+        _merge_tool_use_blocks_list(response, "score_postings", "scores")
+
+
+def test_merge_tool_use_blocks_list_raises_index_error_on_empty_content():
+    response = _FakeResponse([])
+    with pytest.raises(IndexError):
+        _merge_tool_use_blocks_list(response, "score_postings", "scores")
+
+
+# --- _tier1_batch_max_tokens -------------------------------------------------
+
+def test_tier1_batch_max_tokens_pilot_value():
+    assert scoring_mod._tier1_batch_max_tokens(5) == 8192
+
+
+def test_tier1_batch_max_tokens_scales_linearly():
+    assert scoring_mod._tier1_batch_max_tokens(10) == 16384
+
+
+def test_tier1_batch_max_tokens_floored_at_single_call_default():
+    assert scoring_mod._tier1_batch_max_tokens(1) == 2048
+
+
+# --- _acall_llm_batch --------------------------------------------------------
+
+def test_acall_llm_batch_uses_batch_tool_and_scaled_max_tokens(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(5)]
+    scores = [_batch_item_dict(i) for i in range(5)]
+    fake_client = _FakeAsyncClient([_batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    kwargs = fake_client.messages.last_kwargs
+    assert kwargs["tools"][0]["name"] == "score_postings"
+    assert kwargs["tool_choice"] == {"type": "tool", "name": "score_postings"}
+    assert kwargs["max_tokens"] == 8192
+
+
+def test_acall_llm_batch_maps_results_by_posting_index_out_of_order(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(3)]
+    scores = [
+        _batch_item_dict(2, cause_mission_fit=0.9),
+        _batch_item_dict(0, cause_mission_fit=0.1),
+        _batch_item_dict(1, cause_mission_fit=0.5),
+    ]
+    fake_client = _FakeAsyncClient([_batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert results[0].cause_mission_fit.score == 0.1
+    assert results[1].cause_mission_fit.score == 0.5
+    assert results[2].cause_mission_fit.score == 0.9
+
+
+def test_acall_llm_batch_missing_index_is_none(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(3)]
+    scores = [_batch_item_dict(0), _batch_item_dict(2)]  # index 1 omitted
+    fake_client = _FakeAsyncClient([_batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert results[0] is not None
+    assert results[1] is None
+    assert results[2] is not None
+
+
+def test_acall_llm_batch_out_of_range_index_ignored_not_raised(monkeypatch, profile, rubric):
+    postings = [make_posting(url="https://example.org/job/0", raw_text="text0")]
+    scores = [_batch_item_dict(0), _batch_item_dict(99)]  # 99 is out of range for a 1-posting batch
+    fake_client = _FakeAsyncClient([_batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert len(results) == 1
+    assert results[0] is not None
+
+
+def test_acall_llm_batch_duplicate_posting_index_last_write_wins_no_corruption(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(2)]
+    scores = [
+        _batch_item_dict(0, cause_mission_fit=0.1),
+        _batch_item_dict(0, cause_mission_fit=0.9),  # duplicate index 0 — last one wins
+        _batch_item_dict(1, cause_mission_fit=0.5),
+    ]
+    fake_client = _FakeAsyncClient([_batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert results[0].cause_mission_fit.score == 0.9
+    assert results[1].cause_mission_fit.score == 0.5  # untouched by the duplicate at index 0
+
+
+def test_acall_llm_batch_scores_split_across_multiple_blocks(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(2)]
+    block1 = _FakeContentBlock({"scores": [_batch_item_dict(0)]}, name=scoring_mod._TIER1_BATCH_TOOL_NAME)
+    block2 = _FakeContentBlock({"scores": [_batch_item_dict(1)]}, name=scoring_mod._TIER1_BATCH_TOOL_NAME)
+    fake_client = _FakeAsyncClient([_FakeResponse([block1, block2])])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert results[0] is not None
+    assert results[1] is not None
+
+
+def test_acall_llm_batch_retries_on_transient_error(monkeypatch, profile, rubric):
+    postings = [make_posting(raw_text="text")]
+    scores = [_batch_item_dict(0)]
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_BASE_DELAY_SECONDS", 0.001)
+    monkeypatch.setattr(scoring_mod, "_RATE_LIMIT_MAX_DELAY_SECONDS", 0.001)
+    fake_client = _FakeAsyncClient([_overloaded_error(), _batch_response(scores)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results = asyncio.run(scoring_mod._acall_llm_batch(postings, profile, rubric))
+
+    assert results[0] is not None
+    assert fake_client.messages.call_count == 2
+
+
+def test_acall_llm_batch_sets_usage_once_per_batch(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(3)]
+    scores = [_batch_item_dict(i) for i in range(3)]
+    fake_client = _FakeAsyncClient([
+        _batch_response(scores, usage=_FakeUsage(input_tokens=900, output_tokens=90)),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    async def _call_and_read_usage():
+        await scoring_mod._acall_llm_batch(postings, profile, rubric)
+        return scoring_mod._last_usage.get()
+
+    usage = asyncio.run(_call_and_read_usage())
+    assert usage.calls == 1  # ONE batch call for 3 postings, not 3
+    assert usage.input_tokens == 900
+    assert usage.output_tokens == 90
+
+
+# --- score_many_batched -------------------------------------------------------
+
+def test_score_many_batched_empty_items_returns_empty():
+    results, usage = asyncio.run(score_many_batched([], {}, {"dimensions": {}}))
+    assert results == []
+    assert usage == TokenUsage()
+
+
+def test_score_many_batched_happy_path_preserves_order(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(6)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    scores1 = [_batch_item_dict(i) for i in range(3)]
+    scores2 = [_batch_item_dict(i) for i in range(3)]
+    fake_client = _FakeAsyncClient([_batch_response(scores1), _batch_response(scores2)])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=3, max_concurrency=1))
+
+    assert len(results) == 6
+    assert [r.posting.url for r in results] == [p.url for p in postings]
+    assert all(not isinstance(r, ScoringError) for r in results)
+
+
+def test_score_many_batched_missing_index_falls_back_individually_others_keep_batch_result(
+    monkeypatch, profile, rubric,
+):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(3)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    batch_scores = [
+        _batch_item_dict(0, cause_mission_fit=0.11),
+        # index 1 omitted -> falls back to individual scoring
+        _batch_item_dict(2, cause_mission_fit=0.33),
+    ]
+    fake_client = _FakeAsyncClient([_batch_response(batch_scores), _valid_tier1_response()])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=3, max_concurrency=1))
+
+    assert len(results) == 3
+    assert not any(isinstance(r, ScoringError) for r in results)
+    assert results[0].scores.cause_mission_fit.score == 0.11  # kept its batch result
+    assert results[2].scores.cause_mission_fit.score == 0.33  # kept its batch result
+    assert fake_client.messages.call_count == 2  # 1 batch + 1 individual fallback for index 1
+
+
+def test_score_many_batched_whole_batch_failure_falls_back_all(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(2)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    fake_client = _FakeAsyncClient([
+        _FakeResponse([]),  # no matching tool_use block -> IndexError -> ValueError, whole batch fails
+        _valid_tier1_response(),
+        _valid_tier1_response(),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=2, max_concurrency=1))
+
+    assert len(results) == 2
+    assert not any(isinstance(r, ScoringError) for r in results)
+    assert fake_client.messages.call_count == 3  # 1 failed batch attempt + 2 individual fallbacks
+
+
+def test_score_many_batched_fallback_also_fails_becomes_scoring_error(monkeypatch, profile, rubric):
+    """A posting missing from the batch response that ALSO fails its individual
+    fallback (both attempts) becomes a ScoringError at its position — exactly as
+    score_many() already does, not a new failure mode."""
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(2)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    batch_scores = [_batch_item_dict(0)]  # index 1 omitted
+    fake_client = _FakeAsyncClient([
+        _batch_response(batch_scores),
+        _bad_request_error(),  # individual fallback attempt 1 for index 1
+        _bad_request_error(),  # individual fallback attempt 2 (ascore's one-shot retry)
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=2, max_concurrency=1))
+
+    assert not isinstance(results[0], ScoringError)
+    assert isinstance(results[1], ScoringError)
+
+
+def test_score_many_batched_aggregates_usage_across_batches(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(4)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    fake_client = _FakeAsyncClient([
+        _batch_response([_batch_item_dict(i) for i in range(2)], usage=_FakeUsage(input_tokens=1000, output_tokens=100)),
+        _batch_response([_batch_item_dict(i) for i in range(2)], usage=_FakeUsage(input_tokens=1200, output_tokens=120)),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=2, max_concurrency=1))
+
+    assert usage.calls == 2  # 2 BATCH calls, not 4 (one per posting)
+    assert usage.input_tokens == 2200
+    assert usage.output_tokens == 220
+
+
+def test_score_many_batched_aggregates_usage_including_fallback_calls(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(2)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    fake_client = _FakeAsyncClient([
+        _batch_response([_batch_item_dict(0)], usage=_FakeUsage(input_tokens=1000, output_tokens=100)),
+        _FakeResponse(
+            _FakeContentBlock(make_tier1().model_dump()),
+            usage=_FakeUsage(input_tokens=50, output_tokens=20),
+        ),
+    ])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    results, usage = asyncio.run(score_many_batched(items, profile, rubric, batch_size=2, max_concurrency=1))
+
+    assert usage.calls == 2  # 1 batch call + 1 individual fallback call
+    assert usage.input_tokens == 1050
+    assert usage.output_tokens == 120
+
+
+def test_score_many_batched_respects_max_concurrency(monkeypatch, profile, rubric):
+    postings = [make_posting(url=f"https://example.org/job/{i}", raw_text=f"text{i}") for i in range(20)]
+    items = [(p, _PASSED_GATE) for p in postings]
+
+    max_concurrency = 3
+    current = 0
+    peak = 0
+
+    async def _fake_acall_llm_batch(batch_postings, profile, rubric):  # noqa: ARG001
+        nonlocal current, peak
+        current += 1
+        peak = max(peak, current)
+        await asyncio.sleep(0.01)
+        current -= 1
+        return [make_tier1() for _ in batch_postings]
+
+    monkeypatch.setattr(scoring_mod, "_acall_llm_batch", _fake_acall_llm_batch)
+
+    asyncio.run(score_many_batched(items, profile, rubric, batch_size=2, max_concurrency=max_concurrency))
+
+    assert peak <= max_concurrency
+    assert peak > 1  # sanity: batches actually ran concurrently, not serially
