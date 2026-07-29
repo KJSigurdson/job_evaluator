@@ -78,6 +78,48 @@ def test_fetch_users_skips_profile_with_no_weights(fake_client, caplog):
     assert "u2" in caplog.text
 
 
+# ---------------------------------------------------------------------------
+# fetch_users — archived_at exclusion (cron path only)
+# ---------------------------------------------------------------------------
+
+def test_fetch_users_cron_path_excludes_archived_users(fake_client):
+    fake_client.seed("profiles", [
+        _profile_row(user_id="active", archived_at=None),
+        _profile_row(user_id="archived", archived_at="2026-01-01T00:00:00+00:00"),
+    ])
+    fake_client.seed("scoring_weights", [
+        _weights_row(user_id="active"), _weights_row(user_id="archived"),
+    ])
+
+    users = fetch_users(fake_client)  # only_user_id=None → cron path
+
+    assert [u.user_id for u in users] == ["active"]
+    # The archived_at filter runs at the profiles query itself, so the archived row
+    # never reaches profile_rows — processed_ids (which _fetch_experiences's .in_
+    # filter is built from) can never include "archived" either, structurally, not
+    # just by later filtering. Confirmed indirectly: nothing downstream ever saw it.
+
+
+def test_fetch_users_explicit_only_user_id_overrides_archived(fake_client):
+    fake_client.seed("profiles", [_profile_row(user_id="archived", archived_at="2026-01-01T00:00:00+00:00")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="archived")])
+
+    users = fetch_users(fake_client, only_user_id="archived")
+
+    assert [u.user_id for u in users] == ["archived"]
+
+
+def test_fetch_users_cron_path_active_only_unchanged(fake_client):
+    """No archived_at column at all (e.g. an older row) must still come back —
+    only an explicitly non-null archived_at excludes a user."""
+    fake_client.seed("profiles", [_profile_row(user_id="u1")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])
+
+    users = fetch_users(fake_client)
+
+    assert [u.user_id for u in users] == ["u1"]
+
+
 def test_fetch_users_empty_when_no_profiles(fake_client):
     assert fetch_users(fake_client) == []
 

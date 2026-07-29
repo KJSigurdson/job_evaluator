@@ -40,6 +40,12 @@ class _FakeQuery:
         self._filters.append(("in", col, list(values)))
         return self
 
+    def is_(self, col: str, val) -> "_FakeQuery":
+        # Mirrors supabase-py's .is_(col, "null"/"true"/"false") — PostgREST's IS
+        # operator, string-typed regardless of the column's real type.
+        self._filters.append(("is", col, val))
+        return self
+
     def execute(self) -> _FakeResponse:
         if self._op == "select":
             rows = self._table.rows
@@ -48,6 +54,15 @@ class _FakeQuery:
                     rows = [r for r in rows if r.get(col) == val]
                 elif kind == "in":
                     rows = [r for r in rows if r.get(col) in val]
+                elif kind == "is":
+                    if val == "null":
+                        rows = [r for r in rows if r.get(col) is None]
+                    elif val == "true":
+                        rows = [r for r in rows if r.get(col) is True]
+                    elif val == "false":
+                        rows = [r for r in rows if r.get(col) is False]
+                    else:
+                        raise NotImplementedError(f"is_ value {val!r}")
             return _FakeResponse([dict(r) for r in rows])
 
         if self._op == "upsert":

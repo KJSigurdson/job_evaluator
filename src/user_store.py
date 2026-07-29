@@ -84,13 +84,23 @@ def fetch_users(client, only_user_id: str | None = None) -> list[UserContext]:
 
     only_user_id — scope every query (profiles, scoring_weights, experiences,
     experience_achievements) to a single user, for a one-off single-user run. When
-    None (the daily-cron default), behaviour is exactly as before this option existed.
+    set, that user is fetched regardless of archived_at — an explicit request
+    overrides archived status, the same way only_user_id already overrides every
+    other cron default.
+
+    On the daily-cron path (only_user_id=None), profiles rows with a non-null
+    archived_at are excluded at the query level (not filtered in Python afterward):
+    archived users must not spend gate/scoring cycles, and filtering at source also
+    keeps _fetch_experiences from pulling data for a user who's about to be dropped
+    anyway.
     """
     profiles_query = client.table("profiles").select("*")
     weights_query = client.table("scoring_weights").select("*")
     if only_user_id is not None:
         profiles_query = profiles_query.eq("user_id", only_user_id)
         weights_query = weights_query.eq("user_id", only_user_id)
+    else:
+        profiles_query = profiles_query.is_("archived_at", "null")
 
     profile_rows = profiles_query.execute().data or []
     weights_rows = weights_query.execute().data or []
