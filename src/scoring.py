@@ -32,6 +32,32 @@ _RATE_LIMIT_MAX_ATTEMPTS = 5
 _RATE_LIMIT_BASE_DELAY_SECONDS = 1.0
 _RATE_LIMIT_MAX_DELAY_SECONDS = 30.0
 
+# Static comp_adequacy scoring rule text — identical in both _call_llm and
+# _acall_llm's prompts, and reused verbatim by scripts/measure_tier1_tokens.py so
+# that script's cacheable-prefix measurement can't drift from the real prompt.
+_COMP_ADEQUACY_RULE = (
+    "SCORING RULE — comp_adequacy: If the posting states NO compensation information, "
+    "score comp_adequacy at 0.6 (neutral — missing data is not evidence of low pay). "
+    "Only score below 0.5 when stated compensation is demonstrably inadequate for the "
+    "candidate's needs. Score above 0.7 when stated comp clearly meets or exceeds needs.\n\n"
+)
+
+# Operational/notification metadata that cannot inform any Tier 1 scoring dimension
+# (cause/role/location/seniority/comp/values/skill-growth fit). Stripped from the
+# profile dict ONLY for the Tier 1 prompt — see _tier1_profile_view. Tier 2
+# (enrich.py) and every other consumer still receive the full, untrimmed profile.
+# Checked against user_store._build_profile()'s actual output shape (location,
+# seniority_level, comp_needs, cause_priorities, values_notes, career_goals,
+# email_on_match, skills, experience_inventory, hard_constraints): only
+# email_on_match is currently present among these — user_id/is_admin/archived_at/
+# created_at/updated_at/display_name are already never included in the profile dict
+# handed to gate/scoring/enrich at all, so this set is defensive/future-proofing as
+# much as it is an active trim today.
+_TIER1_STRIP_KEYS = frozenset({
+    "user_id", "is_admin", "archived_at", "created_at", "updated_at",
+    "email_on_match", "display_name",
+})
+
 # Set by _acall_llm right after a successful response, read back by score_many's
 # per-item task once ascore() returns — see score_many's docstring for why a
 # ContextVar (not a changed return type) is how usage is threaded out of the async
@@ -59,6 +85,34 @@ def weighted_sum(scores: Tier1ScoreOutput, rubric: dict) -> float:
     for dim, cfg in rubric["dimensions"].items():
         total += getattr(scores, dim).score * cfg["weight"]
     return round(total, 6)
+
+
+def _tier1_profile_view(profile: dict) -> dict:
+    """Tier 1-only view of *profile*: drops operational/notification metadata (see
+    _TIER1_STRIP_KEYS) that cannot inform any scoring dimension. Everything else
+    (location, seniority_level, comp_needs, cause_priorities, values_notes,
+    career_goals, skills, experience_inventory, hard_constraints, and any future
+    key not in _TIER1_STRIP_KEYS) passes through unchanged. Tier 2 (enrich.py) is
+    NOT affected — it's handed the original, full profile dict by pipeline.py."""
+    return {k: v for k, v in profile.items() if k not in _TIER1_STRIP_KEYS}
+
+
+def _build_dimensions_text(rubric: dict) -> str:
+    """The SCORING DIMENSIONS block of the Tier 1 prompt. Pure/static per rubric —
+    factored out so scripts/measure_tier1_tokens.py can reuse the exact real text
+    instead of re-deriving it."""
+    return "\n".join(
+        f"- {name} (weight {cfg['weight']}): {cfg['description']}"
+        for name, cfg in rubric["dimensions"].items()
+    )
+
+
+def _build_profile_text(profile: dict) -> str:
+    """YAML-render *profile* for the CANDIDATE PROFILE block of the Tier 1 prompt.
+    Factored out (not the trim itself — callers decide whether to pass the full
+    profile or _tier1_profile_view(profile)) so scripts/measure_tier1_tokens.py can
+    reuse the exact real rendering instead of re-deriving it."""
+    return yaml.dump(profile, allow_unicode=True, default_flow_style=False)
 
 
 def score(
@@ -139,21 +193,15 @@ def _call_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1ScoreOut
     """Call Claude with tool-use to get a structured Tier1ScoreOutput."""
     model = os.environ.get("TIER1_MODEL") or _TIER1_MODEL_DEFAULT
 
-    dimensions_text = "\n".join(
-        f"- {name} (weight {cfg['weight']}): {cfg['description']}"
-        for name, cfg in rubric["dimensions"].items()
-    )
-    profile_text = yaml.dump(profile, allow_unicode=True, default_flow_style=False)
+    dimensions_text = _build_dimensions_text(rubric)
+    profile_text = _build_profile_text(_tier1_profile_view(profile))
 
     prompt = (
         "Score the following job posting against the candidate profile.\n\n"
         f"CANDIDATE PROFILE:\n{profile_text}\n\n"
         f"SCORING DIMENSIONS (score 0.0–1.0 each, one-line rationale required):\n"
         f"{dimensions_text}\n\n"
-        "SCORING RULE — comp_adequacy: If the posting states NO compensation information, "
-        "score comp_adequacy at 0.6 (neutral — missing data is not evidence of low pay). "
-        "Only score below 0.5 when stated compensation is demonstrably inadequate for the "
-        "candidate's needs. Score above 0.7 when stated comp clearly meets or exceeds needs.\n\n"
+        f"{_COMP_ADEQUACY_RULE}"
         f"JOB POSTING:\n{posting.raw_text}"
     )
 
@@ -238,21 +286,15 @@ async def _acall_llm(posting: RawPosting, profile: dict, rubric: dict) -> Tier1S
     """
     model = os.environ.get("TIER1_MODEL") or _TIER1_MODEL_DEFAULT
 
-    dimensions_text = "\n".join(
-        f"- {name} (weight {cfg['weight']}): {cfg['description']}"
-        for name, cfg in rubric["dimensions"].items()
-    )
-    profile_text = yaml.dump(profile, allow_unicode=True, default_flow_style=False)
+    dimensions_text = _build_dimensions_text(rubric)
+    profile_text = _build_profile_text(_tier1_profile_view(profile))
 
     prompt = (
         "Score the following job posting against the candidate profile.\n\n"
         f"CANDIDATE PROFILE:\n{profile_text}\n\n"
         f"SCORING DIMENSIONS (score 0.0–1.0 each, one-line rationale required):\n"
         f"{dimensions_text}\n\n"
-        "SCORING RULE — comp_adequacy: If the posting states NO compensation information, "
-        "score comp_adequacy at 0.6 (neutral — missing data is not evidence of low pay). "
-        "Only score below 0.5 when stated compensation is demonstrably inadequate for the "
-        "candidate's needs. Score above 0.7 when stated comp clearly meets or exceeds needs.\n\n"
+        f"{_COMP_ADEQUACY_RULE}"
         f"JOB POSTING:\n{posting.raw_text}"
     )
 

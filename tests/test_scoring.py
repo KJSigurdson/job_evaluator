@@ -9,7 +9,16 @@ from anthropic import BadRequestError, OverloadedError, RateLimitError
 
 from src import scoring as scoring_mod
 from src.schemas import HardGateResult
-from src.scoring import ScoringError, _merge_tool_use_blocks, score, score_many, weighted_sum
+from src.scoring import (
+    ScoringError,
+    _build_dimensions_text,
+    _build_profile_text,
+    _merge_tool_use_blocks,
+    _tier1_profile_view,
+    score,
+    score_many,
+    weighted_sum,
+)
 from tests.conftest import make_posting, make_tier1
 
 
@@ -226,9 +235,11 @@ class _FakeMessages:
     def __init__(self, responses):
         self._responses = list(responses)
         self.call_count = 0
+        self.last_kwargs = None  # captures the most recent .create() call's kwargs for prompt-content assertions
 
-    async def create(self, **kwargs):  # noqa: ARG002
+    async def create(self, **kwargs):
         self.call_count += 1
+        self.last_kwargs = kwargs
         item = self._responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -554,3 +565,110 @@ def test_score_many_scoring_error_contributes_zero_usage(monkeypatch, profile, r
     # doesn't crash or corrupt the aggregate, not that stubs report nonzero usage.
     assert usage.calls == 0
     assert usage.input_tokens == 0
+
+
+# ---------------------------------------------------------------------------
+# _tier1_profile_view — Tier 1-only trim of operational/notification metadata
+# ---------------------------------------------------------------------------
+
+def test_tier1_profile_view_strips_email_on_match():
+    profile = {"location": "Remote", "email_on_match": True}
+    view = _tier1_profile_view(profile)
+    assert "email_on_match" not in view
+    assert view["location"] == "Remote"
+
+
+def test_tier1_profile_view_strips_all_known_operational_keys_when_present():
+    profile = {
+        "location": "Remote",
+        "user_id": "u1", "is_admin": True, "archived_at": "2026-01-01",
+        "created_at": "2026-01-01", "updated_at": "2026-01-01",
+        "email_on_match": True, "display_name": "Kalle",
+    }
+    view = _tier1_profile_view(profile)
+    assert view == {"location": "Remote"}
+
+
+def test_tier1_profile_view_preserves_scoring_relevant_keys():
+    profile = {
+        "location": "Sundsvall, Sweden",
+        "seniority_level": "Senior",
+        "comp_needs": "Market rate",
+        "cause_priorities": ["global health"],
+        "values_notes": "GWWC pledge",
+        "career_goals": "Data leadership",
+        "skills": "SQL, Python",
+        "experience_inventory": "Work:\n- Head of Data",
+        "hard_constraints": {"location": {}, "seniority": {}},
+    }
+    assert _tier1_profile_view(profile) == profile
+
+
+def test_tier1_profile_view_noop_when_no_operational_keys_present():
+    profile = {"location": "Remote", "skills": "SQL"}
+    assert _tier1_profile_view(profile) == profile
+
+
+def test_tier1_profile_view_does_not_mutate_input():
+    profile = {"location": "Remote", "email_on_match": True}
+    _tier1_profile_view(profile)
+    assert "email_on_match" in profile  # original untouched
+
+
+# ---------------------------------------------------------------------------
+# _build_dimensions_text / _build_profile_text — pure prompt-piece builders,
+# factored out of _call_llm/_acall_llm so scripts/measure_tier1_tokens.py can
+# reuse the exact real text without copy-pasting it.
+# ---------------------------------------------------------------------------
+
+def test_build_dimensions_text_matches_rubric(rubric):
+    text = _build_dimensions_text(rubric)
+    for dim, cfg in rubric["dimensions"].items():
+        assert f"- {dim} (weight {cfg['weight']}): {cfg['description']}" in text
+
+
+def test_build_profile_text_is_yaml_dump_of_profile():
+    profile = {"location": "Remote", "skills": "SQL"}
+    text = _build_profile_text(profile)
+    assert "location: Remote" in text
+    assert "skills: SQL" in text
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: the trim is actually wired into the real prompt sent to Anthropic,
+# for BOTH the sync (_call_llm) and async (_acall_llm) real-call paths.
+# ---------------------------------------------------------------------------
+
+def test_acall_llm_prompt_excludes_stripped_profile_keys(monkeypatch, rubric):
+    profile = {"location": "Remote", "email_on_match": True}
+    fake_client = _FakeAsyncClient([_valid_tier1_response()])
+    monkeypatch.setattr(scoring_mod, "AsyncAnthropic", lambda: fake_client)
+
+    asyncio.run(scoring_mod._acall_llm(make_posting(), profile, rubric))
+
+    prompt = fake_client.messages.last_kwargs["messages"][0]["content"]
+    assert "email_on_match" not in prompt
+    assert "location: Remote" in prompt
+
+
+def test_call_llm_prompt_excludes_stripped_profile_keys(monkeypatch, rubric):
+    profile = {"location": "Remote", "email_on_match": True}
+
+    captured = {}
+
+    class _FakeSyncMessages:
+        def create(self, **kwargs):
+            captured.update(kwargs)
+            return _valid_tier1_response()
+
+    class _FakeSyncClient:
+        def __init__(self):
+            self.messages = _FakeSyncMessages()
+
+    monkeypatch.setattr(scoring_mod, "Anthropic", _FakeSyncClient)
+
+    scoring_mod._call_llm(make_posting(), profile, rubric)
+
+    prompt = captured["messages"][0]["content"]
+    assert "email_on_match" not in prompt
+    assert "location: Remote" in prompt
