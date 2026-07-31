@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A daily, serverless, **multi-user** pipeline that scrapes EA-aligned job boards (80,000 Hours, Probably Good, IAP referral doc) ONCE per run, then scores that shared pool against every registered user's profile and weights (both read from Supabase), and upserts high-fit roles into a Supabase `matches` table per user with LLM-generated reasoning and CV guidance. Deployed via GitHub Actions cron — no server. Optionally sends a per-user match-digest email and can be scoped to a single user for a one-off request (`--only-user-id`).
+A daily, serverless, **multi-user** pipeline (project name "True North") that ingests EA-aligned job boards (80,000 Hours, Probably Good, IAP referral doc) into a **persistent** Supabase `jobs` table, enriches each posting once with structured LLM output, and matches that shared pool against every registered user's profile embedding + hard constraints, upserting high-fit roles into `matches_v2` with LLM-generated reasoning. Deployed via GitHub Actions cron — no server. Sends a per-user match-digest email (reused unchanged from v1) and supports a cost-capped manual single-user run (`--only-user-id`).
+
+**v2 (`src/pipeline_v2.py`) is the active production pipeline** — wired into `.github/workflows/daily.yml`'s "Run pipeline v2" step. **v1 (`src/pipeline.py`) is disabled** in that same workflow via `if: false` on its step (not deleted — one-line revert to roll back; see "v1 — legacy/disabled" below). v1's scrapers (`src/sources/*.py`) stay alive as the shared fetch code v2's adapters wrap unchanged.
 
 ## Commands
 
@@ -12,60 +14,92 @@ A daily, serverless, **multi-user** pipeline that scrapes EA-aligned job boards 
 # Activate venv (Python 3.14)
 source .venv/bin/activate
 
-# Install dependencies (once requirements.txt exists)
+# Install dependencies
 pip install -r requirements.txt
 
-# Run the pipeline
-python -m src.pipeline
+# Run the v2 pipeline (active path)
+python -m src.pipeline_v2                              # scheduled/cron mode: scrape+ingest+enrich+match+digest
+python -m src.pipeline_v2 --only-user-id <uuid>         # manual DB-only mode: match+digest for one user, no scraping/enrichment (~$0.03)
+python -m src.pipeline_v2 --dry-run                     # compute gate/vector for real (free); skip Tier 1/Tier 2/writes
 
 # Run all tests
 python -m pytest tests/
 
 # Run a single test file
-python -m pytest tests/test_gate.py -v
+python -m pytest tests/test_gate_v2.py -v
 ```
 
-## Architecture
+## Architecture — v2 (active)
 
 ```
 src/
-  sources/            # one module per source; all return List[RawPosting]
-  gate.py             # hard-constraint logic (location + seniority binary pass/fail), both per-user via profile["hard_constraints"]; seniority classifies posting text into intern/junior/mid/senior/director buckets against the user's accept_levels; tags rejection_reason for diagnostics only
-  scoring.py          # Tier 1: cheap rubric scoring via LLM structured output — unchanged per-user, takes profile+rubric dicts. Batched path (score_many_batched/_acall_llm_batch) scores TIER1_BATCH_SIZE postings/call (default 5) to amortize the static prompt prefix; TIER1_BATCH_SIZE=1 falls back to the exact unbatched score_many() path. Per-posting fallback to individual scoring on any batch failure or missing posting_index.
-  enrich.py           # Tier 2: org summary + CV guidance (only for fit >= user's insert_threshold); defensively coerces emphasize_in_cv/deemphasize back to list[str] if a model returns a JSON-array-in-a-string
-  supabase_client.py  # get_client() from SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (service-role, bypasses RLS)
-  user_store.py       # fetch_users(only_user_id=None): reads `profiles` + `scoring_weights` (+ `experiences`/`experience_achievements`, incl. `publication` kind), builds the profile/rubric dicts gate/scoring/enrich expect; parses location_rule + seniority_rule (per-user accept_levels) from JSON text; excludes archived_at users on the cron path (--only-user-id overrides)
-  seen_store.py       # per-user seen-cache backed by the Supabase `seen` table; writes are batched (record_verdict queues in memory, upsert_verdicts flushes once per user in chunks of 500)
-  matches_store.py    # query-existing-URLs + upsert-only against Supabase `matches` (never touches status/user_notes/discarded); update_enrichment() for the one-off reformat migration
-  quota_store.py      # set_status(): running/complete/failed write-back to `search_quota` — one-off single-user runs only
-  run_store.py        # start_run/complete_run/record_token_usage: best-effort run-history telemetry to Supabase `pipeline_runs` (parent) + `pipeline_run_users` (child); a write failure here is logged and swallowed, never raised into the run
-  notify.py           # send_match_digest(): best-effort opt-in match-digest email via a Supabase Edge Function; never raises
-  schemas.py          # Pydantic models for all LLM outputs and internal types, incl. TokenUsage and the batch-scoring Tier1BatchOutput/Tier1BatchItem shapes
-  pipeline.py         # orchestration: fetch users → scrape ONCE (shared) → per-user: dedup → gate → score → enrich → upsert → batched seen flush → digest email → run-history write
+  adapters/                       # SourceAdapter wrappers — reuse src/sources/*.py's fetch code UNCHANGED, add a
+                                   # second, independent parse step producing JobPosting (not v1's RawPosting)
+    base.py                       # JobPosting dataclass + SourceAdapter ABC
+    eighty_thousand_hours.py      # wraps src.sources.eightyk.fetch_raw_hits()
+    probably_good.py              # wraps src.sources.probablygood.fetch_raw_hits()
+    iap.py                        # wraps src.sources.iap.fetch_raw_rows()
+  ingest.py                       # dedup/alias JobPostings into `jobs`/`job_aliases` (canonical_url exact match ->
+                                   # update-in-place on content change; org/title fuzzy match -> job_aliases row,
+                                   # not a new jobs row); writes run_metrics per-board counts
+  models/
+    job_enrichment.py             # JobEnrichment/WorkArrangement/SalaryRange — strict (extra="forbid") schema for
+                                   # jobs.enrichment jsonb, incl. posting_type (job/internship/fellowship/volunteer/
+                                   # funding/program/speculative)
+    tier1_rerank.py                # JobScore/Tier1RerankOutput — strict schema for the Tier 1 rerank LLM output
+  enrich_jobs.py                  # Haiku Batches API: JobEnrichment (incl. posting_type) + Voyage title+summary
+                                   # embedding, for jobs.status='pending_enrich' only (new/content-changed jobs —
+                                   # steady-state stays small since the pool persists across runs)
+  profile_embed.py                # embeds profiles (career_goals/cause_priorities/experience/skills/values_notes —
+                                   # deliberately NOT location/comp_needs, which gate_v2 already enforces), re-embeds
+                                   # only on profile_content_hash change; only_user_id scopes to one user
+  gate_v2.py                      # hard-constraint gate against a jobs row's structured enrichment (not raw text):
+                                   # location (work_arrangement mode/remote_scope/eligible_regions, falling back to
+                                   # location_field text for hybrid/onsite), seniority (enrichment.seniority buckets),
+                                   # posting_type (excludes volunteer/funding by default, null treated as job)
+  match_v2.py                     # gate_v2 survivors -> pgvector cosine rerank to TOP_N=40 via the match_v2_top_jobs()
+                                   # SQL RPC (similarity computed in Postgres, not Python); fetch_matched_job_ids()
+                                   # for the already-matched skip-set (see Data flow)
+  tier1_rerank.py                 # one Haiku Batches call per user, scoring all TOP_N job cards 0-100 in one prompt;
+                                   # gate constraints included as context only (explicit instruction not to re-apply)
+  tier2_enrich.py                 # one Sonnet Batches call per (user,job) pair above a Tier 1 threshold (default 65);
+                                   # reuses v1's exact Tier2EnrichmentOutput shape (org_summary/why_fits/why_not_fits/
+                                   # emphasize_in_cv/deemphasize) so the frontend's existing renderer is untouched
+  pipeline_v2.py                  # orchestration — see Data flow below
+  supabase_client.py              # get_client(); fetch_all() (paginates past PostgREST's 1000-row response cap —
+                                   # a plain .execute() silently truncates, confirmed for real); chunked_upsert()/
+                                   # chunked_insert() (500-row chunks — an oversized single upsert hit a Postgres
+                                   # statement timeout for real, losing the whole batch atomically); batch lifecycle:
+                                   # record_batch_submitted/record_batch_retrieved/find_outstanding_batch/
+                                   # persist_batch_results (crash-safety, see Reliability requirements)
+  notify.py                       # send_match_digest() — REUSED UNCHANGED from v1, same Edge Function/payload contract
+  quota_store.py                  # set_status() — REUSED UNCHANGED from v1, same search_quota semantics
+  user_store.py                   # fetch_users() — REUSED UNCHANGED from v1 (profiles+scoring_weights -> profile/rubric dicts)
 tests/
-scripts/              # standalone one-off scripts, not part of the daily run (measure_tier1_tokens.py, validate_tier1_trim.py)
-.github/workflows/daily.yml
+supabase/migrations/              # SQL applied by hand via the Supabase dashboard (no Supabase CLI in this workflow)
+.github/workflows/daily.yml       # v1 step: if: false (disabled). v2 step: active, timeout-minutes: 350.
 ```
 
-### Data flow
+## Architecture — v1 (legacy/disabled)
 
-1. Fetch every user with a `profiles` row AND a `scoring_weights` row (skip profile-only rows). Archived users (`profiles.archived_at` set) are excluded at the query level on the normal cron path. `--only-user-id X` scopes every query to a single user X instead — a one-off request, not the normal daily run — and, when set, processes that user regardless of archived status (an explicit request overrides the cron default).
-2. Scrape all sources ONCE → shared `List[RawPosting]` pool
-3. Shared recency filter: drop postings older than `RECENCY_DAYS`. Postings with no `posted_at` are exempt UNLESS they also have no `deadline` (e.g. IAP) — those instead get a 14-day cutoff anchored to the *earliest* `first_seen` for that URL across all users in the `seen` table (see `pipeline.py` docstring for the full reasoning). A `DEDUP AUDIT` line logs the shared pool's cross-source duplicate rate by canonical URL right after it's sized — log only, does not deduplicate the pool.
-4. `--limit N` shuffles the fresh pool (seeded on `run_id`, reproducible per run) before slicing to N, so a capped run draws roughly proportionally across sources instead of always favoring whichever source was scraped first
-5. For EACH user: build a skip-set (their `seen` rows ∪ their existing `matches` URLs), drop already-seen postings, then:
-   - Hard-gate: binary pass/fail on location + seniority, both driven by that user's `scoring_weights.location_rule`/`seniority_rule` — **bias toward false-positives; when a field is unstated, or a posting's seniority text doesn't map to any known level, pass it through**. Every rejection is tagged with `rejection_reason` (`location` / `seniority` / `hard_constraints` for both) — diagnostic only, does not change pass/fail. Aggregated into a `Counter` and logged as one summary line per user after the gate loop.
-   - Tier 1 scoring: 7 soft dimensions (0–1 each), weighted by that user's `scoring_weights`, → fit %. Runs batched (`TIER1_BATCH_SIZE` postings/call, default 5) unless `TIER1_BATCH_SIZE=1`, in which case it's one posting per call exactly as before batching existed.
-   - Roles ≥ user's `insert_threshold` → Tier 2 enrichment → upsert into `matches`
-   - Roles between `near_miss_floor` and `insert_threshold` → queued for `seen` as `below_threshold` (not inserted)
-   - Every terminal verdict (`gated_out` / `below_threshold` / `inserted`) is queued in memory and flushed to `seen` for that user in ONE batched upsert (chunked at 500 rows) after that user's Tier 2 loop — not one write per posting. Parse failures are NEVER queued — retried next run.
-   - If `profile["email_on_match"]` is true and ≥1 match was inserted this run and it's not `--dry-run`: send one match-digest email for that user (best-effort — see notify.py, never affects run outcome).
-6. `--only-user-id` (when not `--dry-run`) writes `running` → `complete`/`failed` to `search_quota` for that user around the whole run — the normal multi-user run never touches that table.
-7. Run-history telemetry (`run_store.py`) runs around the WHOLE run, independent of `--only-user-id`: a `pipeline_runs` row opens before scraping and finalizes on every exit path (success, no-users, or a mid-run crash) with per-run totals, one `pipeline_run_users` child row per user, and aggregated Tier 1/Tier 2 `TokenUsage` (also logged as two `TOKEN USAGE tier1`/`TOKEN USAGE tier2` lines). Entirely best-effort — see Reliability requirements below.
+`src/pipeline.py` and everything it alone depends on (`src/gate.py`, `src/scoring.py`, `src/enrich.py`, `src/matches_store.py`, `src/seen_store.py`, `src/run_store.py`) are untouched, fully functional, and still tested — just not invoked by the cron anymore. `src/sources/*.py` (`eightyk.py`, `probablygood.py`, `iap.py`) are shared: v1 calls them directly, v2's adapters wrap the same `fetch_raw_hits()`/`fetch_raw_rows()` functions unchanged. No v1 table (`matches`, `seen`, `pipeline_runs`, `pipeline_run_users`) is read or written by any v2 module. Rollback is a one-line edit to `daily.yml`: remove `if: false` from v1's "Run pipeline" step, add it to v2's "Run pipeline v2" step instead.
 
-### Critical invariant: matches upsert never touches user-owned columns
+### Data flow — v2
 
-`matches_store.py` only ever writes job fields + model output (see `MatchRow` in `schemas.py`, which structurally has no `status`/`user_notes`/`discarded` fields). If a URL already exists in a user's `matches`, the per-user skip-set filters it out before scoring even runs, so it's never re-upserted — this preserves user-edited `status` (Draft/Applied/etc.) across runs.
+**Scheduled/cron mode** (`python -m src.pipeline_v2`, no `--only-user-id`):
+1. Adapters (80k, ProbablyGood, IAP) fetch once, each wrapped in its own try/except (graceful per-source failure) → `ingest.ingest()` dedupes/aliases into `jobs`/`job_aliases`.
+2. `enrich_jobs.enrich_jobs()` — only `status='pending_enrich'` rows (new or content-changed since last ingest); Haiku Batches call, JobEnrichment + Voyage embedding.
+3. `profile_embed.backfill_profile_embeddings()` — only users whose rendered embedding text hash changed since last embed.
+4. Per active user with a non-empty profile and a `profile_embedding` (both checked; missing either skips that user with a logged reason, never crashes the run): fetch that user's already-matched `job_id`s (`match_v2.fetch_matched_job_ids`) and exclude them from the candidate pool **before** gating — without this, a user's existing matches would keep winning top-40 vector-rerank slots indefinitely, permanently starving new jobs from ever reaching Tier 1, on top of re-spending Tier 2 and re-emailing the same jobs every run. Then: `gate_v2.check` survivors → `match_v2.vector_rerank` top-40 → `tier1_rerank.rerank_tier1` (one Haiku call, all 40 cards) → `tier2_enrich.tier2_enrich` (one Sonnet call per pair scoring ≥65) → rows land in `matches_v2` (`tier2_enrich`'s own write, `upsert` on `(user_id, job_id)`).
+5. Digest: every `matches_v2` row written this run is new by construction (step 4's exclusion already filtered out anything pre-existing) — mapped into v1's exact digest payload shape (`{title, org, location, fit_score, why_fits, url}`) and sent via `notify.send_match_digest()`, unchanged contract, only if `profile["email_on_match"]` and not `--dry-run`.
+
+**Manual DB-only mode** (`--only-user-id X`): skips steps 1–3 entirely — no scraping, no job enrichment, no job embedding. Refreshes just that user's own profile embedding if changed (free when unchanged), then steps 4–5 for that user only. Wrapped in the same `running`→`complete`/`failed` `search_quota` bookkeeping v1's `--only-user-id` path already used (`quota_store.set_status`, unchanged). Deliberate cost cap confirmed in production: ~$0.03–0.05/run vs. a full scheduled run's ~$0.90+.
+
+`--dry-run` still computes `gate_v2`/vector rerank for real (free — no LLM cost) but skips Tier 1/Tier 2 and every write; `ingest`/`enrich_jobs` have their own native dry-run (compute-without-writing).
+
+### Critical invariant: matches_v2 upsert never touches user-owned columns
+
+Same principle as v1's `matches` table: `tier2_enrich.py`'s upsert payload is `{user_id, job_id, tier1_score, tier2, created_at}` — structurally no `status`/`user_notes`/`discarded` fields. The already-matched skip-set (step 4 above) means an existing `matches_v2` row is never re-processed, let alone re-upserted, by a later run.
 
 ## Secrets
 
@@ -74,24 +108,27 @@ Required in `.env` / GitHub Actions secrets:
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `GOOGLE_SERVICE_ACCOUNT_JSON`
+- `VOYAGE_API_KEY` — job/profile embeddings (voyage-3.5). No `voyageai` package; `enrich_jobs.embed_texts`/`profile_embed` call Voyage's REST API directly via `httpx` to avoid an unused dependency. Unset = embedding step skipped, not an error (embeddings backfill later once the key exists).
 
 Optional (degrade gracefully when unset — see `.env.example`):
-- `MATCH_DIGEST_URL` / `PIPELINE_SHARED_SECRET` — match-digest email. Unset = digest sending silently skipped (logged at info), never an error.
+- `MATCH_DIGEST_URL` / `PIPELINE_SHARED_SECRET` — match-digest email, same contract as v1. **Currently returning 401 Unauthorized in production** (confirmed pre-existing, not caused by the v2 cutover — v1's last scheduled run before the cutover hit the identical error on the identical endpoint) — needs the Edge Function/secret checked outside this pipeline's code.
 
 ## LLM usage
 
-- **Tier 1 (scoring):** structured JSON output, low temperature, pinned model. Runs on all hard-gate survivors.
-- **Tier 2 (enrichment):** full profile passed in context; generates org summary, why-fit, why-not-fit, emphasize-in-CV, de-emphasize (defensively coerced back to `list[str]` if a model returns a JSON-array-in-a-string). Runs only on fit ≥ that user's `insert_threshold`.
-- Use Claude as an **HTML parser** for sources that don't expose a JSON endpoint (feed page text, extract postings to `RawPosting` schema). Prefer JSON endpoints first.
-- All LLM outputs must be validated against Pydantic schemas. On parse failure: retry once, then log-and-skip (never crash the run).
+- **Enrichment (`enrich_jobs.py`):** Haiku, structured JSON tool output, one Batches API call per pending job. Validated against `JobEnrichment` (strict). On validation failure: one retry with the error appended to the prompt, then `status='stale'` — never partial.
+- **Tier 1 (`tier1_rerank.py`):** Haiku, one Batches API call per user, scoring all of that user's top-40 job cards 0–100 in a single prompt (not per-job — amortizes the static prompt prefix the same way v1's batched Tier 1 did).
+- **Tier 2 (`tier2_enrich.py`):** Sonnet, one Batches API call per (user, job) pair above the Tier 1 threshold. Reuses v1's exact `Tier2EnrichmentOutput` shape and the same defensive `emphasize_in_cv`/`deemphasize` list-coercion.
+- All three stages use the **Anthropic Message Batches API** (not synchronous calls) — cron-appropriate, ~50% of synchronous pricing, but each call polls up to `_POLL_TIMEOUT_SECONDS` (3600s) and a batch can legitimately take up to 24h server-side — see Reliability requirements below for how this is made crash-safe.
+- All LLM outputs validated against Pydantic schemas (strict, `extra="forbid"`). On parse failure: retry once (enrichment/Tier 1/Tier 2 each independently), then log-and-skip — never crash the run.
 
 ## Reliability requirements
 
-- Idempotency: re-running the same day → no new `matches` rows, no modified rows, no duplicate `seen` entries (all writes upsert on their unique key, whether the seen-table upsert is a single row or a batched chunk).
-- Graceful per-source failure: one source erroring must not abort the others.
-- Graceful per-user failure: a missing `scoring_weights` row skips that user (logged) without aborting the run.
-- Match-digest email is strictly best-effort: `notify.send_match_digest()` must never raise (missing config / network error / non-2xx all log-and-swallow), and its call site in `pipeline.py` wraps it in try/except as a second layer of defense. An email failure must never fail the run, flip `search_quota` to `'failed'`, or stop processing of subsequent users.
-- Run-history telemetry is strictly best-effort, same contract as match-digest: `run_store.start_run`/`complete_run`/`record_token_usage` must never raise. Parent and child writes are independent — a child-row failure downgrades the parent's `status` to `complete_partial` (only when the run itself succeeded; a genuinely failed run is never overwritten to look like a partial success) rather than taking down the parent write too. A parent write that fails outright gets a best-effort fallback write to `status='failed'` so a run can't sit stuck at `'running'` with a null `completed_at` forever.
-- Transient LLM errors (`429` rate-limit, `529` overloaded, `5xx` generally — `_is_retryable_status`) are retried with exponential backoff + jitter, up to 5 attempts, in both tiers' async call paths; a permanent `4xx` (e.g. `400` invalid_request) is re-raised immediately instead of burning the backoff budget.
-- Log every run: shared counts (scraped / recency-dropped / stale-dropped), per-user counts (gated-out / scored / inserted / near-miss / parse-failures), per-user gate-rejection breakdown (location / seniority / hard_constraints), per-source success, pinned model string, temperature, `TOKEN USAGE tier1`/`TOKEN USAGE tier2` (calls/input/output/cache tokens), `DEDUP AUDIT` (cross-source duplicate rate of the shared pool).
-- Unit tests are required on: hard-gate logic (incl. rejection_reason categorisation), dedup/URL canonicalization, weighted-sum scoring, Pydantic schema validation, per-user seen-cache logic (incl. batching/chunking), matches upsert column allowlist, match-digest never-raise contract, run-history parent/child write isolation and the `complete_partial`/stuck-at-`running` fallback paths, Tier 1 batched scoring (posting_index mapping incl. out-of-order/duplicate/out-of-range, per-posting and whole-batch fallback to individual scoring, multi-block list-merge concatenation), archived-user exclusion.
+- **Idempotency:** re-running the same day → no duplicate `jobs`/`matches_v2` rows (upsert on canonical_url / (user_id,job_id)), no re-enrichment of unchanged content, no re-matching of already-matched jobs.
+- **Graceful per-source failure:** one adapter erroring must not abort the others (each wrapped independently in `pipeline_v2.py`).
+- **Graceful per-user failure:** a user with no `scoring_weights` row, an empty profile, or no `profile_embedding` yet is skipped with a logged reason — never crashes the run.
+- **Pagination:** any Supabase read that could plausibly exceed 1000 rows MUST go through `supabase_client.fetch_all()`, not a plain `.execute()` — PostgREST silently truncates at `db.max_rows` with no error. Confirmed for real once `jobs` crossed 1000 rows.
+- **Bulk-write chunking:** any bulk `.upsert()`/`.insert()` that could plausibly exceed a few hundred rows MUST go through `chunked_upsert()`/`chunked_insert()` (500-row chunks) — an oversized single statement hit a real Postgres statement timeout, losing the *entire* batch atomically (not just rows past some cutoff), including already-paid-for LLM output.
+- **Batch crash-safety** (the core reliability design of this pipeline — confirmed to have actually lost ~$2.65 of paid Anthropic output before this was built): each Batches-API module (`enrich_jobs.py`/`tier1_rerank.py`/`tier2_enrich.py`) tracks its batch through `batch_submissions` (`submitted`→`retrieved`) and stages every raw result to `batch_results` *immediately on retrieval*, before any parsing or final write. `run_metrics` is written right after usage is tallied — **before** the final table write — so a crash in that write no longer loses the cost record. `find_outstanding_batch()` is checked before submitting new work, so a run that resumes after a runner timeout/crash mid-poll resumes the same in-flight (already-paid-for) batch instead of duplicating it. `reprocess_staged(client, batch_id)` (one per module) replays unprocessed staged results without any new API call — response parsing operates on plain dicts (`result.model_dump(mode="json")`, staged immediately) specifically so the live path and the recovery-replay path share identical code, no dual-shape handling.
+- **Match-digest email:** same never-raise contract as v1 — `notify.send_match_digest()` never raises, and `pipeline_v2.py`'s call site wraps it in try/except as a second layer of defense.
+- **Already-matched skip-set:** `match_v2.fetch_matched_job_ids()` must be applied before `gate_v2`/vector rerank in every per-user matching call — omitting this both wastes Tier 2 spend on already-matched jobs and, since vector rerank is capped at `TOP_N`, can permanently starve new jobs from ever reaching Tier 1 for an active user with several existing matches.
+- **Unit tests are required on:** `gate_v2` logic (location/seniority/posting_type, rejection_reason categorisation), `match_v2` (gate filtering, vector-rerank RPC wiring, already-matched exclusion), Tier 1/Tier 2 batch parsing (dict-based, shared between live and recovery paths), the full batch lifecycle (submission tracking, resumption, staging, `reprocess_staged`), `fetch_all`/`chunked_upsert`/`chunked_insert`, `pipeline_v2.py`'s scheduled vs. manual-mode wiring and digest-payload mapping, and the `posting_type` exclusion default.
