@@ -9,10 +9,12 @@ from pydantic import ValidationError
 from src.dedup import canonical_url
 from src.schemas import (
     DimensionScore,
+    LocationRule,
     MatchRow,
     RawPosting,
     RunCounts,
     ScoredPosting,
+    SeniorityRule,
     Tier1ScoreOutput,
 )
 from tests.conftest import make_posting, make_tier1
@@ -172,3 +174,52 @@ def test_match_row_accepts_empty_list_for_cv_guidance():
 def test_match_row_rejects_string_for_cv_guidance():
     with pytest.raises(ValidationError):
         _match_row_minimal(emphasize_in_cv="BI leadership, CRM ownership")
+
+
+# ---------------------------------------------------------------------------
+# LocationRule / SeniorityRule — strict audit schema for scripts/validate_gates.py.
+# NOT wired into the live gate/scoring path (see schemas.py's module comment) —
+# these tests only cover the schema itself, not user_store._parse_rule's looser
+# JSON-parseability check.
+# ---------------------------------------------------------------------------
+
+def test_location_rule_accepts_valid_shape():
+    rule = LocationRule(accept_fully_remote=True, accept_hybrid_in=["Sweden"], accept_onsite_in=["Sundsvall"])
+    assert rule.accept_fully_remote is True
+    assert rule.accept_hybrid_in == ["Sweden"]
+
+
+def test_location_rule_defaults_when_empty():
+    rule = LocationRule()
+    assert rule.accept_fully_remote is False
+    assert rule.accept_hybrid_in == []
+    assert rule.accept_onsite_in == []
+
+
+def test_location_rule_rejects_unknown_keys():
+    with pytest.raises(ValidationError):
+        LocationRule(accept_fully_remote=True, unexpected_key="x")
+
+
+def test_location_rule_rejects_wrong_type():
+    with pytest.raises(ValidationError):
+        LocationRule(accept_hybrid_in="Sweden")  # must be a list, not a bare string
+
+
+def test_seniority_rule_accepts_known_levels():
+    rule = SeniorityRule(accept_levels=["mid", "senior", "director"])
+    assert rule.accept_levels == ["mid", "senior", "director"]
+
+
+def test_seniority_rule_defaults_to_empty_list():
+    assert SeniorityRule().accept_levels == []
+
+
+def test_seniority_rule_rejects_unknown_level():
+    with pytest.raises(ValidationError):
+        SeniorityRule(accept_levels=["mid", "expert"])  # "expert" isn't one of the five buckets
+
+
+def test_seniority_rule_rejects_unknown_keys():
+    with pytest.raises(ValidationError):
+        SeniorityRule(accept_levels=["mid"], min_years=5)

@@ -186,11 +186,21 @@ def run(
         # -------------------------------------------------------------------------
         # 0. Load users — a user is only processed if they have a profile + weights row
         # -------------------------------------------------------------------------
-        users = fetch_users(client, only_user_id=only_user_id)
+        users, excluded_users = fetch_users(client, only_user_id=only_user_id)
         if not users:
             if track_quota:
                 # A one-off request for a user with no profile/weights row can't be
                 # fulfilled — surface it as a failure rather than silently no-op'ing.
+                # A malformed gate config gets its own, more specific message —
+                # fetch_users already logged the ERROR detail, this just makes the
+                # search_quota failure reason accurate instead of the generic
+                # "no row found" (which would be misleading here: a row DOES exist,
+                # it just failed to parse).
+                if excluded_users:
+                    reasons = "; ".join(f"{e.field}: {e.reason}" for e in excluded_users)
+                    raise RuntimeError(
+                        f"only_user_id={only_user_id}: gate config is malformed ({reasons})"
+                    )
                 raise RuntimeError(
                     f"only_user_id={only_user_id}: no profile+scoring_weights row found"
                 )
@@ -463,6 +473,12 @@ def run(
             run_id, len(users), counts.scraped, counts.shared_pool_size,
             sum(r.inserted for r in user_results),
         )
+        if excluded_users:
+            log.error(
+                "Run %s: %d user(s) EXCLUDED entirely due to malformed gate config: %s",
+                run_id, len(excluded_users),
+                ", ".join(f"{e.user_id} ({e.field}: {e.reason})" for e in excluded_users),
+            )
 
         succeeded = True
         run_status = "complete"

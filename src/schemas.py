@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +114,40 @@ class UserContext(BaseModel):
     user_id: str
     profile: dict  # shape gate.py / scoring.py / enrich.py expect (see user_store.py)
     rubric: dict   # shape scoring.py expects: {threshold, near_miss_min, dimensions}
+
+
+class ExcludedUser(BaseModel):
+    """A user user_store.fetch_users() dropped from this run because their stored
+    gate config (scoring_weights.location_rule / seniority_rule) failed to parse.
+    Distinct from a merely-missing scoring_weights row (which is a normal, quieter
+    skip) — this is a data-integrity problem worth a run-level summary. See
+    user_store._parse_rule / GateConfigError."""
+    user_id: str
+    field: str    # "location_rule" | "seniority_rule"
+    reason: str   # human-readable parse-failure detail
+
+
+# ---------------------------------------------------------------------------
+# Gate config schema — strict validation of the STORED shape of location_rule /
+# seniority_rule, used by scripts/validate_gates.py to audit every user's stored
+# JSON. Deliberately NOT wired into the live gate/scoring path: user_store._parse_rule
+# only requires syntactically-valid JSON that parses to a dict (a genuine parse
+# failure there excludes the user from a live run — see GateConfigError). This is a
+# STRICTER, audit-only check (unknown keys rejected, seniority levels constrained to
+# the known five buckets) that can flag a row as suspect without changing what the
+# live pipeline does with it.
+# ---------------------------------------------------------------------------
+
+class LocationRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    accept_fully_remote: bool = False
+    accept_hybrid_in: list[str] = Field(default_factory=list)
+    accept_onsite_in: list[str] = Field(default_factory=list)
+
+
+class SeniorityRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    accept_levels: list[Literal["intern", "junior", "mid", "senior", "director"]] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

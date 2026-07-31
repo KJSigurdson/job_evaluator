@@ -23,7 +23,10 @@ from src.user_store import fetch_users  # noqa: E402
 
 
 def main() -> None:
-    users = fetch_users(get_client())
+    users, excluded_users = fetch_users(get_client())
+    if excluded_users:
+        for e in excluded_users:
+            print(f"WARNING: user {e.user_id} excluded — {e.field}: {e.reason}")
     if not users:
         print("No Supabase user has both a profile and scoring_weights row — nothing to smoke-test.")
         return

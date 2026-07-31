@@ -5,16 +5,38 @@ structured `experiences` / `experience_achievements` rows where available).
 
 A user is only processed if they have BOTH a `profiles` row and a `scoring_weights`
 row — scoring is impossible without weights, so a profile with no weights row is
-skipped (logged, not fatal).
+skipped (logged, not fatal). A user whose stored gate config (location_rule/
+seniority_rule) is present but fails to parse is ALSO excluded — see
+GateConfigError and fetch_users' docstring — since a broken gate config falling
+back to {} would silently pass every posting for that user while looking healthy.
 """
 from __future__ import annotations
 
 import json
 import logging
 
-from src.schemas import UserContext
+from src.schemas import ExcludedUser, UserContext
 
 log = logging.getLogger(__name__)
+
+
+class GateConfigError(Exception):
+    """Raised by _parse_rule() when a user's stored location_rule/seniority_rule is
+    PRESENT but malformed — not the same as an absent/empty value (None, or an
+    empty/whitespace string), which is a legitimate "constraint unstated" case and
+    stays permissive (an empty dict, per gate.py's bias-toward-false-positives
+    design). A malformed non-empty value is different: silently falling back to {}
+    there would make a broken gate config indistinguishable from an intentionally
+    unrestricted one — every posting would pass the gate for that user while the
+    run looked completely healthy. fetch_users() catches this, excludes the
+    affected user from the run entirely, and logs an end-of-run summary."""
+
+    def __init__(self, user_id, field, raw_value, reason):
+        self.user_id = user_id
+        self.field = field
+        self.raw_value = raw_value
+        self.reason = reason
+        super().__init__(f"user {user_id}: {field} is malformed ({reason}): {raw_value!r}")
 
 _WORK_KINDS = ("work", "education", "extracurricular", "publication")
 _SKILL_KINDS = ("skill", "software_skill", "language")
@@ -55,8 +77,22 @@ def _parse_rule(value, *, user_id=None, field=None) -> dict:
 
     These are `text` columns holding JSON — PostgREST returns them as plain strings, not
     parsed objects. gate.py calls `.get()` on the parsed result, so an unparsed string
-    crashes with AttributeError. An empty dict is the correct permissive default: the
-    gate treats unstated/empty constraints as a pass (see gate._check_location/_check_seniority).
+    crashes with AttributeError. An empty dict is the correct permissive default for a
+    genuinely UNSTATED constraint (None, or an empty/whitespace string) — the gate
+    treats unstated/empty constraints as a pass (see gate._check_location/_check_seniority).
+
+    A value that IS present but fails to parse (invalid JSON, or valid JSON that isn't
+    an object) is a different case: that's malformed data, not an unstated constraint,
+    and raises GateConfigError rather than silently degrading to the same permissive
+    {} — see GateConfigError's docstring for why silently swallowing this would be
+    worse than raising. Logged at ERROR (not the old WARNING) with the user_id and raw
+    stored value, since this is now a run-affecting condition, not just a data quirk.
+
+    One deliberate exception: the JSON literal `null` (the four-character string
+    "null", not a missing/None value) parses to Python None, not a dict — but it's a
+    conventional way to explicitly encode "no rule configured" into a JSON-typed text
+    column, not corrupted data, so it stays in the permissive-{} bucket alongside a
+    real None and an empty string, rather than raising.
     """
     if value is None:
         return {}
@@ -68,18 +104,34 @@ def _parse_rule(value, *, user_id=None, field=None) -> dict:
             return {}
         try:
             parsed = json.loads(text)
-        except json.JSONDecodeError:
-            log.warning("scoring_weights for user %s: %s is not valid JSON: %r", user_id, field, value)
-            return {}
+        except json.JSONDecodeError as exc:
+            log.error(
+                "scoring_weights for user %s: %s is not valid JSON — excluding user from "
+                "this run: %r",
+                user_id, field, value,
+            )
+            raise GateConfigError(user_id, field, value, f"invalid JSON: {exc}") from exc
+        if parsed is None:
+            return {}  # JSON literal `null` — conventional "unset", not malformed
         if not isinstance(parsed, dict):
-            log.warning("scoring_weights for user %s: %s parsed to non-object JSON: %r", user_id, field, value)
-            return {}
+            log.error(
+                "scoring_weights for user %s: %s parsed to non-object JSON — excluding "
+                "user from this run: %r",
+                user_id, field, value,
+            )
+            raise GateConfigError(user_id, field, value, "parsed to non-object JSON")
         return parsed
-    log.warning("scoring_weights for user %s: %s has unexpected type %s", user_id, field, type(value).__name__)
-    return {}
+    log.error(
+        "scoring_weights for user %s: %s has unexpected type %s — excluding user from "
+        "this run: %r",
+        user_id, field, type(value).__name__, value,
+    )
+    raise GateConfigError(user_id, field, value, f"unexpected type {type(value).__name__}")
 
 
-def fetch_users(client, only_user_id: str | None = None) -> list[UserContext]:
+def fetch_users(
+    client, only_user_id: str | None = None,
+) -> tuple[list[UserContext], list[ExcludedUser]]:
     """Fetch every user with a profile row and matching scoring_weights row.
 
     only_user_id — scope every query (profiles, scoring_weights, experiences,
@@ -93,6 +145,13 @@ def fetch_users(client, only_user_id: str | None = None) -> list[UserContext]:
     archived users must not spend gate/scoring cycles, and filtering at source also
     keeps _fetch_experiences from pulling data for a user who's about to be dropped
     anyway.
+
+    Returns (users, excluded) — excluded lists every user dropped because their
+    stored location_rule/seniority_rule failed to parse (see GateConfigError). This
+    is a data-integrity problem, not a normal skip, so it's surfaced separately from
+    the quieter "no scoring_weights row" skip (which stays a warning-only, no-entry
+    case) so callers can log a run-level summary and — for --only-user-id — raise a
+    clear error instead of the generic "no row found" message.
     """
     profiles_query = client.table("profiles").select("*")
     weights_query = client.table("scoring_weights").select("*")
@@ -110,24 +169,32 @@ def fetch_users(client, only_user_id: str | None = None) -> list[UserContext]:
     experiences_by_user, achievements_by_experience = _fetch_experiences(client, processed_ids, only_user_id)
 
     users: list[UserContext] = []
+    excluded: list[ExcludedUser] = []
     for prow in profile_rows:
         uid = prow["user_id"]
         wrow = weights_by_user.get(uid)
         if wrow is None:
             log.warning("Skipping user %s: profile row with no scoring_weights row", uid)
             continue
-        users.append(UserContext(
-            user_id=uid,
-            profile=_build_profile(
+        try:
+            profile = _build_profile(
                 prow, wrow,
                 experiences_by_user.get(uid, []),
                 achievements_by_experience,
-            ),
-            rubric=_build_rubric(wrow),
-        ))
+            )
+        except GateConfigError as exc:
+            excluded.append(ExcludedUser(user_id=exc.user_id, field=exc.field, reason=exc.reason))
+            continue
+        users.append(UserContext(user_id=uid, profile=profile, rubric=_build_rubric(wrow)))
 
     log.info("Loaded %d user(s) with profile + weights", len(users))
-    return users
+    if excluded:
+        log.error(
+            "Excluded %d user(s) from this run due to malformed gate config: %s",
+            len(excluded),
+            ", ".join(f"{e.user_id} ({e.field}: {e.reason})" for e in excluded),
+        )
+    return users, excluded
 
 
 def _fetch_experiences(

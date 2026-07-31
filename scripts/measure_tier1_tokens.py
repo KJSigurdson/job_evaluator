@@ -105,7 +105,10 @@ def main() -> None:
     anthropic_client = Anthropic()
 
     print(f"Loading user {args.user_id} …")
-    users = fetch_users(get_client(), only_user_id=args.user_id)
+    users, excluded_users = fetch_users(get_client(), only_user_id=args.user_id)
+    if excluded_users:
+        for e in excluded_users:
+            print(f"User {e.user_id} excluded — {e.field}: {e.reason}")
     if not users:
         print(f"No user found with user_id={args.user_id} (needs both a profile and scoring_weights row).")
         return

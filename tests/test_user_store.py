@@ -7,6 +7,7 @@ import logging
 import pytest
 
 from src.user_store import (
+    GateConfigError,
     _build_profile,
     _build_rubric,
     _parse_rule,
@@ -61,10 +62,11 @@ def test_fetch_users_merges_profile_and_weights(fake_client):
     fake_client.seed("profiles", [_profile_row()])
     fake_client.seed("scoring_weights", [_weights_row()])
 
-    users = fetch_users(fake_client)
+    users, excluded = fetch_users(fake_client)
 
     assert len(users) == 1
     assert users[0].user_id == "u1"
+    assert excluded == []
 
 
 def test_fetch_users_skips_profile_with_no_weights(fake_client, caplog):
@@ -72,10 +74,11 @@ def test_fetch_users_skips_profile_with_no_weights(fake_client, caplog):
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])
 
     with caplog.at_level(logging.WARNING):
-        users = fetch_users(fake_client)
+        users, excluded = fetch_users(fake_client)
 
     assert [u.user_id for u in users] == ["u1"]
     assert "u2" in caplog.text
+    assert excluded == []  # a missing scoring_weights row is a quiet skip, not an "excluded" entry
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +94,10 @@ def test_fetch_users_cron_path_excludes_archived_users(fake_client):
         _weights_row(user_id="active"), _weights_row(user_id="archived"),
     ])
 
-    users = fetch_users(fake_client)  # only_user_id=None → cron path
+    users, excluded = fetch_users(fake_client)  # only_user_id=None → cron path
 
     assert [u.user_id for u in users] == ["active"]
+    assert excluded == []
     # The archived_at filter runs at the profiles query itself, so the archived row
     # never reaches profile_rows — processed_ids (which _fetch_experiences's .in_
     # filter is built from) can never include "archived" either, structurally, not
@@ -104,9 +108,10 @@ def test_fetch_users_explicit_only_user_id_overrides_archived(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="archived", archived_at="2026-01-01T00:00:00+00:00")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="archived")])
 
-    users = fetch_users(fake_client, only_user_id="archived")
+    users, excluded = fetch_users(fake_client, only_user_id="archived")
 
     assert [u.user_id for u in users] == ["archived"]
+    assert excluded == []
 
 
 def test_fetch_users_cron_path_active_only_unchanged(fake_client):
@@ -115,21 +120,23 @@ def test_fetch_users_cron_path_active_only_unchanged(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="u1")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])
 
-    users = fetch_users(fake_client)
+    users, excluded = fetch_users(fake_client)
 
     assert [u.user_id for u in users] == ["u1"]
+    assert excluded == []
 
 
 def test_fetch_users_empty_when_no_profiles(fake_client):
-    assert fetch_users(fake_client) == []
+    assert fetch_users(fake_client) == ([], [])
 
 
 def test_fetch_users_multiple_users(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
 
-    users = fetch_users(fake_client)
+    users, excluded = fetch_users(fake_client)
     assert {u.user_id for u in users} == {"u1", "u2"}
+    assert excluded == []
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +147,9 @@ def test_fetch_users_only_user_id_returns_only_that_user(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
 
-    users = fetch_users(fake_client, only_user_id="u1")
+    users, excluded = fetch_users(fake_client, only_user_id="u1")
     assert [u.user_id for u in users] == ["u1"]
+    assert excluded == []
 
 
 def test_fetch_users_only_user_id_scopes_experiences(fake_client):
@@ -156,7 +164,7 @@ def test_fetch_users_only_user_id_scopes_experiences(fake_client):
          "proficiency": None, "sort_order": 0, "notes": None},
     ])
 
-    [user] = fetch_users(fake_client, only_user_id="u1")
+    [user] = fetch_users(fake_client, only_user_id="u1")[0]
     assert "u1's job" in user.profile["experience_inventory"]
     assert "u2's job" not in user.profile["experience_inventory"]
 
@@ -165,7 +173,7 @@ def test_fetch_users_only_user_id_not_found_returns_empty(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="u1")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])
 
-    assert fetch_users(fake_client, only_user_id="nonexistent") == []
+    assert fetch_users(fake_client, only_user_id="nonexistent") == ([], [])
 
 
 def test_fetch_users_none_only_user_id_is_unaffected(fake_client):
@@ -173,7 +181,8 @@ def test_fetch_users_none_only_user_id_is_unaffected(fake_client):
     fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
 
-    assert {u.user_id for u in fetch_users(fake_client, only_user_id=None)} == {"u1", "u2"}
+    users, _excluded = fetch_users(fake_client, only_user_id=None)
+    assert {u.user_id for u in users} == {"u1", "u2"}
 
 
 # ---------------------------------------------------------------------------
@@ -296,20 +305,39 @@ def test_parse_rule_dict_passthrough():
     assert _parse_rule(d) is d
 
 
-def test_parse_rule_malformed_json_returns_empty_dict_and_warns(caplog):
-    with caplog.at_level(logging.WARNING):
-        result = _parse_rule("{not valid json", user_id="u1", field="location_rule")
-    assert result == {}
+def test_parse_rule_malformed_json_raises_gate_config_error_and_logs_error(caplog):
+    """A non-empty, present value that fails to parse is NOT the same as an unstated
+    constraint — silently degrading to {} (fully permissive) would make a broken
+    gate config indistinguishable from an intentionally unrestricted one. Raises
+    GateConfigError instead, logged at ERROR (not the old WARNING) since this is
+    now a run-affecting condition."""
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(GateConfigError) as exc_info:
+            _parse_rule("{not valid json", user_id="u1", field="location_rule")
+    assert exc_info.value.user_id == "u1"
+    assert exc_info.value.field == "location_rule"
+    assert exc_info.value.raw_value == "{not valid json"
     assert "u1" in caplog.text
     assert "location_rule" in caplog.text
+    assert any(r.levelname == "ERROR" for r in caplog.records)
 
 
-def test_parse_rule_non_object_json_returns_empty_dict_and_warns(caplog):
-    with caplog.at_level(logging.WARNING):
-        result = _parse_rule("[1, 2, 3]", user_id="u1", field="seniority_rule")
-    assert result == {}
+def test_parse_rule_non_object_json_raises_gate_config_error_and_logs_error(caplog):
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(GateConfigError) as exc_info:
+            _parse_rule("[1, 2, 3]", user_id="u1", field="seniority_rule")
+    assert exc_info.value.user_id == "u1"
+    assert exc_info.value.field == "seniority_rule"
     assert "u1" in caplog.text
     assert "seniority_rule" in caplog.text
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+def test_parse_rule_unexpected_type_raises_gate_config_error():
+    with pytest.raises(GateConfigError) as exc_info:
+        _parse_rule(42, user_id="u1", field="location_rule")
+    assert exc_info.value.field == "location_rule"
+    assert "unexpected type int" in exc_info.value.reason
 
 
 def test_build_profile_parses_json_string_rules_end_to_end():
@@ -332,11 +360,88 @@ def test_build_profile_parses_json_string_rules_end_to_end():
     profile["hard_constraints"]["seniority"].get("accept_levels")
 
 
-def test_build_profile_malformed_rule_string_degrades_to_permissive_empty_dict():
+def test_build_profile_malformed_rule_string_raises_instead_of_degrading():
+    """Reversal of the old behavior: _build_profile must NOT swallow a malformed
+    rule into a permissive {} — it propagates GateConfigError so fetch_users can
+    exclude the user instead of silently gating with no restrictions at all."""
     prow = _profile_row()
     wrow = _weights_row(location_rule="{not valid json")
+    with pytest.raises(GateConfigError):
+        _build_profile(prow, wrow)
+
+
+def test_build_profile_legitimately_empty_rule_still_permissive():
+    """None / empty-string values are still the permissive default — only a
+    non-empty, unparseable value raises."""
+    prow = _profile_row()
+    wrow = _weights_row(location_rule=None, seniority_rule="")
     profile = _build_profile(prow, wrow)
     assert profile["hard_constraints"]["location"] == {}
+    assert profile["hard_constraints"]["seniority"] == {}
+
+
+# ---------------------------------------------------------------------------
+# fetch_users — excludes users whose stored gate config fails to parse
+# ---------------------------------------------------------------------------
+
+def test_fetch_users_excludes_user_with_malformed_location_rule(fake_client, caplog):
+    fake_client.seed("profiles", [_profile_row(user_id="good"), _profile_row(user_id="bad")])
+    fake_client.seed("scoring_weights", [
+        _weights_row(user_id="good"),
+        _weights_row(user_id="bad", location_rule="{not valid json"),
+    ])
+
+    with caplog.at_level(logging.ERROR):
+        users, excluded = fetch_users(fake_client)
+
+    assert [u.user_id for u in users] == ["good"]
+    assert len(excluded) == 1
+    assert excluded[0].user_id == "bad"
+    assert excluded[0].field == "location_rule"
+    assert "bad" in caplog.text
+
+
+def test_fetch_users_excludes_user_with_malformed_seniority_rule(fake_client):
+    fake_client.seed("profiles", [_profile_row(user_id="bad")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="bad", seniority_rule="[1,2,3]")])
+
+    users, excluded = fetch_users(fake_client)
+
+    assert users == []
+    assert len(excluded) == 1
+    assert excluded[0].user_id == "bad"
+    assert excluded[0].field == "seniority_rule"
+
+
+def test_fetch_users_excluded_user_does_not_block_other_users(fake_client):
+    """One user's malformed gate config must not affect any other user's run —
+    same isolation principle as every other per-user failure mode in this pipeline."""
+    fake_client.seed("profiles", [
+        _profile_row(user_id="u1"), _profile_row(user_id="bad"), _profile_row(user_id="u2"),
+    ])
+    fake_client.seed("scoring_weights", [
+        _weights_row(user_id="u1"),
+        _weights_row(user_id="bad", location_rule="not json at all {"),
+        _weights_row(user_id="u2"),
+    ])
+
+    users, excluded = fetch_users(fake_client)
+
+    assert {u.user_id for u in users} == {"u1", "u2"}
+    assert [e.user_id for e in excluded] == ["bad"]
+
+
+def test_fetch_users_only_user_id_excludes_named_user_when_malformed(fake_client):
+    """--only-user-id scoped to a user whose OWN gate config is malformed must
+    still exclude them (not silently pass-all) — the explicit-request override is
+    for archived_at, not for a data-integrity problem."""
+    fake_client.seed("profiles", [_profile_row(user_id="bad")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="bad", location_rule="{broken")])
+
+    users, excluded = fetch_users(fake_client, only_user_id="bad")
+
+    assert users == []
+    assert [e.user_id for e in excluded] == ["bad"]
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +473,7 @@ def test_fetch_users_renders_structured_experience_into_profile(fake_client):
     fake_client.seed("experiences", [_experience()])
     fake_client.seed("experience_achievements", [_achievement()])
 
-    [user] = fetch_users(fake_client)
+    [user] = fetch_users(fake_client)[0]
 
     assert "Head of BI" in user.profile["experience_inventory"]
     assert "Evidensia" in user.profile["experience_inventory"]
@@ -383,7 +488,7 @@ def test_fetch_users_only_queries_experiences_for_processed_users(fake_client):
     fake_client.seed("scoring_weights", [_weights_row(user_id="u1")])  # u2 has no weights
     fake_client.seed("experiences", [_experience(user_id="u2", title="Should not appear")])
 
-    [user] = fetch_users(fake_client)
+    [user] = fetch_users(fake_client)[0]
     assert user.user_id == "u1"
     assert "Should not appear" not in str(user.profile["experience_inventory"])
 
@@ -550,7 +655,7 @@ def test_fetch_users_renders_publication_into_profile(fake_client):
         organization="Nordic Data Journal", start_date="2022-06-01",
     )])
 
-    [user] = fetch_users(fake_client)
+    [user] = fetch_users(fake_client)[0]
 
     assert "Publications & Writing:" in user.profile["experience_inventory"]
     assert "Scaling BI" in user.profile["experience_inventory"]

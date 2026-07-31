@@ -1157,3 +1157,54 @@ def test_dedup_audit_log_line_reports_duplicate_rate(fake_client, monkeypatch, c
     assert "shared_pool=2" in dedup_lines[0]
     assert "unique_canonical=1" in dedup_lines[0]
     assert "duplicates=1" in dedup_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Excluded users — a malformed stored gate config excludes that user from the
+# run entirely (fail-closed), rather than the old silent fallback to a fully
+# permissive {} (fail-open, gate passes everything for that user).
+# ---------------------------------------------------------------------------
+
+def _seed_user_with_malformed_gate(client, user_id: str, *, threshold: float = 0.5) -> None:
+    client.seed("profiles", [_profile_row(user_id)])
+    wrow = _weights_row(user_id, threshold=threshold)
+    wrow["location_rule"] = "{not valid json"
+    client.seed("scoring_weights", [wrow])
+
+
+def test_run_excludes_user_with_malformed_gate_config_and_logs_summary(fake_client, monkeypatch, caplog):
+    _seed_user(fake_client, "good", threshold=0.5)
+    _seed_user_with_malformed_gate(fake_client, "bad")
+    posting = make_posting(url="https://example.org/job/gate-excluded", source="iap", deadline=date(2030, 1, 1))
+    _stub_sources(monkeypatch, [posting])
+    _stub_llms(monkeypatch, fit=0.8)
+
+    with caplog.at_level("ERROR"):
+        log = pipeline.run(_client=fake_client)
+
+    # Only the user with valid gate config gets processed/inserted for.
+    assert [r.user_id for r in log.user_results] == ["good"]
+    assert fetch_match_urls(fake_client, "good") == {canonical_url(posting.url)}
+    assert fetch_match_urls(fake_client, "bad") == set()
+
+    # Run-level summary log names the excluded user.
+    summary_lines = [
+        r.message for r in caplog.records
+        if r.levelname == "ERROR" and "EXCLUDED" in r.message
+    ]
+    assert len(summary_lines) == 1
+    assert "bad" in summary_lines[0]
+    assert "location_rule" in summary_lines[0]
+
+
+def test_run_only_user_id_malformed_gate_raises_specific_error(fake_client, monkeypatch):
+    """--only-user-id scoped to a user with malformed gate config must fail with a
+    message naming the actual problem, not the generic "no row found" message —
+    a row DOES exist, it just failed to parse."""
+    _seed_user_with_malformed_gate(fake_client, "bad")
+    _stub_sources(monkeypatch, [])
+
+    with pytest.raises(RuntimeError, match="gate config is malformed"):
+        pipeline.run(_client=fake_client, only_user_id="bad")
+
+    assert fake_client.table("search_quota").rows[0]["status"] == "failed"
