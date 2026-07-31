@@ -15,6 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 SeniorityLevel = Literal["intern", "junior", "mid", "senior", "director"]
+PostingType = Literal["job", "internship", "fellowship", "volunteer", "funding", "program", "speculative"]
 
 
 class SalaryRange(BaseModel):
@@ -48,3 +49,7 @@ class JobEnrichment(BaseModel):
     skill_tags: list[str] = Field(default_factory=list)
     salary: SalaryRange | None = None
     work_arrangement: WorkArrangement
+    # Optional, defaults to None (not "job") so existing pre-posting_type rows
+    # stay valid — gate_v2 treats None as "job" (see gate_v2.py), not "unknown/
+    # exclude", so a null value here is never itself a reason to filter a posting.
+    posting_type: PostingType | None = None

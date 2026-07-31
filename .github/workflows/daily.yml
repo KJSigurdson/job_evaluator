@@ -1,17 +1,30 @@
 # EA Job Evaluator — daily pipeline (multi-user)
 #
 # Runs automatically at 06:00 UTC every day.
-# Scrapes EA job boards once, scores each Supabase-registered user's shared pool
-# against their own profile/weights, and upserts matches into Supabase per user.
-# State (seen-cache) lives in the Supabase `seen` table — nothing is committed back
-# to the repo.
 #
-# Manual trigger (Actions → Run workflow):
-#   dry_run       = false  →  full run, writes matches + seen to Supabase
-#   dry_run       = true   →  scrape + score only, prints would-be matches, no writes
-#   limit         = N      →  cap the shared postings pool to N (useful for smoke-testing)
-#   only_user_id  = <uuid> →  one-off run scoped to a single user; writes running/complete/
-#                             failed status to search_quota for that user (skipped in dry-run)
+# True North v2 (src/pipeline_v2.py) is now the ACTIVE matching + digest-email
+# path — see the "Run pipeline v2" step below. v1 (src/pipeline.py, the
+# "Run pipeline" step) is disabled via `if: false`, not deleted: its code and
+# tables are untouched, its scrapers stay alive as the shared fetch code the
+# v2 adapters reuse, and re-enabling it is a one-line revert (delete v1's
+# `if: false`, add `if: false` to v2's step instead) — see the "Rollback"
+# note on each step below.
+#
+# Manual trigger (Actions → Run workflow) — inputs apply to whichever step is
+# currently enabled:
+#   dry_run       = false  →  full run, writes to Supabase
+#   dry_run       = true   →  compute only, no writes (v2: still runs gate_v2/
+#                             vector rerank for real — free — but skips Tier 1/
+#                             Tier 2, which is where the real $ cost is)
+#   limit         = N      →  v1 only: cap the shared postings pool to N
+#                             (v2 has no equivalent — its steady-state pool of
+#                             new/changed jobs per run is small by design)
+#   only_user_id  = <uuid> →  one-off run scoped to a single user; writes running/
+#                             complete/failed status to search_quota for that user
+#                             (skipped in dry-run). v2: this is the DB-only manual-
+#                             trigger path — no scraping/enrichment/embedding, just
+#                             gate→vector→Tier1→Tier2→digest for that one user
+#                             against already-enriched jobs (~$0.03/run).
 
 name: Daily pipeline
 
@@ -40,7 +53,16 @@ concurrency:
 jobs:
   run-pipeline:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # v1 alone ran comfortably within 20 minutes (synchronous/concurrent LLM
+    # calls). v2's step chains up to 3 sequential Anthropic Batches API calls
+    # (enrich_jobs -> tier1_rerank -> tier2_enrich), each already polling up
+    # to 3600s internally, and batches can legitimately take up to 24h to
+    # finish server-side — 350 is close to GitHub-hosted runners' 360-minute
+    # hard ceiling, a realistic budget for v2's steady-state (small) batches
+    # without claiming to cover Anthropic's worst-case. If a run times out
+    # mid-poll, the next run resumes the same in-flight batch instead of
+    # duplicating it — see src.supabase_client.find_outstanding_batch.
+    timeout-minutes: 350
 
     steps:
       - name: Checkout
@@ -55,7 +77,10 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # v1 — DISABLED. Rollback: delete the `if: false` line below (and add
+      # `if: false` to the "Run pipeline v2" step instead) to cut back over.
       - name: Run pipeline
+        if: false
         env:
           ANTHROPIC_API_KEY:           ${{ secrets.ANTHROPIC_API_KEY }}
           SUPABASE_URL:                ${{ secrets.SUPABASE_URL }}
@@ -80,3 +105,24 @@ jobs:
           [ -n "${{ inputs.limit }}" ]           && ARGS="$ARGS --limit ${{ inputs.limit }}"
           [ -n "${{ inputs.only_user_id }}" ]    && ARGS="$ARGS --only-user-id ${{ inputs.only_user_id }}"
           python -m src.pipeline $ARGS
+
+      # v2 — ACTIVE. Rollback: add `if: false` here (and delete v1's above).
+      - name: Run pipeline v2
+        env:
+          ANTHROPIC_API_KEY:           ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL:                ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY:   ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          IAP_SHEET_ID:                ${{ secrets.IAP_SHEET_ID }}
+          IAP_SHEET_TAB:               ${{ secrets.IAP_SHEET_TAB }}
+          ALGOLIA_APP_ID:              ${{ secrets.ALGOLIA_APP_ID }}
+          ALGOLIA_API_KEY:             ${{ secrets.ALGOLIA_API_KEY }}
+          ALGOLIA_INDEX_80K:           ${{ secrets.ALGOLIA_INDEX_80K }}
+          VOYAGE_API_KEY:              ${{ secrets.VOYAGE_API_KEY }}
+          MATCH_DIGEST_URL:            ${{ secrets.MATCH_DIGEST_URL }}
+          PIPELINE_SHARED_SECRET:      ${{ secrets.PIPELINE_SHARED_SECRET }}
+        run: |
+          ARGS=""
+          [ "${{ inputs.dry_run }}" = "true" ]   && ARGS="$ARGS --dry-run"
+          [ -n "${{ inputs.only_user_id }}" ]    && ARGS="$ARGS --only-user-id ${{ inputs.only_user_id }}"
+          python -m src.pipeline_v2 $ARGS

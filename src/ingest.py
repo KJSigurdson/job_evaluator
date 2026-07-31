@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from src.adapters.base import JobPosting
 from src.dedup import org_title_key
 from src.job_normalize import content_hash, normalize_job_url
+from src.supabase_client import chunked_insert, chunked_upsert, fetch_all
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +57,15 @@ class IngestCounts:
 
 
 def _fetch_existing_jobs(client) -> tuple[dict[str, dict], dict[str, str]]:
-    """Return (by_canonical_url, by_org_title) — one query over `jobs`, id/
-    canonical_url/content_hash/org/title only (not the potentially-large
-    raw_description/enrichment/embedding columns, which this step never reads)."""
-    rows = client.table("jobs").select("id,canonical_url,content_hash,org,title").execute().data or []
+    """Return (by_canonical_url, by_org_title) — one (possibly paginated) query
+    over `jobs`, id/canonical_url/content_hash/org/title only (not the
+    potentially-large raw_description/enrichment/embedding columns, which this
+    step never reads). Uses fetch_all(), not a plain .execute(): PostgREST
+    silently truncates a response at db.max_rows (1000) with no error, and an
+    incomplete read here means every row past that cutoff gets wrongly decided
+    "new" on this run — a real duplicate-insert/duplicate-alias bug, not just
+    an incomplete report (confirmed for real once `jobs` crossed 1000 rows)."""
+    rows = fetch_all(client.table("jobs").select("id,canonical_url,content_hash,org,title"))
     by_url = {row["canonical_url"]: row for row in rows}
     by_org_title = {org_title_key(row["org"] or "", row["title"] or ""): row["id"] for row in rows}
     return by_url, by_org_title
@@ -192,14 +198,18 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
         )
         return counts
 
+    # chunked_insert/chunked_upsert, not one call for the whole list: an
+    # oversized single statement can hit Postgres's statement timeout (confirmed
+    # for real in src/enrich_jobs.py's equivalent write) and lose the entire
+    # batch, not just rows past some cutoff.
     if new_jobs:
-        client.table("jobs").insert(new_jobs).execute()
+        chunked_insert(client.table("jobs"), new_jobs)
     if changed_updates:
-        client.table("jobs").upsert(list(changed_updates.values()), on_conflict="canonical_url").execute()
+        chunked_upsert(client.table("jobs"), list(changed_updates.values()), on_conflict="canonical_url")
     if unchanged_updates:
-        client.table("jobs").upsert(list(unchanged_updates.values()), on_conflict="canonical_url").execute()
+        chunked_upsert(client.table("jobs"), list(unchanged_updates.values()), on_conflict="canonical_url")
     if new_aliases:
-        client.table("job_aliases").upsert(list(new_aliases.values()), on_conflict="alias_url").execute()
+        chunked_upsert(client.table("job_aliases"), list(new_aliases.values()), on_conflict="alias_url")
 
     per_board_payload = {board: c.as_dict() for board, c in per_board_counts.items()}
     client.table("run_metrics").insert({
@@ -216,8 +226,28 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point — currently 80,000 Hours only (the only adapter built so far).
+# CLI entry point — all registered adapters, fetched and combined into ONE
+# postings list before calling ingest() once, so cross-board org/title aliasing
+# resolves within the same batch (the same job cross-posted on 80k AND
+# ProbablyGood, say, must alias to one jobs row, not two independent "new"
+# decisions from two separate ingest() calls). Graceful per-source failure:
+# one adapter erroring is logged and skipped, not fatal to the others — same
+# principle as v1's per-source scrape failure handling in pipeline.py.
 # ---------------------------------------------------------------------------
+
+_ADAPTERS = {
+    "80000_hours": "src.adapters.eighty_thousand_hours.EightyThousandHoursAdapter",
+    "probably_good": "src.adapters.probably_good.ProbablyGoodAdapter",
+    "iap": "src.adapters.iap.IAPAdapter",
+}
+
+
+def _load_adapter(dotted_path: str):
+    module_path, class_name = dotted_path.rsplit(".", 1)
+    import importlib
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)()
+
 
 if __name__ == "__main__":
     import argparse
@@ -228,18 +258,31 @@ if __name__ == "__main__":
         datefmt="%H:%M:%S",
     )
 
-    parser = argparse.ArgumentParser(description="True North v2 ingest (80,000 Hours)")
+    parser = argparse.ArgumentParser(description="True North v2 ingest")
     parser.add_argument("--dry-run", action="store_true", help="Print counts without writing")
+    parser.add_argument(
+        "--sources", nargs="+", choices=list(_ADAPTERS), default=list(_ADAPTERS),
+        help="Subset of source boards to fetch (default: all)",
+    )
     args = parser.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv()
 
-    from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter
     from src.supabase_client import get_client
 
-    postings = EightyThousandHoursAdapter().fetch()
-    print(f"Fetched {len(postings)} posting(s) from 80,000 Hours")
+    postings: list[JobPosting] = []
+    for name in args.sources:
+        try:
+            adapter = _load_adapter(_ADAPTERS[name])
+            fetched = adapter.fetch()
+        except Exception:
+            log.exception("Adapter %r failed to fetch — skipping this source", name)
+            continue
+        print(f"Fetched {len(fetched)} posting(s) from {name}")
+        postings.extend(fetched)
+
+    print(f"Total: {len(postings)} posting(s) across {len(args.sources)} source(s)")
 
     result = ingest(postings, client=get_client(), dry_run=args.dry_run)
     print(result.as_dict())

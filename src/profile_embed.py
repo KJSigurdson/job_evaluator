@@ -19,6 +19,7 @@ import logging
 
 from src.enrich_jobs import embed_texts, embeddings_available
 from src.job_normalize import content_hash
+from src.supabase_client import chunked_upsert, fetch_all
 from src.user_store import fetch_users
 
 log = logging.getLogger(__name__)
@@ -48,18 +49,21 @@ def build_embedding_text(profile: dict) -> str:
     return "\n\n".join(parts)
 
 
-def backfill_profile_embeddings(client) -> dict:
+def backfill_profile_embeddings(client, *, only_user_id: str | None = None) -> dict:
     """Embed every user (with a profile + scoring_weights row, per
     user_store.fetch_users — a user without weights can't be matched anyway)
     whose rendered embedding text is non-empty and has changed since their
-    stored profile_content_hash. Returns
+    stored profile_content_hash. only_user_id scopes this to a single user —
+    used by pipeline_v2.py's manual DB-only path, where refreshing just that
+    one user's embedding (a no-op if their hash hasn't changed) is cheap
+    enough to always do, unlike a full backfill pass. Returns
     {selected, embedded, skipped_unchanged, skipped_empty}.
     """
     if not embeddings_available():
         log.warning("VOYAGE_API_KEY not set — backfill_profile_embeddings is a no-op")
         return {"selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0}
 
-    users, excluded = fetch_users(client)
+    users, excluded = fetch_users(client, only_user_id=only_user_id)
     if excluded:
         log.warning(
             "fetch_users excluded %d user(s) with malformed gate config: %s",
@@ -70,7 +74,7 @@ def backfill_profile_embeddings(client) -> dict:
 
     existing_hashes = {
         row["user_id"]: row.get("profile_content_hash")
-        for row in client.table("profiles").select("user_id,profile_content_hash").execute().data or []
+        for row in fetch_all(client.table("profiles").select("user_id,profile_content_hash"))
     }
 
     to_embed: list[tuple[str, str, str]] = []  # (user_id, text, hash)
@@ -101,7 +105,7 @@ def backfill_profile_embeddings(client) -> dict:
         {"user_id": user_id, "profile_embedding": vector, "profile_content_hash": text_hash}
         for (user_id, _, text_hash), vector in zip(to_embed, vectors)
     ]
-    client.table("profiles").upsert(updates, on_conflict="user_id").execute()
+    chunked_upsert(client.table("profiles"), updates, on_conflict="user_id")
 
     log.info(
         "backfill_profile_embeddings: %d selected, %d embedded, %d unchanged, %d empty",

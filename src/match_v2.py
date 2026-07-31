@@ -15,10 +15,26 @@ from __future__ import annotations
 import logging
 
 from src.gate_v2 import check as gate_v2_check
+from src.supabase_client import fetch_all
 
 log = logging.getLogger(__name__)
 
-TOP_N = 25
+TOP_N = 40
+
+
+def fetch_matched_job_ids(client, user_id: str) -> set[str]:
+    """job_ids already in matches_v2 for *user_id* — direct analog of v1's
+    src.matches_store.fetch_existing_match_urls(). Callers exclude these from
+    the jobs list passed into match_user() so gate_v2/vector/Tier1/Tier2 only
+    ever evaluate jobs this user hasn't already been matched to. Without this,
+    (a) a user gets re-emailed about the same jobs every run forever, (b)
+    Tier 2 (Sonnet) re-spends on the same pair every run, and — the most
+    severe consequence — (c) since vector_rerank is capped at TOP_N, a user's
+    existing strong matches would keep winning top-N slots indefinitely and
+    could permanently starve new jobs from ever reaching Tier 1 for an active
+    user with several matches already."""
+    rows = fetch_all(client.table("matches_v2").select("job_id").eq("user_id", user_id))
+    return {row["job_id"] for row in rows}
 
 
 def gate_survivors(jobs: list[dict], profile: dict) -> list[dict]:

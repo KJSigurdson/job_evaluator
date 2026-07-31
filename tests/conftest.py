@@ -28,8 +28,16 @@ class _FakeQuery:
         self._payload = payload
         self._on_conflict = on_conflict
         self._filters: list[tuple[str, object]] = []
+        self._range: tuple[int, int] | None = None
 
     def select(self, _cols: str = "*") -> "_FakeQuery":
+        return self
+
+    def range(self, start: int, end: int) -> "_FakeQuery":
+        # Mirrors postgrest-py's .range(start, end) — inclusive on both ends,
+        # matching real PostgREST semantics (src.supabase_client.fetch_all relies
+        # on this to paginate past the real API's default 1000-row response cap).
+        self._range = (start, end)
         return self
 
     def eq(self, col: str, val) -> "_FakeQuery":
@@ -63,6 +71,9 @@ class _FakeQuery:
                         rows = [r for r in rows if r.get(col) is False]
                     else:
                         raise NotImplementedError(f"is_ value {val!r}")
+            if self._range is not None:
+                start, end = self._range
+                rows = rows[start:end + 1]
             return _FakeResponse([dict(r) for r in rows])
 
         if self._op == "upsert":

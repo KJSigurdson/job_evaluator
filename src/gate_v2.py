@@ -22,9 +22,31 @@ structured office-location field.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from src.gate import _matches_region  # reuse verbatim, don't refork
-from src.schemas import HardGateResult
+
+# posting_type in {volunteer, funding} is excluded by default — boards mix real
+# jobs with these opportunity types, and neither belongs in a "job match" list.
+# None (missing, or a pre-posting_type-field enrichment row) is treated as "job"
+# — a null value here is never itself a reason to filter a posting. Per-user
+# opt-in for other types (internship/fellowship/program/speculative) is future
+# work, deliberately not built here.
+_EXCLUDED_POSTING_TYPES = frozenset({"volunteer", "funding"})
+
+
+@dataclass
+class GateV2Result:
+    """v2-specific gate result — not src.schemas.HardGateResult (v1's), which has
+    no posting_type_pass field and shouldn't be modified for a v2-only concern.
+    Field names deliberately match HardGateResult's (passed/reason/
+    rejection_reason) so existing callers reading those don't need to change."""
+    passed: bool
+    location_pass: bool
+    seniority_pass: bool
+    posting_type_pass: bool
+    reason: str | None = None
+    rejection_reason: str | None = None
 
 # Coarse ISO-code/region-group -> common name aliases, used only to bridge v2's
 # eligible_regions vocabulary ("US", "EU") against a user's free-text region
@@ -42,7 +64,7 @@ _REGION_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
-def check(job: dict, profile: dict) -> HardGateResult:
+def check(job: dict, profile: dict) -> GateV2Result:
     """job: a `jobs` row dict with at least location_field and enrichment (the
     JobEnrichment jsonb, as a plain dict — either from Supabase directly or via
     JobEnrichment.model_dump())."""
@@ -54,32 +76,42 @@ def check(job: dict, profile: dict) -> HardGateResult:
         job.get("location_field"), enrichment.get("work_arrangement") or {}, loc_constraints, profile,
     )
     seniority_pass = _check_seniority_v2(enrichment.get("seniority") or [], seniority_constraints)
-    passed = location_pass and seniority_pass
+    posting_type_pass = _check_posting_type(enrichment.get("posting_type"))
+    passed = location_pass and seniority_pass and posting_type_pass
 
     if not passed:
         parts = []
+        failed_dims = []
         if not location_pass:
             parts.append(f"location: {job.get('location_field')!r} does not match any accept condition")
+            failed_dims.append("location")
         if not seniority_pass:
             parts.append(f"seniority: {enrichment.get('seniority')!r} signals below threshold")
+            failed_dims.append("seniority")
+        if not posting_type_pass:
+            parts.append(f"posting_type: {enrichment.get('posting_type')!r} is excluded by default")
+            failed_dims.append("posting_type")
         reason = "; ".join(parts)
-        if not location_pass and not seniority_pass:
-            rejection_reason = "hard_constraints"
-        elif not location_pass:
-            rejection_reason = "location"
-        else:
-            rejection_reason = "seniority"
+        # Same "hard_constraints" bucket convention as v1's gate.py for a
+        # multi-dimension failure — now covering any 2-or-3-way combination
+        # across location/seniority/posting_type, not just the original two.
+        rejection_reason = failed_dims[0] if len(failed_dims) == 1 else "hard_constraints"
     else:
         reason = None
         rejection_reason = None
 
-    return HardGateResult(
+    return GateV2Result(
         passed=passed,
         location_pass=location_pass,
         seniority_pass=seniority_pass,
+        posting_type_pass=posting_type_pass,
         reason=reason,
         rejection_reason=rejection_reason,
     )
+
+
+def _check_posting_type(posting_type: str | None) -> bool:
+    return posting_type not in _EXCLUDED_POSTING_TYPES
 
 
 def _check_location_v2(location_field: str | None, work_arrangement: dict, constraints: dict, profile: dict) -> bool:

@@ -16,12 +16,21 @@ import yaml
 from pydantic import ValidationError
 
 from src.models.tier1_rerank import Tier1RerankOutput
+from src.supabase_client import (
+    chunked_upsert,
+    fetch_all,
+    find_outstanding_batch,
+    persist_batch_results,
+    record_batch_retrieved,
+    record_batch_submitted,
+)
 
 log = logging.getLogger(__name__)
 
+_MODULE = "tier1_rerank"
 _MODEL = "claude-haiku-4-5"
 _TOOL_NAME = "score_jobs"
-_MAX_TOKENS = 4096  # ~25 job cards x (int score + one-line reason) — generous headroom
+_MAX_TOKENS = 8192  # scaled for TOP_N=40 job cards x (int score + one-line reason)
 _POLL_INTERVAL_SECONDS = 10
 _POLL_TIMEOUT_SECONDS = 3600
 
@@ -112,26 +121,41 @@ def build_retry_prompt(*, profile: dict, gate_constraints: dict, job_cards: list
 
 
 # ---------------------------------------------------------------------------
-# Response parsing — pure, unit-testable without hitting the Anthropic API
+# Response parsing — pure, unit-testable without hitting the Anthropic API.
+# Operates on plain dicts (result.model_dump(mode="json") — see _run_batch()),
+# not Anthropic SDK objects, so the live path and reprocess_staged()'s replay
+# path share identical parsing code with no dual-shape handling.
 # ---------------------------------------------------------------------------
 
-def _merge_tool_use_blocks(response, tool_name: str) -> dict:
+def _merge_tool_use_blocks(message: dict, tool_name: str) -> dict:
     """Duplicated from enrich_jobs.py's identical helper, per this codebase's
     established no-shared-utils convention for LLM-call plumbing."""
     merged: dict = {}
     found = False
-    for block in response.content:
-        if block.type == "tool_use" and block.name == tool_name:
-            merged.update(block.input)
+    for block in message["content"]:
+        if block["type"] == "tool_use" and block["name"] == tool_name:
+            merged.update(block["input"])
             found = True
     if not found:
-        raise IndexError(f"No tool_use block named {tool_name!r} found in response.content")
+        raise IndexError(f"No tool_use block named {tool_name!r} found in message content")
     return merged
 
 
-def _parse_scores(response) -> Tier1RerankOutput:
-    tool_input = _merge_tool_use_blocks(response, _TOOL_NAME)
+def _parse_scores(message: dict) -> Tier1RerankOutput:
+    tool_input = _merge_tool_use_blocks(message, _TOOL_NAME)
     return Tier1RerankOutput.model_validate(tool_input)
+
+
+def _parse_one_result(result: dict) -> tuple[Tier1RerankOutput | None, dict | None, str | None]:
+    """Given one raw batch result dict, return (output, usage, error) — shared
+    by the live round-1/round-2 loops and reprocess_staged()."""
+    if result["type"] != "succeeded":
+        return None, None, f"batch result type={result['type']!r}"
+    usage = result["message"]["usage"]
+    try:
+        return _parse_scores(result["message"]), usage, None
+    except (IndexError, AttributeError, ValidationError) as exc:
+        return None, usage, str(exc)
 
 
 _TOOL_SCHEMA = {
@@ -159,23 +183,38 @@ def _batch_request(user_id: str, prompt: str) -> dict:
     }
 
 
-def _run_batch(anthropic_client, requests: list[dict]) -> dict:
-    batch = anthropic_client.messages.batches.create(requests=requests)
-    log.info("Submitted batch %s with %d request(s)", batch.id, len(requests))
+def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = _MODULE) -> dict:
+    """Submit *requests*, or resume an outstanding batch for *module* if a prior
+    run left one — see enrich_jobs.py's identical helper's docstring for the
+    full rationale. Persists every raw result to `batch_results` immediately on
+    retrieval, before any parsing risk, and returns {custom_id: raw_dict}."""
+    batch_id = find_outstanding_batch(client, module)
+    if batch_id is not None:
+        log.warning(
+            "Resuming outstanding batch %s for module %r instead of submitting new work "
+            "(a prior run likely didn't finish polling it)", batch_id, module,
+        )
+    else:
+        batch = anthropic_client.messages.batches.create(requests=requests)
+        batch_id = batch.id
+        record_batch_submitted(client, batch_id, module)
+        log.info("Submitted batch %s with %d request(s)", batch_id, len(requests))
 
     deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS
     while True:
-        batch = anthropic_client.messages.batches.retrieve(batch.id)
+        batch = anthropic_client.messages.batches.retrieve(batch_id)
         if batch.processing_status == "ended":
             break
         if time.monotonic() > deadline:
-            raise TimeoutError(f"Batch {batch.id} did not finish within {_POLL_TIMEOUT_SECONDS}s")
-        log.info("Batch %s still %s — polling again in %ds", batch.id, batch.processing_status, _POLL_INTERVAL_SECONDS)
+            raise TimeoutError(f"Batch {batch_id} did not finish within {_POLL_TIMEOUT_SECONDS}s")
+        log.info("Batch %s still %s — polling again in %ds", batch_id, batch.processing_status, _POLL_INTERVAL_SECONDS)
         time.sleep(_POLL_INTERVAL_SECONDS)
 
     results = {}
-    for item in anthropic_client.messages.batches.results(batch.id):
-        results[item.custom_id] = item.result
+    for item in anthropic_client.messages.batches.results(batch_id):
+        results[item.custom_id] = item.result.model_dump(mode="json")
+    persist_batch_results(client, batch_id, results)
+    record_batch_retrieved(client, batch_id)
     return results
 
 
@@ -203,7 +242,7 @@ def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
         ))
         for user_id, u in users.items()
     ]
-    results = _run_batch(anthropic_client, requests)
+    results = _run_batch(anthropic_client, requests, client=client)
     total_api_calls = len(requests)
 
     scored: dict[str, Tier1RerankOutput] = {}
@@ -212,16 +251,14 @@ def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
     total_output_tokens = 0
 
     for user_id, result in results.items():
-        if result.type != "succeeded":
-            failures[user_id] = f"batch result type={result.type!r}"
-            continue
-        usage = result.message.usage
-        total_input_tokens += usage.input_tokens
-        total_output_tokens += usage.output_tokens
-        try:
-            scored[user_id] = _parse_scores(result.message)
-        except (IndexError, AttributeError, ValidationError) as exc:
-            failures[user_id] = str(exc)
+        output, usage, error = _parse_one_result(result)
+        if usage is not None:
+            total_input_tokens += usage["input_tokens"]
+            total_output_tokens += usage["output_tokens"]
+        if output is not None:
+            scored[user_id] = output
+        else:
+            failures[user_id] = error
 
     if failures:
         log.warning("%d user(s) failed round 1, retrying once: %s", len(failures), list(failures.keys()))
@@ -232,21 +269,19 @@ def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
             ))
             for user_id, error in failures.items()
         ]
-        retry_results = _run_batch(anthropic_client, retry_requests)
+        retry_results = _run_batch(anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry")
         total_api_calls += len(retry_requests)
 
         still_failing: dict[str, str] = {}
         for user_id, result in retry_results.items():
-            if result.type != "succeeded":
-                still_failing[user_id] = f"batch result type={result.type!r} (retry)"
-                continue
-            usage = result.message.usage
-            total_input_tokens += usage.input_tokens
-            total_output_tokens += usage.output_tokens
-            try:
-                scored[user_id] = _parse_scores(result.message)
-            except (IndexError, AttributeError, ValidationError) as exc:
-                still_failing[user_id] = f"{exc} (retry)"
+            output, usage, error = _parse_one_result(result)
+            if usage is not None:
+                total_input_tokens += usage["input_tokens"]
+                total_output_tokens += usage["output_tokens"]
+            if output is not None:
+                scored[user_id] = output
+            else:
+                still_failing[user_id] = f"{error} (retry)"
 
         failures = still_failing
 
@@ -268,4 +303,40 @@ def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
         "Tier 1 rerank complete: %d user(s) requested, %d scored, %d failed",
         len(users), len(scored), len(failures),
     )
+    return {user_id: {"scores": output.scores} for user_id, output in scored.items()}
+
+
+def reprocess_staged(client, batch_id: str) -> dict:
+    """Recovery path: reprocess unprocessed `batch_results` rows for *batch_id*
+    WITHOUT calling the Anthropic API again. Unlike enrich_jobs.py/
+    tier2_enrich.py, this module has no final table write of its own to redo —
+    its only output is the in-memory scores dict the caller (pipeline_v2.py)
+    feeds straight into tier2_enrich — so recovery here just re-parses and
+    returns that same shape. Does NOT write run_metrics (already written by the
+    normal path before whatever crashed necessitated recovery).
+
+    Returns {user_id: {"scores": [JobScore, ...]}} — same shape as
+    rerank_tier1()'s return.
+    """
+    staged = fetch_all(
+        client.table("batch_results").select("custom_id,raw").eq("batch_id", batch_id).eq("processed", False)
+    )
+    if not staged:
+        log.info("reprocess_staged: no unprocessed batch_results for batch %s", batch_id)
+        return {}
+
+    scored: dict[str, Tier1RerankOutput] = {}
+    processed_rows: list[dict] = []
+    for row in staged:
+        user_id = row["custom_id"]
+        output, _usage, error = _parse_one_result(row["raw"])
+        if output is not None:
+            scored[user_id] = output
+        else:
+            log.error("reprocess_staged: user %s permanently failed Tier 1 rerank: %s", user_id, error)
+        processed_rows.append({"batch_id": batch_id, "custom_id": user_id, "raw": row["raw"], "processed": True})
+
+    chunked_upsert(client.table("batch_results"), processed_rows, on_conflict="batch_id,custom_id")
+
+    log.info("reprocess_staged: batch %s -> %d staged, %d scored", batch_id, len(staged), len(scored))
     return {user_id: {"scores": output.scores} for user_id, output in scored.items()}

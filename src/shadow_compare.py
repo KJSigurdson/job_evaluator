@@ -25,7 +25,7 @@ from src.gate import check as gate_v1_check
 from src.gate_v2 import check as gate_v2_check
 from src.job_normalize import normalize_job_url
 from src.sources import eightyk
-from src.supabase_client import get_client
+from src.supabase_client import fetch_all, get_client
 from src.user_store import fetch_users
 
 log = logging.getLogger(__name__)
@@ -62,14 +62,11 @@ def run(client=None) -> dict:
     v1_by_url = {normalize_job_url(p.url): p for p in v1_postings}
 
     log.info("Fetching v2's enriched jobs pool...")
-    v2_rows = (
+    v2_rows = fetch_all(
         client.table("jobs")
         .select("id,title,org,canonical_url,location_field,enrichment")
         .eq("status", "enriched")
         .eq("source_board", "80000_hours")
-        .execute()
-        .data
-        or []
     )
 
     matched = [(v1_by_url[row["canonical_url"]], row) for row in v2_rows if row["canonical_url"] in v1_by_url]

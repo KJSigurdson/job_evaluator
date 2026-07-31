@@ -1,6 +1,7 @@
-"""Tests for src/enrich_jobs.py: prompt content, response parsing, and the
-orchestration flow (batch submit -> parse/validate -> one retry -> stale) against a
-fake Anthropic Batches client and the existing FakeSupabaseClient."""
+"""Tests for src/enrich_jobs.py: prompt content, response parsing, the
+orchestration flow (batch submit -> parse/validate -> one retry -> stale), and
+crash-safety (batch_submissions/batch_results lifecycle, reprocess_staged())
+against a fake Anthropic Batches client and the existing FakeSupabaseClient."""
 from __future__ import annotations
 
 import httpx
@@ -81,6 +82,13 @@ def test_build_prompt_mentions_restriction_type_distinction():
     assert "authorization" in prompt.lower() and "timezone" in prompt.lower()
 
 
+def test_build_prompt_includes_posting_type_classification():
+    prompt = build_prompt(title="x", org="y", location_field=None, description="z")
+    assert "posting_type" in prompt
+    for value in ["job", "internship", "fellowship", "volunteer", "funding", "program", "speculative"]:
+        assert value in prompt
+
+
 def test_build_retry_prompt_appends_validation_error():
     retry = build_retry_prompt(
         title="x", org="y", location_field=None, description="z",
@@ -96,50 +104,48 @@ def test_build_retry_prompt_still_contains_base_prompt_content():
 
 
 # ---------------------------------------------------------------------------
-# _merge_tool_use_blocks / _parse_enrichment
+# _merge_tool_use_blocks / _parse_enrichment — operate on plain dicts (see
+# module docstring: results are normalized via .model_dump(mode="json") right
+# after retrieval, so the live path and reprocess_staged()'s replay path share
+# identical parsing code with no dual-shape handling)
 # ---------------------------------------------------------------------------
 
-class _FakeContentBlock:
-    def __init__(self, input_data, *, type="tool_use", name="enrich_job"):  # noqa: A002
-        self.input = input_data
-        self.type = type
-        self.name = name
+def _block(input_data, *, type="tool_use", name="enrich_job") -> dict:  # noqa: A002
+    return {"type": type, "name": name, "input": input_data}
 
 
-class _FakeMessage:
-    def __init__(self, blocks):
-        self.content = blocks if isinstance(blocks, list) else [blocks]
-        self.stop_reason = "tool_use"
+def _message(blocks) -> dict:
+    return {"content": blocks if isinstance(blocks, list) else [blocks]}
 
 
 def test_merge_tool_use_blocks_single_block():
     full = _valid_enrichment_dict()
-    msg = _FakeMessage(_FakeContentBlock(full))
+    msg = _message(_block(full))
     assert _merge_tool_use_blocks(msg, "enrich_job") == full
 
 
 def test_merge_tool_use_blocks_merges_split_blocks():
     full = _valid_enrichment_dict()
-    blocks = [_FakeContentBlock({k: v}) for k, v in full.items()]
-    msg = _FakeMessage(blocks)
+    blocks = [_block({k: v}) for k, v in full.items()]
+    msg = _message(blocks)
     assert _merge_tool_use_blocks(msg, "enrich_job") == full
 
 
 def test_merge_tool_use_blocks_raises_when_no_match():
-    msg = _FakeMessage([_FakeContentBlock({"x": 1}, name="other_tool")])
+    msg = _message([_block({"x": 1}, name="other_tool")])
     with pytest.raises(IndexError):
         _merge_tool_use_blocks(msg, "enrich_job")
 
 
 def test_parse_enrichment_valid():
-    msg = _FakeMessage(_FakeContentBlock(_valid_enrichment_dict()))
+    msg = _message(_block(_valid_enrichment_dict()))
     result = _parse_enrichment(msg)
     assert isinstance(result, JobEnrichment)
     assert result.summary == _valid_enrichment_dict()["summary"]
 
 
 def test_parse_enrichment_invalid_raises_validation_error():
-    msg = _FakeMessage(_FakeContentBlock({"summary": "x"}))  # missing work_arrangement
+    msg = _message(_block({"summary": "x"}))  # missing work_arrangement
     with pytest.raises(ValidationError):
         _parse_enrichment(msg)
 
@@ -148,23 +154,27 @@ def test_parse_enrichment_invalid_raises_validation_error():
 # enrich_jobs() orchestration — fake Anthropic Batches client + FakeSupabaseClient
 # ---------------------------------------------------------------------------
 
-class _FakeUsage:
-    def __init__(self, input_tokens=100, output_tokens=50):
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-
-
-class _FakeSucceeded:
-    type = "succeeded"
-
+class _FakeSucceededResult:
     def __init__(self, blocks, usage=None):
-        self.message = _FakeMessage(blocks)
-        self.message.usage = usage or _FakeUsage()
+        blocks = blocks if isinstance(blocks, list) else [blocks]
+        self._dump = {
+            "type": "succeeded",
+            "message": {
+                "content": blocks,
+                "usage": usage or {"input_tokens": 100, "output_tokens": 50},
+            },
+        }
+
+    def model_dump(self, mode="json"):
+        return self._dump
 
 
-class _FakeErrored:
+class _FakeErroredResult:
     def __init__(self, kind="errored"):
-        self.type = kind
+        self._dump = {"type": kind}
+
+    def model_dump(self, mode="json"):
+        return self._dump
 
 
 class _FakeResultItem:
@@ -231,7 +241,7 @@ def test_enrich_jobs_happy_path_all_succeed_round_one(fake_client, monkeypatch):
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -248,8 +258,8 @@ def test_enrich_jobs_failure_then_successful_retry(fake_client, monkeypatch):
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock({"summary": "incomplete"})))],  # round 1: invalid
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],   # round 2: valid
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block({"summary": "incomplete"})))],  # round 1: invalid
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],   # round 2: valid
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -268,8 +278,8 @@ def test_enrich_jobs_fails_both_rounds_marks_stale_never_writes_partial(fake_cli
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row(raw_description="original text")])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeErrored())],
-        [_FakeResultItem("job-1", _FakeErrored())],
+        [_FakeResultItem("job-1", _FakeErroredResult())],
+        [_FakeResultItem("job-1", _FakeErroredResult())],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -286,10 +296,10 @@ def test_enrich_jobs_mixed_batch_one_succeeds_one_permanently_fails(fake_client,
     fake_client.seed("jobs", [_job_row("job-good"), _job_row("job-bad")])
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
-            _FakeResultItem("job-good", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict()))),
-            _FakeResultItem("job-bad", _FakeErrored()),
+            _FakeResultItem("job-good", _FakeSucceededResult(_block(_valid_enrichment_dict()))),
+            _FakeResultItem("job-bad", _FakeErroredResult()),
         ],
-        [_FakeResultItem("job-bad", _FakeErrored())],
+        [_FakeResultItem("job-bad", _FakeErroredResult())],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -318,7 +328,7 @@ def test_enrich_jobs_respects_limit(fake_client, monkeypatch):
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row(f"job-{i}") for i in range(5)])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem(f"job-{i}", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict()))) for i in range(2)],
+        [_FakeResultItem(f"job-{i}", _FakeSucceededResult(_block(_valid_enrichment_dict()))) for i in range(2)],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client, limit=2)
@@ -335,7 +345,7 @@ def test_enrich_jobs_only_selects_pending_enrich_status(fake_client, monkeypatch
         _job_row("job-stale", status="stale"),
     ])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-pending", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+        [_FakeResultItem("job-pending", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -347,8 +357,8 @@ def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client,
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(
-            _FakeContentBlock(_valid_enrichment_dict()), usage=_FakeUsage(input_tokens=1000, output_tokens=200),
+        [_FakeResultItem("job-1", _FakeSucceededResult(
+            _block(_valid_enrichment_dict()), usage={"input_tokens": 1000, "output_tokens": 200},
         ))],
     ])
 
@@ -365,7 +375,7 @@ def test_enrich_jobs_embeddings_used_when_key_present(fake_client, monkeypatch):
     monkeypatch.setattr(enrich_jobs, "embed_texts", lambda texts: [[0.1] * 1024 for _ in texts])
     fake_client.seed("jobs", [_job_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -386,7 +396,7 @@ def test_enrich_jobs_voyage_failure_does_not_block_enrichment_write(fake_client,
     monkeypatch.setattr(enrich_jobs, "embed_texts", _raise)
     fake_client.seed("jobs", [_job_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -512,10 +522,10 @@ def test_enrich_jobs_enriched_and_stale_updates_are_separate_upsert_calls(fake_c
     fake_client.seed("jobs", [_job_row("job-good"), _job_row("job-bad")])
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
-            _FakeResultItem("job-good", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict()))),
-            _FakeResultItem("job-bad", _FakeErrored()),
+            _FakeResultItem("job-good", _FakeSucceededResult(_block(_valid_enrichment_dict()))),
+            _FakeResultItem("job-bad", _FakeErroredResult()),
         ],
-        [_FakeResultItem("job-bad", _FakeErrored())],
+        [_FakeResultItem("job-bad", _FakeErroredResult())],
     ])
 
     run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -539,7 +549,7 @@ def test_enrich_jobs_enriched_update_carries_not_null_columns_through(fake_clien
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row(canonical_url="https://example.org/x", source_board="80000_hours", content_hash="abc123")])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
     ])
 
     run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -548,3 +558,195 @@ def test_enrich_jobs_enriched_update_carries_not_null_columns_through(fake_clien
     assert payload[0]["canonical_url"] == "https://example.org/x"
     assert payload[0]["source_board"] == "80000_hours"
     assert payload[0]["content_hash"] == "abc123"
+
+
+# ---------------------------------------------------------------------------
+# Crash-safety: batch_submissions / batch_results lifecycle
+# ---------------------------------------------------------------------------
+
+def test_enrich_jobs_records_batch_submission_and_retrieval(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    [submission] = fake_client.table("batch_submissions").rows
+    assert submission["module"] == "enrich_jobs"
+    assert submission["status"] == "retrieved"  # updated after successful .results()
+
+
+def test_enrich_jobs_persists_raw_results_before_parsing(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    [staged] = fake_client.table("batch_results").rows
+    assert staged["custom_id"] == "job-1"
+    assert staged["raw"]["type"] == "succeeded"
+    assert staged["processed"] is False  # left as staged — this module's own tables don't mark it processed
+
+
+def test_enrich_jobs_resumes_outstanding_batch_instead_of_resubmitting(fake_client, monkeypatch):
+    """A prior run that submitted a batch but crashed before finishing polling
+    leaves a 'submitted' batch_submissions row. The next run must resume
+    polling that batch_id, never submit fresh (duplicate, already-paid-for) work."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("batch_submissions", [{"batch_id": "orphaned_batch", "module": "enrich_jobs", "status": "submitted"}])
+    anthropic_client = _FakeAnthropicClient(rounds=[])  # .create() must never be called
+
+    class _ResumableBatchesAPI(_FakeBatchesAPI):
+        def retrieve(self, batch_id):
+            assert batch_id == "orphaned_batch"
+            return _FakeBatch(batch_id)
+
+        def results(self, batch_id):
+            assert batch_id == "orphaned_batch"
+            return [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))]
+
+    anthropic_client.messages.batches = _ResumableBatchesAPI(rounds=[])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["enriched"] == 1
+    assert anthropic_client.messages.batches.created_batches == []  # never submitted fresh work
+
+
+def test_enrich_jobs_run_metrics_written_even_if_final_jobs_write_fails(fake_client, monkeypatch):
+    """The whole point of moving run_metrics before the final write: a crash in
+    that write must not lose the cost record."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(
+            _block(_valid_enrichment_dict()), usage={"input_tokens": 1000, "output_tokens": 200},
+        ))],
+    ])
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("simulated statement timeout")
+
+    monkeypatch.setattr(enrich_jobs, "_write_enrichment", _boom)
+
+    with pytest.raises(RuntimeError):
+        run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["jobs_enriched"] == 1
+    assert metrics["estimated_cost_usd"] > 0
+
+
+# ---------------------------------------------------------------------------
+# reprocess_staged — recovery path, no API call
+# ---------------------------------------------------------------------------
+
+def test_reprocess_staged_no_unprocessed_rows_is_noop(fake_client):
+    result = enrich_jobs.reprocess_staged(fake_client, "batch_1")
+    assert result == {"selected": 0, "enriched": 0, "stale": 0}
+
+
+def test_reprocess_staged_parses_and_writes_without_api_call(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("batch_results", [{
+        "batch_id": "batch_1", "custom_id": "job-1",
+        "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(),
+        "processed": False,
+    }])
+
+    result = enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    assert result == {"selected": 1, "enriched": 1, "stale": 0}
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    assert row["enrichment"]["summary"] == _valid_enrichment_dict()["summary"]
+
+
+def test_reprocess_staged_marks_rows_processed(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("batch_results", [{
+        "batch_id": "batch_1", "custom_id": "job-1",
+        "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(),
+        "processed": False,
+    }])
+
+    enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    [row] = fake_client.table("batch_results").rows
+    assert row["processed"] is True
+    assert row["raw"] is not None  # NOT NULL column carried through, not dropped
+
+
+def test_reprocess_staged_failure_marks_stale_no_second_api_retry(fake_client, monkeypatch):
+    """No retry-with-error-appended here — that would need a new LLM call,
+    defeating "without re-calling the API". A parse failure on the staged raw
+    data is terminal."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("batch_results", [{
+        "batch_id": "batch_1", "custom_id": "job-1",
+        "raw": _FakeErroredResult().model_dump(),
+        "processed": False,
+    }])
+
+    result = enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    assert result == {"selected": 1, "enriched": 0, "stale": 1}
+    assert fake_client.table("jobs").rows[0]["status"] == "stale"
+
+
+def test_reprocess_staged_does_not_write_run_metrics(fake_client, monkeypatch):
+    """The normal path already wrote run_metrics before the crash that
+    necessitated recovery — writing it again here would double-count cost."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("batch_results", [{
+        "batch_id": "batch_1", "custom_id": "job-1",
+        "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(),
+        "processed": False,
+    }])
+
+    enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    assert fake_client.table("run_metrics").rows == []
+
+
+def test_reprocess_staged_only_processes_that_batch_id(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row("job-1"), _job_row("job-2")])
+    fake_client.seed("batch_results", [
+        {"batch_id": "batch_1", "custom_id": "job-1",
+         "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(), "processed": False},
+        {"batch_id": "batch_2", "custom_id": "job-2",
+         "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(), "processed": False},
+    ])
+
+    result = enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    assert result == {"selected": 1, "enriched": 1, "stale": 0}
+    rows_by_id = {r["id"]: r for r in fake_client.table("jobs").rows}
+    assert rows_by_id["job-1"]["status"] == "enriched"
+    assert rows_by_id["job-2"]["status"] == "pending_enrich"  # untouched — different batch_id
+
+
+def test_reprocess_staged_missing_job_logged_and_skipped(fake_client, caplog):
+    """A staged result for a job_id that no longer exists (e.g. deleted) must
+    not crash the recovery run."""
+    fake_client.seed("batch_results", [{
+        "batch_id": "batch_1", "custom_id": "nonexistent-job",
+        "raw": _FakeSucceededResult(_block(_valid_enrichment_dict())).model_dump(),
+        "processed": False,
+    }])
+
+    result = enrich_jobs.reprocess_staged(fake_client, "batch_1")
+
+    assert result["enriched"] == 0
+    assert result["stale"] == 0

@@ -9,11 +9,12 @@ from src.gate_v2 import check
 
 
 def _job(location_field=None, seniority=None, mode="unspecified", remote_scope="unspecified",
-         eligible_regions=None, restriction_type=None) -> dict:
+         eligible_regions=None, restriction_type=None, posting_type=None) -> dict:
     return {
         "location_field": location_field,
         "enrichment": {
             "seniority": seniority or [],
+            "posting_type": posting_type,
             "work_arrangement": {
                 "mode": mode, "remote_scope": remote_scope,
                 "eligible_regions": eligible_regions or [], "restriction_type": restriction_type,
@@ -139,3 +140,55 @@ def test_rejection_reason_seniority_only(profile):
 def test_rejection_reason_none_when_passed(profile):
     result = check(_job(location_field="Remote", mode="remote", remote_scope="global", seniority=["senior"]), profile)
     assert result.rejection_reason is None
+
+
+# ---------------------------------------------------------------------------
+# posting_type
+# ---------------------------------------------------------------------------
+
+def _passable_job(**overrides):
+    defaults = dict(location_field="Remote", mode="remote", remote_scope="global", seniority=["senior"])
+    defaults.update(overrides)
+    return _job(**defaults)
+
+
+def test_posting_type_null_treated_as_job(profile):
+    result = check(_passable_job(posting_type=None), profile)
+    assert result.posting_type_pass
+    assert result.passed
+
+
+def test_posting_type_job_passes(profile):
+    result = check(_passable_job(posting_type="job"), profile)
+    assert result.posting_type_pass
+    assert result.passed
+
+
+def test_posting_type_volunteer_excluded(profile):
+    result = check(_passable_job(posting_type="volunteer"), profile)
+    assert not result.posting_type_pass
+    assert not result.passed
+    assert result.rejection_reason == "posting_type"
+
+
+def test_posting_type_funding_excluded(profile):
+    result = check(_passable_job(posting_type="funding"), profile)
+    assert not result.posting_type_pass
+    assert not result.passed
+    assert result.rejection_reason == "posting_type"
+
+
+def test_posting_type_internship_fellowship_program_speculative_not_excluded(profile):
+    """Per-user opt-in for these is future work — for now they pass by default,
+    same as "job"."""
+    for value in ["internship", "fellowship", "program", "speculative"]:
+        result = check(_passable_job(posting_type=value), profile)
+        assert result.posting_type_pass, f"{value} should not be excluded by default"
+
+
+def test_posting_type_and_location_both_fail_categorized_as_hard_constraints(profile):
+    result = check(_job(location_field="Nairobi, Kenya", mode="onsite", seniority=["senior"], posting_type="volunteer"), profile)
+    assert result.rejection_reason == "hard_constraints"
+    assert not result.location_pass
+    assert not result.posting_type_pass
+    assert result.seniority_pass

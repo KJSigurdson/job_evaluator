@@ -160,3 +160,18 @@ def test_content_hash_matches_job_normalize_reuse():
     job_normalize.content_hash, not a re-implementation."""
     text = "Career goals: something"
     assert content_hash(text) == content_hash(text.lower())
+
+
+def test_backfill_scoped_to_only_user_id(fake_client, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(profile_embed, "embed_texts", lambda texts: [[0.3] * 1024 for _ in texts])
+    fake_client.seed("profiles", [_profile_row(user_id="u1"), _profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u1"), _weights_row(user_id="u2")])
+
+    result = backfill_profile_embeddings(fake_client, only_user_id="u1")
+
+    assert result["selected"] == 1
+    assert result["embedded"] == 1
+    rows_by_id = {r["user_id"]: r for r in fake_client.table("profiles").rows}
+    assert rows_by_id["u1"].get("profile_embedding") is not None
+    assert rows_by_id["u2"].get("profile_embedding") is None

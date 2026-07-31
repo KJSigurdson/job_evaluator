@@ -76,6 +76,36 @@ def test_job_enrichment_accepts_all_five_seniority_buckets():
 
 
 # ---------------------------------------------------------------------------
+# posting_type
+# ---------------------------------------------------------------------------
+
+def test_posting_type_defaults_to_none():
+    e = JobEnrichment(**_enrichment())
+    assert e.posting_type is None
+
+
+def test_posting_type_defaults_to_none_when_omitted_from_a_pre_existing_row():
+    """Old jobs.enrichment blobs written before posting_type existed have no such
+    key at all — model_validate must still succeed (not error on a missing
+    field), defaulting to None rather than "job" or any other guess."""
+    old_row = _enrichment()
+    assert "posting_type" not in old_row
+    e = JobEnrichment.model_validate(old_row)
+    assert e.posting_type is None
+
+
+def test_posting_type_accepts_all_seven_values():
+    for value in ["job", "internship", "fellowship", "volunteer", "funding", "program", "speculative"]:
+        e = JobEnrichment(**_enrichment(posting_type=value))
+        assert e.posting_type == value
+
+
+def test_posting_type_rejects_unknown_value():
+    with pytest.raises(ValidationError):
+        JobEnrichment(**_enrichment(posting_type="contract"))
+
+
+# ---------------------------------------------------------------------------
 # SalaryRange
 # ---------------------------------------------------------------------------
 

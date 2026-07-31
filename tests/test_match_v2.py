@@ -4,7 +4,7 @@ math runs in Postgres and can't be meaningfully re-implemented in Python here;
 these tests verify the calling contract and result-mapping instead)."""
 from __future__ import annotations
 
-from src.match_v2 import gate_survivors, match_user, vector_rerank
+from src.match_v2 import TOP_N, fetch_matched_job_ids, gate_survivors, match_user, vector_rerank
 
 
 def _job(job_id="job-1", location_field="Remote, Global", mode="remote",
@@ -111,3 +111,43 @@ def test_match_user_respects_top_n_param(fake_client, profile):
 
     [(_, rpc_params)] = fake_client.rpc_calls
     assert rpc_params["match_limit"] == 1
+
+
+def test_top_n_default_is_40():
+    assert TOP_N == 40
+
+
+def test_match_user_defaults_to_top_n_40(fake_client, profile):
+    jobs = [_job("pass-1")]
+    fake_client.rpc_responses["match_v2_top_jobs"] = []
+
+    match_user(fake_client, user_id="u1", profile=profile, profile_embedding="[0.1]", jobs=jobs)
+
+    [(_, rpc_params)] = fake_client.rpc_calls
+    assert rpc_params["match_limit"] == 40
+
+
+# ---------------------------------------------------------------------------
+# fetch_matched_job_ids
+# ---------------------------------------------------------------------------
+
+def test_fetch_matched_job_ids_returns_users_matched_jobs(fake_client):
+    fake_client.seed("matches_v2", [
+        {"user_id": "u1", "job_id": "job-1"},
+        {"user_id": "u1", "job_id": "job-2"},
+        {"user_id": "u2", "job_id": "job-3"},
+    ])
+
+    result = fetch_matched_job_ids(fake_client, "u1")
+
+    assert result == {"job-1", "job-2"}
+
+
+def test_fetch_matched_job_ids_empty_when_no_matches(fake_client):
+    assert fetch_matched_job_ids(fake_client, "u1") == set()
+
+
+def test_fetch_matched_job_ids_scoped_to_user(fake_client):
+    fake_client.seed("matches_v2", [{"user_id": "u2", "job_id": "job-1"}])
+
+    assert fetch_matched_job_ids(fake_client, "u1") == set()
