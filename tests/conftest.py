@@ -96,6 +96,15 @@ class _FakeQuery:
                 r.update(self._payload)
             return _FakeResponse([dict(r) for r in rows])
 
+        if self._op == "insert":
+            # Real .insert() has no conflict handling at all — a duplicate on a
+            # unique/PK column raises a real Postgres error, not a silent merge.
+            # This fake mirrors that: it always appends, never matches/merges.
+            rows = self._payload if isinstance(self._payload, list) else [self._payload]
+            self._table.insert_calls.append(rows)  # one entry per .insert().execute() — lets tests count round-trips
+            self._table.rows.extend(dict(r) for r in rows)
+            return _FakeResponse([dict(r) for r in rows])
+
         raise NotImplementedError(self._op)
 
 
@@ -104,6 +113,7 @@ class _FakeTable:
         self.rows: list[dict] = []
         self.upsert_calls: list[list[dict]] = []  # one entry (list of rows) per .upsert().execute() call
         self.update_calls: list[dict] = []  # one entry (payload dict) per .update().execute() call
+        self.insert_calls: list[list[dict]] = []  # one entry (list of rows) per .insert().execute() call
 
     def select(self, cols: str = "*") -> _FakeQuery:
         return _FakeQuery(self, "select").select(cols)
@@ -113,6 +123,9 @@ class _FakeTable:
 
     def update(self, payload: dict) -> _FakeQuery:
         return _FakeQuery(self, "update", payload=payload)
+
+    def insert(self, payload: dict) -> _FakeQuery:
+        return _FakeQuery(self, "insert", payload=payload)
 
 
 class FakeSupabaseClient:
