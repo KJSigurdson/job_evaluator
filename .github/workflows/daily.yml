@@ -69,6 +69,11 @@ jobs:
           TIER1_MODEL:                 ${{ secrets.TIER1_MODEL }}
           TIER2_MODEL:                 ${{ secrets.TIER2_MODEL }}
           RECENCY_DAYS:                ${{ secrets.RECENCY_DAYS }}
+          TIER1_CONCURRENCY:           ${{ secrets.TIER1_CONCURRENCY }}
+          TIER2_CONCURRENCY:           ${{ secrets.TIER2_CONCURRENCY }}
+          TIER1_BATCH_SIZE:            ${{ secrets.TIER1_BATCH_SIZE }}
+          MATCH_DIGEST_URL:            ${{ secrets.MATCH_DIGEST_URL }}
+          PIPELINE_SHARED_SECRET:      ${{ secrets.PIPELINE_SHARED_SECRET }}
         run: |
           ARGS=""
           [ "${{ inputs.dry_run }}" = "true" ]   && ARGS="$ARGS --dry-run"

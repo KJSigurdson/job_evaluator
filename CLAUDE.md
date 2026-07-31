@@ -31,34 +31,37 @@ python -m pytest tests/test_gate.py -v
 src/
   sources/            # one module per source; all return List[RawPosting]
   gate.py             # hard-constraint logic (location + seniority binary pass/fail), both per-user via profile["hard_constraints"]; seniority classifies posting text into intern/junior/mid/senior/director buckets against the user's accept_levels; tags rejection_reason for diagnostics only
-  scoring.py          # Tier 1: cheap rubric scoring via LLM structured output — unchanged per-user, takes profile+rubric dicts
+  scoring.py          # Tier 1: cheap rubric scoring via LLM structured output — unchanged per-user, takes profile+rubric dicts. Batched path (score_many_batched/_acall_llm_batch) scores TIER1_BATCH_SIZE postings/call (default 5) to amortize the static prompt prefix; TIER1_BATCH_SIZE=1 falls back to the exact unbatched score_many() path. Per-posting fallback to individual scoring on any batch failure or missing posting_index.
   enrich.py           # Tier 2: org summary + CV guidance (only for fit >= user's insert_threshold); defensively coerces emphasize_in_cv/deemphasize back to list[str] if a model returns a JSON-array-in-a-string
   supabase_client.py  # get_client() from SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY (service-role, bypasses RLS)
-  user_store.py       # fetch_users(only_user_id=None): reads `profiles` + `scoring_weights` (+ `experiences`/`experience_achievements`, incl. `publication` kind), builds the profile/rubric dicts gate/scoring/enrich expect; parses location_rule + seniority_rule (per-user accept_levels) from JSON text
+  user_store.py       # fetch_users(only_user_id=None): reads `profiles` + `scoring_weights` (+ `experiences`/`experience_achievements`, incl. `publication` kind), builds the profile/rubric dicts gate/scoring/enrich expect; parses location_rule + seniority_rule (per-user accept_levels) from JSON text; excludes archived_at users on the cron path (--only-user-id overrides)
   seen_store.py       # per-user seen-cache backed by the Supabase `seen` table; writes are batched (record_verdict queues in memory, upsert_verdicts flushes once per user in chunks of 500)
-  matches_store.py    # query-existing-URLs + upsert-only against Supabase `matches` (never touches status/user_notes/discarded)
+  matches_store.py    # query-existing-URLs + upsert-only against Supabase `matches` (never touches status/user_notes/discarded); update_enrichment() for the one-off reformat migration
   quota_store.py      # set_status(): running/complete/failed write-back to `search_quota` — one-off single-user runs only
+  run_store.py        # start_run/complete_run/record_token_usage: best-effort run-history telemetry to Supabase `pipeline_runs` (parent) + `pipeline_run_users` (child); a write failure here is logged and swallowed, never raised into the run
   notify.py           # send_match_digest(): best-effort opt-in match-digest email via a Supabase Edge Function; never raises
-  schemas.py          # Pydantic models for all LLM outputs and internal types
-  pipeline.py         # orchestration: fetch users → scrape ONCE (shared) → per-user: dedup → gate → score → enrich → upsert → batched seen flush → digest email
+  schemas.py          # Pydantic models for all LLM outputs and internal types, incl. TokenUsage and the batch-scoring Tier1BatchOutput/Tier1BatchItem shapes
+  pipeline.py         # orchestration: fetch users → scrape ONCE (shared) → per-user: dedup → gate → score → enrich → upsert → batched seen flush → digest email → run-history write
 tests/
+scripts/              # standalone one-off scripts, not part of the daily run (measure_tier1_tokens.py, validate_tier1_trim.py)
 .github/workflows/daily.yml
 ```
 
 ### Data flow
 
-1. Fetch every user with a `profiles` row AND a `scoring_weights` row (skip profile-only rows). `--only-user-id X` scopes every query to a single user X instead — a one-off request, not the normal daily run.
+1. Fetch every user with a `profiles` row AND a `scoring_weights` row (skip profile-only rows). Archived users (`profiles.archived_at` set) are excluded at the query level on the normal cron path. `--only-user-id X` scopes every query to a single user X instead — a one-off request, not the normal daily run — and, when set, processes that user regardless of archived status (an explicit request overrides the cron default).
 2. Scrape all sources ONCE → shared `List[RawPosting]` pool
-3. Shared recency filter: drop postings older than `RECENCY_DAYS`. Postings with no `posted_at` are exempt UNLESS they also have no `deadline` (e.g. IAP) — those instead get a 14-day cutoff anchored to the *earliest* `first_seen` for that URL across all users in the `seen` table (see `pipeline.py` docstring for the full reasoning)
+3. Shared recency filter: drop postings older than `RECENCY_DAYS`. Postings with no `posted_at` are exempt UNLESS they also have no `deadline` (e.g. IAP) — those instead get a 14-day cutoff anchored to the *earliest* `first_seen` for that URL across all users in the `seen` table (see `pipeline.py` docstring for the full reasoning). A `DEDUP AUDIT` line logs the shared pool's cross-source duplicate rate by canonical URL right after it's sized — log only, does not deduplicate the pool.
 4. `--limit N` shuffles the fresh pool (seeded on `run_id`, reproducible per run) before slicing to N, so a capped run draws roughly proportionally across sources instead of always favoring whichever source was scraped first
 5. For EACH user: build a skip-set (their `seen` rows ∪ their existing `matches` URLs), drop already-seen postings, then:
    - Hard-gate: binary pass/fail on location + seniority, both driven by that user's `scoring_weights.location_rule`/`seniority_rule` — **bias toward false-positives; when a field is unstated, or a posting's seniority text doesn't map to any known level, pass it through**. Every rejection is tagged with `rejection_reason` (`location` / `seniority` / `hard_constraints` for both) — diagnostic only, does not change pass/fail. Aggregated into a `Counter` and logged as one summary line per user after the gate loop.
-   - Tier 1 scoring: 7 soft dimensions (0–1 each), weighted by that user's `scoring_weights`, → fit %
+   - Tier 1 scoring: 7 soft dimensions (0–1 each), weighted by that user's `scoring_weights`, → fit %. Runs batched (`TIER1_BATCH_SIZE` postings/call, default 5) unless `TIER1_BATCH_SIZE=1`, in which case it's one posting per call exactly as before batching existed.
    - Roles ≥ user's `insert_threshold` → Tier 2 enrichment → upsert into `matches`
    - Roles between `near_miss_floor` and `insert_threshold` → queued for `seen` as `below_threshold` (not inserted)
    - Every terminal verdict (`gated_out` / `below_threshold` / `inserted`) is queued in memory and flushed to `seen` for that user in ONE batched upsert (chunked at 500 rows) after that user's Tier 2 loop — not one write per posting. Parse failures are NEVER queued — retried next run.
    - If `profile["email_on_match"]` is true and ≥1 match was inserted this run and it's not `--dry-run`: send one match-digest email for that user (best-effort — see notify.py, never affects run outcome).
 6. `--only-user-id` (when not `--dry-run`) writes `running` → `complete`/`failed` to `search_quota` for that user around the whole run — the normal multi-user run never touches that table.
+7. Run-history telemetry (`run_store.py`) runs around the WHOLE run, independent of `--only-user-id`: a `pipeline_runs` row opens before scraping and finalizes on every exit path (success, no-users, or a mid-run crash) with per-run totals, one `pipeline_run_users` child row per user, and aggregated Tier 1/Tier 2 `TokenUsage` (also logged as two `TOKEN USAGE tier1`/`TOKEN USAGE tier2` lines). Entirely best-effort — see Reliability requirements below.
 
 ### Critical invariant: matches upsert never touches user-owned columns
 
@@ -88,5 +91,7 @@ Optional (degrade gracefully when unset — see `.env.example`):
 - Graceful per-source failure: one source erroring must not abort the others.
 - Graceful per-user failure: a missing `scoring_weights` row skips that user (logged) without aborting the run.
 - Match-digest email is strictly best-effort: `notify.send_match_digest()` must never raise (missing config / network error / non-2xx all log-and-swallow), and its call site in `pipeline.py` wraps it in try/except as a second layer of defense. An email failure must never fail the run, flip `search_quota` to `'failed'`, or stop processing of subsequent users.
-- Log every run: shared counts (scraped / recency-dropped / stale-dropped), per-user counts (gated-out / scored / inserted / near-miss / parse-failures), per-user gate-rejection breakdown (location / seniority / hard_constraints), per-source success, pinned model string, temperature.
-- Unit tests are required on: hard-gate logic (incl. rejection_reason categorisation), dedup/URL canonicalization, weighted-sum scoring, Pydantic schema validation, per-user seen-cache logic (incl. batching/chunking), matches upsert column allowlist, match-digest never-raise contract.
+- Run-history telemetry is strictly best-effort, same contract as match-digest: `run_store.start_run`/`complete_run`/`record_token_usage` must never raise. Parent and child writes are independent — a child-row failure downgrades the parent's `status` to `complete_partial` (only when the run itself succeeded; a genuinely failed run is never overwritten to look like a partial success) rather than taking down the parent write too. A parent write that fails outright gets a best-effort fallback write to `status='failed'` so a run can't sit stuck at `'running'` with a null `completed_at` forever.
+- Transient LLM errors (`429` rate-limit, `529` overloaded, `5xx` generally — `_is_retryable_status`) are retried with exponential backoff + jitter, up to 5 attempts, in both tiers' async call paths; a permanent `4xx` (e.g. `400` invalid_request) is re-raised immediately instead of burning the backoff budget.
+- Log every run: shared counts (scraped / recency-dropped / stale-dropped), per-user counts (gated-out / scored / inserted / near-miss / parse-failures), per-user gate-rejection breakdown (location / seniority / hard_constraints), per-source success, pinned model string, temperature, `TOKEN USAGE tier1`/`TOKEN USAGE tier2` (calls/input/output/cache tokens), `DEDUP AUDIT` (cross-source duplicate rate of the shared pool).
+- Unit tests are required on: hard-gate logic (incl. rejection_reason categorisation), dedup/URL canonicalization, weighted-sum scoring, Pydantic schema validation, per-user seen-cache logic (incl. batching/chunking), matches upsert column allowlist, match-digest never-raise contract, run-history parent/child write isolation and the `complete_partial`/stuck-at-`running` fallback paths, Tier 1 batched scoring (posting_index mapping incl. out-of-order/duplicate/out-of-range, per-posting and whole-batch fallback to individual scoring, multi-block list-merge concatenation), archived-user exclusion.
