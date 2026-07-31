@@ -128,17 +128,45 @@ class _FakeTable:
         return _FakeQuery(self, "insert", payload=payload)
 
 
+class _FakeRpcCall:
+    def __init__(self, client: "FakeSupabaseClient", fn_name: str, params: dict):
+        self._client = client
+        self._fn_name = fn_name
+        self._params = params
+
+    def execute(self) -> _FakeResponse:
+        self._client.rpc_calls.append((self._fn_name, self._params))
+        handler = self._client.rpc_responses.get(self._fn_name)
+        if handler is None:
+            raise NotImplementedError(
+                f"no rpc_responses['{self._fn_name}'] configured on this FakeSupabaseClient"
+            )
+        data = handler(self._params) if callable(handler) else handler
+        return _FakeResponse(data)
+
+
 class FakeSupabaseClient:
-    """Minimal stand-in for a supabase.Client. Backs each table with an in-memory list."""
+    """Minimal stand-in for a supabase.Client. Backs each table with an in-memory list.
+
+    .rpc() is for Postgres functions (e.g. match_v2_top_jobs's pgvector <=> rerank,
+    which genuinely can't be faked meaningfully in Python) — tests configure the
+    canned response via rpc_responses[fn_name] = [...] or a callable(params) -> list,
+    and can assert on rpc_calls to check the params a caller actually sent.
+    """
 
     def __init__(self):
         self._tables: dict[str, _FakeTable] = {}
+        self.rpc_calls: list[tuple[str, dict]] = []
+        self.rpc_responses: dict[str, object] = {}
 
     def table(self, name: str) -> _FakeTable:
         return self._tables.setdefault(name, _FakeTable())
 
     def seed(self, name: str, rows: list[dict]) -> None:
         self.table(name).rows.extend(dict(r) for r in rows)
+
+    def rpc(self, fn_name: str, params: dict) -> _FakeRpcCall:
+        return _FakeRpcCall(self, fn_name, params)
 
 
 @pytest.fixture

@@ -3,6 +3,7 @@ orchestration flow (batch submit -> parse/validate -> one retry -> stale) agains
 fake Anthropic Batches client and the existing FakeSupabaseClient."""
 from __future__ import annotations
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -372,6 +373,135 @@ def test_enrich_jobs_embeddings_used_when_key_present(fake_client, monkeypatch):
     assert summary["embeddings_skipped"] is False
     row = fake_client.table("jobs").rows[0]
     assert row["embedding"] == [0.1] * 1024
+
+
+def test_enrich_jobs_voyage_failure_does_not_block_enrichment_write(fake_client, monkeypatch):
+    """A Voyage outage must not lose the enrichment (and Anthropic spend) that
+    already succeeded — embedding stays NULL, status still flips to enriched."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+
+    def _raise(texts):
+        raise httpx.HTTPError("voyage is down")
+
+    monkeypatch.setattr(enrich_jobs, "embed_texts", _raise)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceeded(_FakeContentBlock(_valid_enrichment_dict())))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["enriched"] == 1
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    assert row["embedding"] is None
+
+
+# ---------------------------------------------------------------------------
+# embed_texts — chunking at Voyage's per-request cap
+# ---------------------------------------------------------------------------
+
+class _FakeVoyageResponse:
+    def __init__(self, n: int):
+        self._n = n
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return {"data": [{"embedding": [0.5] * 1024} for _ in range(self._n)]}
+
+
+def test_embed_texts_single_call_for_small_input(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json["input"])
+        return _FakeVoyageResponse(len(json["input"]))
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(enrich_jobs.httpx, "post", fake_post)
+
+    result = enrich_jobs.embed_texts([f"text {i}" for i in range(5)])
+
+    assert len(calls) == 1
+    assert len(result) == 5
+
+
+def test_embed_texts_chunks_at_voyage_batch_size(monkeypatch):
+    calls = []
+
+    def fake_post(url, headers, json, timeout):
+        calls.append(json["input"])
+        return _FakeVoyageResponse(len(json["input"]))
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(enrich_jobs.httpx, "post", fake_post)
+
+    texts = [f"text {i}" for i in range(300)]
+    result = enrich_jobs.embed_texts(texts)
+
+    assert len(calls) == 3  # 128 + 128 + 44
+    assert [len(c) for c in calls] == [128, 128, 44]
+    assert len(result) == 300
+
+
+# ---------------------------------------------------------------------------
+# backfill_embeddings
+# ---------------------------------------------------------------------------
+
+def test_backfill_embeddings_noop_without_key(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row(status="enriched", embedding=None)])
+
+    result = enrich_jobs.backfill_embeddings(fake_client)
+
+    assert result == {"selected": 0, "embedded": 0, "failed": 0}
+    assert fake_client.table("jobs").upsert_calls == []
+
+
+def test_backfill_embeddings_noop_when_nothing_missing(fake_client, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    fake_client.seed("jobs", [_job_row(status="enriched", embedding=[0.1] * 1024)])
+
+    result = enrich_jobs.backfill_embeddings(fake_client)
+
+    assert result == {"selected": 0, "embedded": 0, "failed": 0}
+
+
+def test_backfill_embeddings_embeds_and_writes_not_null_safe_payload(fake_client, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(enrich_jobs, "embed_texts", lambda texts: [[0.2] * 1024 for _ in texts])
+    fake_client.seed("jobs", [_job_row(
+        status="enriched", embedding=None,
+        canonical_url="https://example.org/x", source_board="80000_hours", content_hash="abc",
+        enrichment={"summary": "A great role."},
+    )])
+
+    result = enrich_jobs.backfill_embeddings(fake_client)
+
+    assert result == {"selected": 1, "embedded": 1, "failed": 0}
+    row = fake_client.table("jobs").rows[0]
+    assert row["embedding"] == [0.2] * 1024
+    [payload] = fake_client.table("jobs").upsert_calls
+    assert payload[0]["canonical_url"] == "https://example.org/x"
+    assert payload[0]["source_board"] == "80000_hours"
+    assert payload[0]["content_hash"] == "abc"
+
+
+def test_backfill_embeddings_voyage_failure_writes_nothing(fake_client, monkeypatch):
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+
+    def _raise(texts):
+        raise httpx.HTTPError("voyage is down")
+
+    monkeypatch.setattr(enrich_jobs, "embed_texts", _raise)
+    fake_client.seed("jobs", [_job_row(status="enriched", embedding=None)])
+
+    result = enrich_jobs.backfill_embeddings(fake_client)
+
+    assert result == {"selected": 1, "embedded": 0, "failed": 1}
+    assert fake_client.table("jobs").upsert_calls == []
 
 
 def test_enrich_jobs_enriched_and_stale_updates_are_separate_upsert_calls(fake_client, monkeypatch):

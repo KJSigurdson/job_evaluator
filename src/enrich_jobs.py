@@ -57,8 +57,9 @@ _HAIKU_SYNC_INPUT_USD_PER_MTOK = 1.00
 _HAIKU_SYNC_OUTPUT_USD_PER_MTOK = 5.00
 _BATCH_DISCOUNT = 0.5
 
-_VOYAGE_MODEL = "voyage-3"
+_VOYAGE_MODEL = "voyage-3.5"
 _VOYAGE_DIMENSIONS = 1024
+_VOYAGE_BATCH_SIZE = 128  # Voyage's per-request cap
 
 
 # ---------------------------------------------------------------------------
@@ -259,20 +260,28 @@ def embeddings_available() -> bool:
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """Embed *texts* via Voyage AI's REST API directly (no voyageai package
     installed — this stays a plain httpx call so nothing new is added to
-    requirements.txt for a step that's stubbed off until VOYAGE_API_KEY exists).
-    Raises if called without VOYAGE_API_KEY set — callers must check
-    embeddings_available() first and skip this step entirely otherwise.
+    requirements.txt). Raises if called without VOYAGE_API_KEY set — callers must
+    check embeddings_available() first and skip this step entirely otherwise.
+
+    Chunks *texts* into groups of at most _VOYAGE_BATCH_SIZE (Voyage's per-request
+    cap) — one HTTP call per chunk, results concatenated back in the original
+    order. A caller embedding the full backlog in one call would otherwise exceed
+    the API's limit.
     """
     api_key = os.environ["VOYAGE_API_KEY"]
-    resp = httpx.post(
-        "https://api.voyageai.com/v1/embeddings",
-        headers={"Authorization": f"Bearer {api_key}"},
-        json={"input": texts, "model": _VOYAGE_MODEL, "output_dimension": _VOYAGE_DIMENSIONS},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return [item["embedding"] for item in data["data"]]
+    embeddings: list[list[float]] = []
+    for i in range(0, len(texts), _VOYAGE_BATCH_SIZE):
+        chunk = texts[i:i + _VOYAGE_BATCH_SIZE]
+        resp = httpx.post(
+            "https://api.voyageai.com/v1/embeddings",
+            headers={"Authorization": f"Bearer {api_key}"},
+            json={"input": chunk, "model": _VOYAGE_MODEL, "output_dimension": _VOYAGE_DIMENSIONS},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        embeddings.extend(item["embedding"] for item in data["data"])
+    return embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -373,13 +382,21 @@ def enrich_jobs(
     for job_id, reason in failures.items():
         log.error("Job %s permanently failed enrichment, marking stale: %s", job_id, reason)
 
-    # Embeddings — stubbed if VOYAGE_API_KEY absent
+    # Embeddings — skipped (not fatal) if VOYAGE_API_KEY absent OR the Voyage call
+    # itself fails; a Voyage outage must not lose the enrichment (and its Anthropic
+    # spend) that already succeeded. embedding stays NULL until a later backfill.
     embeddings: dict[str, list[float]] = {}
     if enriched and embeddings_available():
         job_ids = list(enriched.keys())
         texts = [f"{by_id[jid]['title']} {enriched[jid].summary}" for jid in job_ids]
-        vectors = embed_texts(texts)
-        embeddings = dict(zip(job_ids, vectors))
+        try:
+            vectors = embed_texts(texts)
+            embeddings = dict(zip(job_ids, vectors))
+        except httpx.HTTPError as exc:
+            log.warning(
+                "Voyage embedding call failed — skipping embeddings for %d enriched job(s) this "
+                "run (enrichment itself is unaffected): %s", len(enriched), exc,
+            )
     elif enriched:
         log.warning(
             "VOYAGE_API_KEY not set — skipping embeddings for %d enriched job(s). "
@@ -448,3 +465,49 @@ def enrich_jobs(
         "selected": len(rows), "enriched": len(enriched), "stale": len(failures),
         "embeddings_skipped": not embeddings_available(),
     }
+
+
+def backfill_embeddings(client) -> dict:
+    """Catch-up embedding pass: embeds title+summary for every status='enriched'
+    job whose embedding is still NULL — covers jobs enriched before
+    VOYAGE_API_KEY existed (or that hit a transient Voyage failure during their
+    original enrich_jobs() run, per that step's own best-effort handling above).
+    Idempotent and safe to re-run: only ever touches rows missing an embedding,
+    and a failed call here writes nothing, so a re-run just retries the same set.
+    """
+    if not embeddings_available():
+        log.warning("VOYAGE_API_KEY not set — backfill_embeddings is a no-op")
+        return {"selected": 0, "embedded": 0, "failed": 0}
+
+    rows = (
+        client.table("jobs")
+        .select("id,title,canonical_url,source_board,content_hash,enrichment")
+        .eq("status", "enriched")
+        .is_("embedding", "null")
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        log.info("backfill_embeddings: no enriched jobs missing an embedding")
+        return {"selected": 0, "embedded": 0, "failed": 0}
+
+    texts = [f"{row['title']} {(row.get('enrichment') or {}).get('summary', '')}" for row in rows]
+    try:
+        vectors = embed_texts(texts)
+    except httpx.HTTPError as exc:
+        log.error("backfill_embeddings: Voyage call failed, nothing written: %s", exc)
+        return {"selected": len(rows), "embedded": 0, "failed": len(rows)}
+
+    updates = [
+        {
+            "id": row["id"], "canonical_url": row["canonical_url"],
+            "source_board": row["source_board"], "content_hash": row["content_hash"],
+            "embedding": vector,
+        }
+        for row, vector in zip(rows, vectors)
+    ]
+    client.table("jobs").upsert(updates, on_conflict="id").execute()
+
+    log.info("backfill_embeddings: %d selected, %d embedded", len(rows), len(updates))
+    return {"selected": len(rows), "embedded": len(updates), "failed": 0}
