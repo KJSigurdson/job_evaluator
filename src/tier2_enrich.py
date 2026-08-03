@@ -267,7 +267,10 @@ def _candidate_context(key: str, c: dict) -> dict:
     }
 
 
-def tier2_enrich(client, anthropic_client, *, candidates: list[dict], threshold: int = _DEFAULT_THRESHOLD) -> dict:
+def tier2_enrich(
+    client, anthropic_client, *, candidates: list[dict], threshold: int = _DEFAULT_THRESHOLD,
+    run_id: str | None = None, trigger: str | None = None,
+) -> dict:
     """candidates: [{"user_id", "profile", "job", "tier1_score", "tier1_reason"}, ...]
     — one entry per (user, job) pair surviving the Tier 1 rerank. Only entries
     with tier1_score >= threshold get a Tier 2 call; the rest are skipped
@@ -366,6 +369,9 @@ def tier2_enrich(client, anthropic_client, *, candidates: list[dict], threshold:
     now = datetime.now(timezone.utc).isoformat()
     client.table("run_metrics").insert({
         "run_at": now,
+        "run_id": run_id,
+        "stage": "tier2",
+        "trigger": trigger,
         "tier2_calls": total_api_calls,
         "estimated_cost_usd": round(
             total_input_tokens / 1_000_000 * _SONNET_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT

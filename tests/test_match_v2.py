@@ -4,7 +4,7 @@ math runs in Postgres and can't be meaningfully re-implemented in Python here;
 these tests verify the calling contract and result-mapping instead)."""
 from __future__ import annotations
 
-from src.match_v2 import TOP_N, fetch_matched_job_ids, gate_survivors, match_user, vector_rerank
+from src.match_v2 import TOP_N, fetch_matched_job_ids, gate_survivors, gate_survivors_with_rejections, match_user, vector_rerank
 
 
 def _job(job_id="job-1", location_field="Remote, Global", mode="remote",
@@ -36,6 +36,25 @@ def test_gate_survivors_filters_by_gate_v2(profile):
 
 def test_gate_survivors_empty_jobs_returns_empty(profile):
     assert gate_survivors([], profile) == []
+
+
+# ---------------------------------------------------------------------------
+# gate_survivors_with_rejections
+# ---------------------------------------------------------------------------
+
+def test_gate_survivors_with_rejections_tallies_by_rule(profile):
+    jobs = [
+        _job("pass-1", location_field="Remote, Global", mode="remote", remote_scope="global"),
+        _job("fail-location", location_field="Nairobi, Kenya", mode="onsite"),
+        _job("fail-seniority", location_field="Remote, Global", mode="remote", remote_scope="global", seniority=["intern"]),
+    ]
+    survivors, rejections = gate_survivors_with_rejections(jobs, profile)
+    assert [j["id"] for j in survivors] == ["pass-1"]
+    assert rejections == {"location": 1, "seniority": 1}
+
+
+def test_gate_survivors_with_rejections_empty_jobs(profile):
+    assert gate_survivors_with_rejections([], profile) == ([], {})
 
 
 # ---------------------------------------------------------------------------
@@ -99,7 +118,7 @@ def test_match_user_no_survivors_skips_rpc_call(fake_client, profile):
 
     result = match_user(fake_client, user_id="u1", profile=profile, profile_embedding="[0.1]", jobs=jobs)
 
-    assert result == {"gate_survivor_count": 0, "top": []}
+    assert result == {"gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 1}}
     assert fake_client.rpc_calls == []
 
 

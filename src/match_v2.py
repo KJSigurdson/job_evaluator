@@ -40,7 +40,23 @@ def fetch_matched_job_ids(client, user_id: str) -> set[str]:
 def gate_survivors(jobs: list[dict], profile: dict) -> list[dict]:
     """jobs: rows with at least id/location_field/enrichment. Returns the subset
     that passes gate_v2.check for *profile*."""
-    return [job for job in jobs if gate_v2_check(job, profile).passed]
+    return gate_survivors_with_rejections(jobs, profile)[0]
+
+
+def gate_survivors_with_rejections(jobs: list[dict], profile: dict) -> tuple[list[dict], dict[str, int]]:
+    """Same filtering as gate_survivors(), but also tallies per-rule rejection
+    reason counts (gate_v2.GateV2Result.rejection_reason) for every job that
+    didn't pass — feeds run_metrics.gate_rejections (see pipeline_v2.py), the
+    per-user diagnostics this was originally spec'd for and never wired up."""
+    survivors = []
+    rejection_counts: dict[str, int] = {}
+    for job in jobs:
+        result = gate_v2_check(job, profile)
+        if result.passed:
+            survivors.append(job)
+        elif result.rejection_reason:
+            rejection_counts[result.rejection_reason] = rejection_counts.get(result.rejection_reason, 0) + 1
+    return survivors, rejection_counts
 
 
 def vector_rerank(client, *, profile_embedding, candidate_job_ids: list[str], top_n: int = TOP_N) -> list[dict]:
@@ -61,9 +77,10 @@ def vector_rerank(client, *, profile_embedding, candidate_job_ids: list[str], to
 
 def match_user(client, *, user_id: str, profile: dict, profile_embedding, jobs: list[dict], top_n: int = TOP_N) -> dict:
     """Full v2 matching path for one user: gate_v2 survivors -> pgvector rerank to
-    top_n. Returns {gate_survivor_count, top: [{...job fields, similarity}]}.
+    top_n. Returns {gate_survivor_count, top: [{...job fields, similarity}],
+    gate_rejection_counts: {rejection_reason: count}}.
     """
-    survivors = gate_survivors(jobs, profile)
+    survivors, rejection_counts = gate_survivors_with_rejections(jobs, profile)
     survivor_ids = [job["id"] for job in survivors]
     ranked = vector_rerank(client, profile_embedding=profile_embedding, candidate_job_ids=survivor_ids, top_n=top_n)
 
@@ -79,4 +96,4 @@ def match_user(client, *, user_id: str, profile: dict, profile_embedding, jobs: 
         "match_user %s: %d gate survivor(s), %d in top-%d by similarity",
         user_id, len(survivors), len(top), top_n,
     )
-    return {"gate_survivor_count": len(survivors), "top": top}
+    return {"gate_survivor_count": len(survivors), "top": top, "gate_rejection_counts": rejection_counts}

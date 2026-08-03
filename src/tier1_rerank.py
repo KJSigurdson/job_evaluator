@@ -222,7 +222,10 @@ def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = 
 # Orchestration
 # ---------------------------------------------------------------------------
 
-def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
+def rerank_tier1(
+    client, anthropic_client, *, users: dict[str, dict],
+    run_id: str | None = None, trigger: str | None = None,
+) -> dict:
     """users: {user_id: {"profile": ..., "gate_constraints": ..., "job_cards": [...]}}.
 
     One Batches API call scores every user in one round (custom_id=user_id). Any
@@ -291,6 +294,9 @@ def rerank_tier1(client, anthropic_client, *, users: dict[str, dict]) -> dict:
     now = datetime.now(timezone.utc).isoformat()
     client.table("run_metrics").insert({
         "run_at": now,
+        "run_id": run_id,
+        "stage": "tier1",
+        "trigger": trigger,
         "tier1_calls": total_api_calls,
         "estimated_cost_usd": round(
             total_input_tokens / 1_000_000 * _HAIKU_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT

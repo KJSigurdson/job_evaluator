@@ -179,6 +179,30 @@ def test_match_and_notify_user_calls_tier1_then_tier2(fake_client, monkeypatch):
     assert result["tier2_enriched"] == 1
 
 
+def test_match_and_notify_user_records_gate_rejections_into_out_param(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}})
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
+        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 3, "seniority": 1},
+    })
+
+    gate_rejections: dict = {}
+    _match_and_notify_user(fake_client, object(), user, [], dry_run=False, gate_rejections_out=gate_rejections)
+
+    assert gate_rejections == {"u1": {"location": 3, "seniority": 1}}
+
+
+def test_match_and_notify_user_no_rejections_not_recorded(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}})
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 5, "top": []})
+
+    gate_rejections: dict = {}
+    _match_and_notify_user(fake_client, object(), user, [], dry_run=False, gate_rejections_out=gate_rejections)
+
+    assert gate_rejections == {}
+
+
 def test_match_and_notify_user_sends_digest_when_email_on_match_and_new_matches(fake_client, monkeypatch):
     user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
@@ -278,7 +302,7 @@ class _NoopAdapter:
 def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None):
     from src.ingest import IngestCounts
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_NoopAdapter, _NoopAdapter, _NoopAdapter])
-    monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run: ingest_result or IngestCounts())
+    monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run, **k: ingest_result or IngestCounts())
     monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: enrich_result or {
         "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
     })
@@ -298,7 +322,7 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
 
     from src.ingest import IngestCounts
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_TrackingAdapter])
-    monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run: (
+    monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run, **k: (
         calls.append("ingest"), IngestCounts())[1])
     monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: (
         calls.append("enrich"), {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True})[1])
@@ -385,6 +409,31 @@ def test_run_no_users_manual_mode_raises_and_sets_quota_failed(fake_client):
 
     [quota_row] = fake_client.table("search_quota").rows
     assert quota_row["status"] == "failed"
+
+
+def test_run_writes_aggregate_gate_rejections_run_metrics_row(fake_client, monkeypatch):
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
+        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 2},
+    })
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"]
+    assert row["gate_rejections"] == {"u1": {"location": 2}}
+    assert row["trigger"] == "scheduled"
+    assert row["run_id"]
+
+
+def test_run_skips_gate_rejections_row_when_nothing_rejected(fake_client, monkeypatch):
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 5, "top": []})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    assert [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"] == []
 
 
 def test_run_dry_run_skips_tier1_and_tier2_but_still_gates(fake_client, monkeypatch):

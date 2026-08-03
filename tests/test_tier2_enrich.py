@@ -336,6 +336,19 @@ def test_tier2_enrich_writes_run_metrics_with_cost_from_actual_usage(fake_client
     assert metrics["estimated_cost_usd"] > 0
 
 
+def test_tier2_enrich_run_metrics_stamped_with_run_id_stage_trigger(fake_client):
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+
+    run_tier2_enrich(fake_client, anthropic_client, candidates=[_candidate()], run_id="run-abc", trigger="scheduled")
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["run_id"] == "run-abc"
+    assert metrics["stage"] == "tier2"
+    assert metrics["trigger"] == "scheduled"
+
+
 def test_tier2_enrich_multiple_users_same_job_distinct_custom_ids(fake_client):
     """custom_id is index-based (see tier2_enrich()'s by_key), not derived from
     user_id/job_id — the Batches API caps custom_id at 64 characters, and two

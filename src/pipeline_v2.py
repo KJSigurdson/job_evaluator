@@ -49,6 +49,8 @@ real LLM cost on a preview it can't actually withhold from being written.
 from __future__ import annotations
 
 import logging
+import uuid
+from datetime import datetime, timezone
 
 import anthropic
 
@@ -101,10 +103,21 @@ def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dic
     return payload
 
 
-def _match_and_notify_user(client, anthropic_client, user, jobs_pool: list[dict], *, dry_run: bool) -> dict:
+def _match_and_notify_user(
+    client, anthropic_client, user, jobs_pool: list[dict], *, dry_run: bool,
+    run_id: str | None = None, trigger: str | None = None, gate_rejections_out: dict | None = None,
+) -> dict:
     """Steps 4-5 for one user: gate_v2 -> vector top-N -> Tier 1 -> Tier 2 ->
     matches_v2, then digest email for whatever's new this run. Returns a
-    small per-user result dict for run-level reporting."""
+    small per-user result dict for run-level reporting.
+
+    gate_rejections_out, if given, is mutated in place: this user's per-rule
+    gate rejection counts (see match_v2.gate_survivors_with_rejections) are
+    recorded under user.user_id, for run()'s aggregate run_metrics.gate_rejections
+    write. Kept out of this function's own return dict deliberately — several
+    existing tests assert exact equality on it, and this is purely an
+    observability side-channel, not part of the per-user matching contract.
+    """
     text = build_embedding_text(user.profile)
     if not text:
         log.warning("User %s: empty profile — skipping matching", user.user_id)
@@ -123,6 +136,10 @@ def _match_and_notify_user(client, anthropic_client, user, jobs_pool: list[dict]
         client, user_id=user.user_id, profile=user.profile,
         profile_embedding=profile_embedding, jobs=candidate_jobs, top_n=TOP_N,
     )
+    if gate_rejections_out is not None:
+        rejections = match_result.get("gate_rejection_counts") or {}
+        if rejections:
+            gate_rejections_out[user.user_id] = rejections
     top = match_result["top"]
     base_result = {"user_id": user.user_id, "gate_survivors": match_result["gate_survivor_count"]}
     if not top or dry_run:
@@ -133,7 +150,7 @@ def _match_and_notify_user(client, anthropic_client, user, jobs_pool: list[dict]
         user.user_id: {
             "profile": user.profile, "gate_constraints": user.profile["hard_constraints"], "job_cards": job_cards,
         },
-    })
+    }, run_id=run_id, trigger=trigger)
 
     top_by_id = {job["id"]: job for job in top}
     scores = tier1_results.get(user.user_id, {}).get("scores", [])
@@ -143,7 +160,10 @@ def _match_and_notify_user(client, anthropic_client, user, jobs_pool: list[dict]
         for s in scores if s.job_id in top_by_id
     ]
 
-    tier2_result = run_tier2_enrich(client, anthropic_client, candidates=candidates, threshold=_TIER2_THRESHOLD)
+    tier2_result = run_tier2_enrich(
+        client, anthropic_client, candidates=candidates, threshold=_TIER2_THRESHOLD,
+        run_id=run_id, trigger=trigger,
+    )
 
     # Everything tier2_enrich() writes to matches_v2 for this user THIS run is,
     # by construction, new — matched_ids already excluded every pre-existing
@@ -182,6 +202,11 @@ def run(
     anthropic_client = _anthropic_client if _anthropic_client is not None else anthropic.Anthropic()
     track_quota = only_user_id is not None and not dry_run
     succeeded = False
+    # One run_id ties every stage's run_metrics row (ingest/enrich/tier1/tier2/
+    # match) back to this single invocation of run(); trigger distinguishes the
+    # cron-scheduled full pipeline from a manual --only-user-id call.
+    run_id = str(uuid.uuid4())
+    trigger = "manual" if only_user_id is not None else "scheduled"
 
     try:
         if track_quota:
@@ -199,11 +224,14 @@ def run(
                 except Exception:
                     log.exception("Adapter %s failed to fetch — skipping this source", adapter_cls.__name__)
 
-            ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run)
+            ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
             ingest_counts = ingest_counts_obj.as_dict()
             log.info("Ingest: %s", ingest_counts)
 
-            enrich_result = run_enrich_jobs(client=client, anthropic_client=anthropic_client, dry_run=dry_run)
+            enrich_result = run_enrich_jobs(
+                client=client, anthropic_client=anthropic_client, dry_run=dry_run,
+                run_id=run_id, trigger=trigger,
+            )
             log.info("Enrich: %s", enrich_result)
 
             profile_embed_result = backfill_profile_embeddings(client) if not dry_run else {
@@ -232,10 +260,28 @@ def run(
         log.info("Matching against %d enriched job(s)", len(jobs_pool))
 
         user_results = []
+        gate_rejections: dict[str, dict] = {}
         for user in users:
-            result = _match_and_notify_user(client, anthropic_client, user, jobs_pool, dry_run=dry_run)
+            result = _match_and_notify_user(
+                client, anthropic_client, user, jobs_pool, dry_run=dry_run,
+                run_id=run_id, trigger=trigger, gate_rejections_out=gate_rejections,
+            )
             log.info("User %s: %s", user.user_id, result)
             user_results.append(result)
+
+        # One row per run aggregating every user's gate rejection counts
+        # (see match_v2.gate_survivors_with_rejections) — the per-rule
+        # diagnostics run_metrics.gate_rejections was originally spec'd for and
+        # never wired up. Skipped in dry_run (no writes at all in that mode) and
+        # when nothing was rejected (nothing to report).
+        if gate_rejections and not dry_run:
+            client.table("run_metrics").insert({
+                "run_at": datetime.now(timezone.utc).isoformat(),
+                "run_id": run_id,
+                "stage": "match",
+                "trigger": trigger,
+                "gate_rejections": gate_rejections,
+            }).execute()
 
         succeeded = True
         return {"ingest": ingest_counts, "enrich": enrich_result, "users": user_results}

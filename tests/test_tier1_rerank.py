@@ -282,6 +282,19 @@ def test_rerank_tier1_writes_run_metrics_with_cost_from_actual_usage(fake_client
     assert metrics["estimated_cost_usd"] > 0
 
 
+def test_rerank_tier1_run_metrics_stamped_with_run_id_stage_trigger(fake_client):
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+
+    rerank_tier1(fake_client, anthropic_client, users=_users_input(), run_id="run-abc", trigger="scheduled")
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["run_id"] == "run-abc"
+    assert metrics["stage"] == "tier1"
+    assert metrics["trigger"] == "scheduled"
+
+
 # ---------------------------------------------------------------------------
 # Crash-safety: batch_submissions / batch_results lifecycle
 # ---------------------------------------------------------------------------
