@@ -6,9 +6,27 @@ pipeline_run_users), and v1's own pipeline.py is not called from here.
 
 Dedup has two layers:
   1. Exact canonical_url match (after job_normalize.normalize_job_url) -> the same
-     posting seen again. Same content_hash -> just touch last_seen. Different
-     content_hash -> the posting changed since we last saw it; update the stored
-     text/hash and reset status to 'pending_enrich' so it gets re-enriched.
+     posting seen again.
+       - Different source_board than what's stored: this is a cross-board
+         rediscovery of an already-known job (the same posting legitimately
+         cross-listed on two boards under one URL), NOT a content update — each
+         board formats `description` completely differently (80k/ProbablyGood:
+         LLM-prose bullets; IAP: a terse "org | title | location | comp |
+         cause_area" string), so comparing content_hash across boards here would
+         flag nearly every shared posting as "changed" every single run forever,
+         regardless of whether the posting itself ever changed (confirmed for
+         real: 314/827 of one board's postings on a single day resolved to a
+         `jobs` row already stamped with a DIFFERENT source_board, entirely
+         explaining that day's ~320 "updated" count). Only last_seen is touched;
+         raw_description/content_hash/source_board are left as whichever board's
+         version is already stored.
+       - Same source_board, same content_hash -> just touch last_seen.
+       - Same source_board, different content_hash -> a real same-source change.
+         If the normalized-text similarity to the stored text is still at/above
+         RE_ENRICH_SIMILARITY_THRESHOLD (job_normalize.text_similarity), treat it
+         as cosmetic: refresh the stored text/hash but do NOT reset status (no
+         re-enrich spend for a one-word tweak). Otherwise, update the stored
+         text/hash and reset status to 'pending_enrich' so it gets re-enriched.
   2. No URL match, but (normalized org, normalized title) matches an existing job
      (dedup.org_title_key — the same key the v1 pipeline already uses for its own
      re-post fallback) -> this is very likely the same role re-posted under a new
@@ -35,7 +53,7 @@ from datetime import datetime, timezone
 
 from src.adapters.base import JobPosting
 from src.dedup import org_title_key
-from src.job_normalize import content_hash, normalize_job_url
+from src.job_normalize import RE_ENRICH_SIMILARITY_THRESHOLD, content_hash, normalize_job_url, text_similarity
 from src.supabase_client import chunked_insert, chunked_upsert, fetch_all
 
 log = logging.getLogger(__name__)
@@ -45,38 +63,54 @@ log = logging.getLogger(__name__)
 class IngestCounts:
     ingested: int = 0
     new: int = 0
-    updated: int = 0       # content changed -> re-enrich
+    updated: int = 0       # content changed (same source board) -> re-enrich
     unchanged: int = 0     # same content -> last_seen touch only
     aliased: int = 0
+    cross_board: int = 0   # same canonical_url, different source board -> last_seen touch only, no re-enrich
+    minor_update: int = 0  # content_hash changed but normalized-text similarity is above threshold -> text
+                           # refreshed, no re-enrich (see RE_ENRICH_SIMILARITY_THRESHOLD)
 
     def as_dict(self) -> dict:
         return {
             "ingested": self.ingested, "new": self.new, "updated": self.updated,
             "unchanged": self.unchanged, "aliased": self.aliased,
+            "cross_board": self.cross_board, "minor_update": self.minor_update,
         }
 
 
 def _fetch_existing_jobs(client) -> tuple[dict[str, dict], dict[str, str]]:
     """Return (by_canonical_url, by_org_title) — one (possibly paginated) query
-    over `jobs`, id/canonical_url/content_hash/org/title only (not the
-    potentially-large raw_description/enrichment/embedding columns, which this
-    step never reads). Uses fetch_all(), not a plain .execute(): PostgREST
+    over `jobs`. source_board is needed to detect a cross-board same-URL
+    collision (see the module docstring's "layer 1" note); raw_description is
+    needed to compute normalized-text similarity when content_hash differs (see
+    RE_ENRICH_SIMILARITY_THRESHOLD) — enrichment/embedding are still excluded,
+    not needed by this step. Uses fetch_all(), not a plain .execute(): PostgREST
     silently truncates a response at db.max_rows (1000) with no error, and an
     incomplete read here means every row past that cutoff gets wrongly decided
     "new" on this run — a real duplicate-insert/duplicate-alias bug, not just
     an incomplete report (confirmed for real once `jobs` crossed 1000 rows)."""
-    rows = fetch_all(client.table("jobs").select("id,canonical_url,content_hash,org,title"))
+    rows = fetch_all(client.table("jobs").select(
+        "id,canonical_url,content_hash,org,title,source_board,raw_description"
+    ))
     by_url = {row["canonical_url"]: row for row in rows}
     by_org_title = {org_title_key(row["org"] or "", row["title"] or ""): row["id"] for row in rows}
     return by_url, by_org_title
 
 
-def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> IngestCounts:
+def ingest(
+    postings: list[JobPosting], *, client, dry_run: bool = False,
+    run_id: str | None = None, trigger: str | None = None,
+) -> IngestCounts:
     """Ingest *postings* into `jobs`/`job_aliases`, batched, with dedup as described
     in this module's docstring. dry_run=True computes and returns the same
     IngestCounts without writing anything — no jobs/job_aliases/run_metrics call is
     made at all (mirrors this codebase's existing dry_run convention: log/return
     what WOULD happen, skip every network write).
+
+    run_id/trigger are stamped onto the run_metrics row this call writes
+    (stage='ingest') — run_id ties every stage of one pipeline_v2 run together;
+    trigger is 'scheduled' or 'manual' (see pipeline_v2.py). Both are optional
+    (written as NULL) for standalone/CLI use outside pipeline_v2.
     """
     by_url, by_org_title = _fetch_existing_jobs(client)
 
@@ -93,8 +127,9 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
     # the hard way against production). Keying by conflict-target gives free
     # last-write-wins de-duplication: a later occurrence just overwrites the dict
     # entry for that key instead of appending a second one.
-    unchanged_updates: dict[str, dict] = {}  # canonical_url -> {canonical_url, last_seen} only
+    unchanged_updates: dict[str, dict] = {}  # canonical_url -> {canonical_url, source_board, content_hash, last_seen} only
     changed_updates: dict[str, dict] = {}    # canonical_url -> {canonical_url, raw_description, content_hash, last_seen, status}
+    minor_updates: dict[str, dict] = {}      # canonical_url -> same shape as changed_updates minus status (no re-enrich)
     new_aliases: dict[str, dict] = {}        # alias_url -> {alias_url, job_id, source_board}
 
     for posting in postings:
@@ -107,6 +142,26 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
 
         existing = by_url.get(canonical)
         if existing is not None:
+            if existing["source_board"] != posting.source_board:
+                # Cross-board rediscovery of an already-known job (see module
+                # docstring) — NOT a content update. Leave raw_description/
+                # content_hash/source_board as whichever board's version is
+                # already stored; only touch last_seen. Deliberately does NOT
+                # update the in-memory by_url cache below (this row's stored
+                # state didn't change), so a later occurrence of this same URL
+                # from yet another board in this same batch still compares
+                # against the original stored owner, not this posting.
+                unchanged_updates[canonical] = {
+                    "canonical_url": canonical,
+                    "source_board": existing["source_board"],
+                    "content_hash": existing["content_hash"],
+                    "last_seen": now,
+                }
+                changed_updates.pop(canonical, None)
+                minor_updates.pop(canonical, None)
+                counts.cross_board += 1
+                board_counts.cross_board += 1
+                continue
             if existing["content_hash"] == this_hash:
                 # canonical_url/source_board/content_hash are NOT NULL with no
                 # default — Postgres validates NOT NULL on an upsert's INSERT
@@ -121,9 +176,27 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
                     "content_hash": this_hash,
                     "last_seen": now,
                 }
-                changed_updates.pop(canonical, None)  # a later "unchanged" occurrence supersedes an earlier "changed" one
+                changed_updates.pop(canonical, None)  # a later "unchanged" occurrence supersedes an earlier "changed"/"minor" one
+                minor_updates.pop(canonical, None)
                 counts.unchanged += 1
                 board_counts.unchanged += 1
+            elif text_similarity(existing.get("raw_description") or "", posting.description) >= RE_ENRICH_SIMILARITY_THRESHOLD:
+                # Same board, hash differs, but the text is still near-identical
+                # (e.g. a single word/punctuation tweak) — refresh the stored
+                # text/hash so future comparisons are against the latest fetch,
+                # but don't spend a re-enrich on a cosmetic change.
+                minor_updates[canonical] = {
+                    "canonical_url": canonical,
+                    "source_board": posting.source_board,
+                    "raw_description": posting.description,
+                    "location_field": posting.location_field,
+                    "content_hash": this_hash,
+                    "last_seen": now,
+                }
+                changed_updates.pop(canonical, None)
+                unchanged_updates.pop(canonical, None)
+                counts.minor_update += 1
+                board_counts.minor_update += 1
             else:
                 changed_updates[canonical] = {
                     "canonical_url": canonical,
@@ -134,13 +207,17 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
                     "last_seen": now,
                     "status": "pending_enrich",
                 }
-                unchanged_updates.pop(canonical, None)  # a later "changed" occurrence supersedes an earlier "unchanged" one
+                unchanged_updates.pop(canonical, None)  # a later "changed" occurrence supersedes an earlier "unchanged"/"minor" one
+                minor_updates.pop(canonical, None)
                 counts.updated += 1
                 board_counts.updated += 1
             # Keep in-memory state current so a THIRD+ occurrence of this same
             # canonical_url later in the batch compares against what this run just
             # decided, not the original pre-batch Supabase state.
-            by_url[canonical] = {"content_hash": this_hash}
+            by_url[canonical] = {
+                "content_hash": this_hash, "source_board": posting.source_board,
+                "raw_description": posting.description,
+            }
             continue
 
         key = org_title_key(posting.org, posting.title)
@@ -186,15 +263,18 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
         # with the same canonical_url and crashing on the unique constraint. The
         # write order below (new_jobs inserted before changed/unchanged updates)
         # guarantees this row exists by the time any such follow-up update runs.
-        by_url[canonical] = {"content_hash": this_hash}
+        by_url[canonical] = {
+            "content_hash": this_hash, "source_board": posting.source_board,
+            "raw_description": posting.description,
+        }
         counts.new += 1
         board_counts.new += 1
 
     if dry_run:
         log.info(
-            "DRY RUN — ingest would write: %d new job(s), %d updated (content changed), "
-            "%d unchanged (last_seen touch), %d aliased",
-            counts.new, counts.updated, counts.unchanged, counts.aliased,
+            "DRY RUN — ingest would write: %d new job(s), %d updated (content changed), %d minor "
+            "(cosmetic, no re-enrich), %d cross-board (no re-enrich), %d unchanged (last_seen touch), %d aliased",
+            counts.new, counts.updated, counts.minor_update, counts.cross_board, counts.unchanged, counts.aliased,
         )
         return counts
 
@@ -206,6 +286,8 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
         chunked_insert(client.table("jobs"), new_jobs)
     if changed_updates:
         chunked_upsert(client.table("jobs"), list(changed_updates.values()), on_conflict="canonical_url")
+    if minor_updates:
+        chunked_upsert(client.table("jobs"), list(minor_updates.values()), on_conflict="canonical_url")
     if unchanged_updates:
         chunked_upsert(client.table("jobs"), list(unchanged_updates.values()), on_conflict="canonical_url")
     if new_aliases:
@@ -214,13 +296,17 @@ def ingest(postings: list[JobPosting], *, client, dry_run: bool = False) -> Inge
     per_board_payload = {board: c.as_dict() for board, c in per_board_counts.items()}
     client.table("run_metrics").insert({
         "run_at": now,
+        "run_id": run_id,
+        "stage": "ingest",
+        "trigger": trigger,
         "jobs_ingested": counts.ingested,
         "per_board": per_board_payload,
     }).execute()
 
     log.info(
-        "Ingest complete: %d posting(s) -> %d new, %d updated, %d unchanged, %d aliased",
-        counts.ingested, counts.new, counts.updated, counts.unchanged, counts.aliased,
+        "Ingest complete: %d posting(s) -> %d new, %d updated, %d minor, %d cross-board, %d unchanged, %d aliased",
+        counts.ingested, counts.new, counts.updated, counts.minor_update, counts.cross_board,
+        counts.unchanged, counts.aliased,
     )
     return counts
 
@@ -284,5 +370,5 @@ if __name__ == "__main__":
 
     print(f"Total: {len(postings)} posting(s) across {len(args.sources)} source(s)")
 
-    result = ingest(postings, client=get_client(), dry_run=args.dry_run)
+    result = ingest(postings, client=get_client(), dry_run=args.dry_run, run_id=str(uuid.uuid4()), trigger="manual")
     print(result.as_dict())

@@ -10,11 +10,19 @@ this session) is unaffected.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import re
 from urllib.parse import urlparse, urlunparse
 
 from src.dedup import canonical_url as _v1_canonical_url
+
+# Above this normalized-text similarity ratio, a content_hash change is treated
+# as cosmetic (e.g. a single appended sentence) rather than a real posting
+# update — see src/ingest.py's changed-content branch. Chosen from real
+# production diffs: genuine content edits (e.g. an appended contact line) score
+# well below this; only near-byte-identical text scores at or above it.
+RE_ENRICH_SIMILARITY_THRESHOLD = 0.97
 
 
 def normalize_job_url(url: str) -> str:
@@ -30,10 +38,21 @@ def normalize_job_url(url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
 
 
+def _normalize_text(text: str) -> str:
+    """Lowercased, leading/trailing whitespace stripped, internal whitespace runs
+    collapsed to a single space — shared by content_hash() and text_similarity()
+    so two strings that hash identically also score a perfect 1.0 similarity."""
+    return re.sub(r"\s+", " ", text.strip().lower())
+
+
 def content_hash(description: str) -> str:
     """sha256 hex digest of *description*, normalized so semantically-identical
-    text differing only in whitespace or case hashes identically: lowercased,
-    leading/trailing whitespace stripped, internal whitespace runs collapsed to a
-    single space."""
-    normalized = re.sub(r"\s+", " ", description.strip().lower())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+    text differing only in whitespace or case hashes identically."""
+    return hashlib.sha256(_normalize_text(description).encode("utf-8")).hexdigest()
+
+
+def text_similarity(a: str, b: str) -> float:
+    """difflib.SequenceMatcher ratio (0..1) between *a* and *b*, both normalized
+    the same way content_hash() normalizes — used to distinguish a cosmetic
+    content_hash change from a real one (see RE_ENRICH_SIMILARITY_THRESHOLD)."""
+    return difflib.SequenceMatcher(None, _normalize_text(a), _normalize_text(b)).ratio()

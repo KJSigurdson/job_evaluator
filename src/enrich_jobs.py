@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from pydantic import ValidationError
@@ -68,6 +68,14 @@ _MAX_TOKENS = 1024
 _POLL_INTERVAL_SECONDS = 10
 _POLL_TIMEOUT_SECONDS = 3600  # batches can legitimately take up to 24h; this run waits up to 1h before giving up
 
+# A job whose content_hash keeps changing (see src/ingest.py's cross-board/minor-
+# update guardrails — this is the backstop behind those) is re-enriched at most
+# once per this many days, never more often, regardless of how often status
+# flips back to pending_enrich. A job with enriched_at still inside the window
+# stays pending_enrich (so it's picked up the moment the window elapses) but is
+# deferred out of THIS run's selection, never charged for twice in one window.
+_RE_ENRICH_COOLDOWN_DAYS = 7
+
 # Batches API pricing is documented at 50% of the synchronous per-token rate.
 # *** VERIFY THESE AGAINST https://www.anthropic.com/pricing BEFORE TRUSTING
 # *** estimated_cost_usd — hardcoded here because there is no API to read current
@@ -81,7 +89,7 @@ _VOYAGE_MODEL = "voyage-3.5"
 _VOYAGE_DIMENSIONS = 1024
 _VOYAGE_BATCH_SIZE = 128  # Voyage's per-request cap
 
-_JOB_SELECT_COLUMNS = "id,title,org,location_field,raw_description,canonical_url,source_board,content_hash"
+_JOB_SELECT_COLUMNS = "id,title,org,location_field,raw_description,canonical_url,source_board,content_hash,enriched_at"
 
 
 # ---------------------------------------------------------------------------
@@ -441,19 +449,40 @@ def _write_enrichment(client, *, enriched: dict[str, JobEnrichment], failures: d
 # Orchestration
 # ---------------------------------------------------------------------------
 
+def _split_cooldown(rows: list[dict]) -> tuple[list[dict], list[str]]:
+    """Split *rows* into (eligible, deferred_job_ids). A row is deferred when its
+    enriched_at is more recent than _RE_ENRICH_COOLDOWN_DAYS ago — its
+    content_hash changed again since then (status flipped back to
+    pending_enrich by src/ingest.py) but the cooldown caps actual re-enrich
+    spend to at most once per window. status stays pending_enrich for a
+    deferred row, so the run right after the cutoff elapses picks it up
+    normally — nothing here is lost, only delayed."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=_RE_ENRICH_COOLDOWN_DAYS)
+    eligible, deferred_ids = [], []
+    for row in rows:
+        enriched_at = row.get("enriched_at")
+        if enriched_at and datetime.fromisoformat(enriched_at) > cutoff:
+            deferred_ids.append(row["id"])
+        else:
+            eligible.append(row)
+    return eligible, deferred_ids
+
+
 def enrich_jobs(
     *, client, anthropic_client, limit: int | None = None, dry_run: bool = False,
-    job_ids: list[str] | None = None,
+    job_ids: list[str] | None = None, run_id: str | None = None, trigger: str | None = None,
 ) -> dict:
     """Enrich every job with status='pending_enrich' (capped at *limit* if given —
-    used for the sample run before committing to the full backlog). dry_run=True
-    selects and reports counts without submitting any batch or writing anything.
-    job_ids, if given, restricts selection to that specific set (still gated on
+    used for the sample run before committing to the full backlog), except jobs
+    re-enriched within the last _RE_ENRICH_COOLDOWN_DAYS (see _split_cooldown) —
+    those are deferred, not selected, this run. dry_run=True selects and reports
+    counts without submitting any batch or writing anything. job_ids, if given,
+    restricts selection to that specific set (still gated on
     status='pending_enrich') — used to hand-pick a representative sample (e.g. one
     that deliberately includes "Remote" postings) rather than taking arbitrary DB
     order.
 
-    Returns a summary dict: {selected, enriched, stale, embeddings_skipped}.
+    Returns a summary dict: {selected, enriched, stale, embeddings_skipped, deferred}.
     """
     query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich")
     if job_ids is not None:
@@ -461,16 +490,23 @@ def enrich_jobs(
     # fetch_all, not a plain .execute(): PostgREST silently truncates a response
     # at db.max_rows (1000) — the pending_enrich backlog can exceed that.
     rows = fetch_all(query)
+    rows, deferred_ids = _split_cooldown(rows)
     if limit is not None:
         rows = rows[:limit]
 
     if dry_run:
-        log.info("DRY RUN — would enrich %d job(s)", len(rows))
-        return {"selected": len(rows), "enriched": 0, "stale": 0, "embeddings_skipped": not embeddings_available()}
+        log.info("DRY RUN — would enrich %d job(s) (%d deferred by re-enrich cooldown)", len(rows), len(deferred_ids))
+        return {
+            "selected": len(rows), "enriched": 0, "stale": 0,
+            "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
+        }
 
     if not rows:
-        log.info("No pending_enrich jobs found — nothing to do")
-        return {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": not embeddings_available()}
+        log.info("No pending_enrich jobs found — nothing to do (%d deferred by cooldown)", len(deferred_ids))
+        return {
+            "selected": 0, "enriched": 0, "stale": 0,
+            "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
+        }
 
     by_id = {row["id"]: row for row in rows}
 
@@ -538,8 +574,16 @@ def enrich_jobs(
     now = datetime.now(timezone.utc).isoformat()
     client.table("run_metrics").insert({
         "run_at": now,
+        "run_id": run_id,
+        "stage": "enrich",
+        "trigger": trigger,
         "jobs_enriched": len(enriched),
-        "tier1_calls": total_api_calls,
+        # NOT tier1_calls — this is enrich_jobs.py's own Haiku call count, a
+        # different stage from tier1_rerank.py's Tier 1 rerank calls. Writing it
+        # into tier1_calls conflated the two (confirmed: every "Enrich" stage row
+        # was double-booked into the Tier 1 column, making per-stage call volume
+        # unreadable from run_metrics alone).
+        "enrichment_calls": total_api_calls,
         "estimated_cost_usd": round(
             total_input_tokens / 1_000_000 * _HAIKU_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT
             + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
@@ -551,12 +595,12 @@ def enrich_jobs(
     _write_enrichment(client, enriched=enriched, failures=failures, by_id=by_id, embeddings=embeddings)
 
     log.info(
-        "Enrichment complete: %d selected, %d enriched, %d stale, embeddings_skipped=%s",
-        len(rows), len(enriched), len(failures), not embeddings_available(),
+        "Enrichment complete: %d selected, %d enriched, %d stale, %d deferred by cooldown, embeddings_skipped=%s",
+        len(rows), len(enriched), len(failures), len(deferred_ids), not embeddings_available(),
     )
     return {
         "selected": len(rows), "enriched": len(enriched), "stale": len(failures),
-        "embeddings_skipped": not embeddings_available(),
+        "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
     }
 
 

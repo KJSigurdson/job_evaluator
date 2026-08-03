@@ -54,6 +54,24 @@ def test_ingest_writes_run_metrics_row(fake_client):
     assert rows[0]["per_board"]["80000_hours"]["new"] == 1
 
 
+def test_ingest_run_metrics_row_stamped_with_run_id_stage_trigger(fake_client):
+    ingest([_posting()], client=fake_client, run_id="run-abc", trigger="scheduled")
+
+    [row] = fake_client.table("run_metrics").rows
+    assert row["run_id"] == "run-abc"
+    assert row["stage"] == "ingest"
+    assert row["trigger"] == "scheduled"
+
+
+def test_ingest_run_metrics_defaults_run_id_and_trigger_to_none(fake_client):
+    ingest([_posting()], client=fake_client)
+
+    [row] = fake_client.table("run_metrics").rows
+    assert row["run_id"] is None
+    assert row["trigger"] is None
+    assert row["stage"] == "ingest"
+
+
 # ---------------------------------------------------------------------------
 # Same URL, same content — last_seen touch only
 # ---------------------------------------------------------------------------
@@ -305,6 +323,116 @@ def test_ingest_same_alias_canonical_url_twice_in_one_batch_no_duplicate_upsert_
 # ---------------------------------------------------------------------------
 # dry_run
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Same URL, different source board — cross-board rediscovery, not a content
+# update (see ingest.py's module docstring: the real root cause of the
+# ~300/run "updated" churn confirmed against production on 2026-08-03).
+# ---------------------------------------------------------------------------
+
+def test_ingest_cross_board_same_url_does_not_flag_updated_or_touch_text(fake_client):
+    p = _posting(source_board="iap", description="Org | Title | Location | Comp | Cause")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("80k's fuller prose description."),
+        "raw_description": "80k's fuller prose description.", "status": "enriched",
+        "enrichment": {"summary": "existing enrichment"},
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, cross_board=1)
+    row = fake_client.table("jobs").rows[0]
+    # Untouched — whichever board's text is already stored wins, no re-enrich.
+    assert row["status"] == "enriched"
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "80k's fuller prose description."
+    assert row["content_hash"] == content_hash("80k's fuller prose description.")
+    assert fake_client.table("jobs").insert_calls == []
+
+
+def test_ingest_cross_board_upsert_payload_never_touches_status_or_text(fake_client):
+    p = _posting(source_board="probably_good")
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": normalize_job_url(p.url), "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": "existing-hash",
+        "raw_description": "existing text",
+    }])
+
+    ingest([p], client=fake_client)
+
+    [payload] = fake_client.table("jobs").upsert_calls
+    assert set(payload[0].keys()) == {"canonical_url", "source_board", "content_hash", "last_seen"}
+    assert payload[0]["source_board"] == "80000_hours"  # the ORIGINAL owner, not the incoming board
+    assert payload[0]["content_hash"] == "existing-hash"
+
+
+def test_ingest_third_board_in_same_batch_still_compares_against_original_owner(fake_client):
+    """A cross-board hit must NOT overwrite the in-memory cache — a later
+    occurrence of the same URL from yet another board in the same batch should
+    still be judged a cross-board hit too, not "changed" against the first
+    cross-board occurrence's (irrelevant) content."""
+    canonical = normalize_job_url("https://jobs.80000hours.org/head-of-data")
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": "GiveDirectly", "title": "Head of Data", "content_hash": content_hash("original text"),
+        "raw_description": "original text",
+    }])
+    p1 = _posting(url=canonical, source_board="probably_good", description="pg's version")
+    p2 = _posting(url=canonical, source_board="iap", description="iap's version")
+
+    counts = ingest([p1, p2], client=fake_client)
+
+    assert counts.cross_board == 2
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "original text"
+
+
+# ---------------------------------------------------------------------------
+# Same URL, same board, hash differs but text is near-identical — cosmetic,
+# no re-enrich spend (RE_ENRICH_SIMILARITY_THRESHOLD guardrail).
+# ---------------------------------------------------------------------------
+
+def test_ingest_minor_change_refreshes_text_without_resetting_status(fake_client):
+    old_text = "A" * 500
+    new_text = old_text + " Minor trailing note."  # small addition -> similarity above threshold
+    p = _posting(description=new_text)
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash(old_text),
+        "raw_description": old_text, "status": "enriched",
+        "enrichment": {"summary": "existing enrichment"},
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, minor_update=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"  # not reset to pending_enrich
+    assert row["enrichment"] == {"summary": "existing enrichment"}
+    assert row["raw_description"] == new_text
+    assert row["content_hash"] == content_hash(new_text)
+
+
+def test_ingest_substantially_different_text_still_flags_updated(fake_client):
+    """Guardrail sanity check: a real content change (well below the similarity
+    threshold) must still take the normal 'updated' -> pending_enrich path."""
+    p = _posting(description="A completely different role description entirely.")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("Original text about a data role."),
+        "raw_description": "Original text about a data role.", "status": "enriched",
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, updated=1)
+    assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
+
 
 def test_ingest_dry_run_writes_nothing(fake_client):
     counts = ingest([_posting()], client=fake_client, dry_run=True)

@@ -246,7 +246,7 @@ def test_enrich_jobs_happy_path_all_succeed_round_one(fake_client, monkeypatch):
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True}
+    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "enriched"
     assert row["enrichment"]["summary"] == _valid_enrichment_dict()["summary"]
@@ -284,7 +284,7 @@ def test_enrich_jobs_fails_both_rounds_marks_stale_never_writes_partial(fake_cli
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 0, "stale": 1, "embeddings_skipped": True}
+    assert summary == {"selected": 1, "enriched": 0, "stale": 1, "embeddings_skipped": True, "deferred": 0}
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "stale"
     assert "enrichment" not in row or row.get("enrichment") is None  # never partially written
@@ -353,6 +353,58 @@ def test_enrich_jobs_only_selects_pending_enrich_status(fake_client, monkeypatch
     assert summary["selected"] == 1
 
 
+# ---------------------------------------------------------------------------
+# Re-enrich cooldown — see enrich_jobs.py's _split_cooldown / ingest.py's
+# cross-board and minor-update guardrails: a job whose content_hash keeps
+# flipping back to pending_enrich must still only be re-enriched at most once
+# per _RE_ENRICH_COOLDOWN_DAYS.
+# ---------------------------------------------------------------------------
+
+def test_enrich_jobs_defers_job_enriched_within_cooldown(fake_client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    fake_client.seed("jobs", [_job_row("job-recent", enriched_at=recent)])
+    anthropic_client = _FakeAnthropicClient(rounds=[])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True, "deferred": 1}
+    assert anthropic_client.messages.batches.created_batches == []
+    # status untouched — stays pending_enrich so the run past the cutoff picks it up.
+    assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
+
+
+def test_enrich_jobs_selects_job_enriched_past_cooldown(fake_client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    stale_enrich = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    fake_client.seed("jobs", [_job_row("job-1", enriched_at=stale_enrich)])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
+
+
+def test_enrich_jobs_never_enriched_job_is_not_deferred(fake_client, monkeypatch):
+    """enriched_at=None (never enriched, e.g. brand new) must never be deferred —
+    the cooldown only applies to jobs that have actually been enriched before."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row("job-new", enriched_at=None)])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-new", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
+
+
 def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client, monkeypatch):
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
@@ -366,8 +418,23 @@ def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client,
 
     [metrics] = fake_client.table("run_metrics").rows
     assert metrics["jobs_enriched"] == 1
-    assert metrics["tier1_calls"] == 1
+    assert metrics["enrichment_calls"] == 1
     assert metrics["estimated_cost_usd"] > 0
+
+
+def test_enrich_jobs_run_metrics_stamped_with_run_id_stage_trigger(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client, run_id="run-abc", trigger="manual")
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["run_id"] == "run-abc"
+    assert metrics["stage"] == "enrich"
+    assert metrics["trigger"] == "manual"
 
 
 def test_enrich_jobs_embeddings_used_when_key_present(fake_client, monkeypatch):
