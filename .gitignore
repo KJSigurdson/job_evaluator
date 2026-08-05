@@ -4,4 +4,5 @@ __pycache__/
 *.pyc
 *service-account*.json
 supabase/.temp/
+scripts/backfill_preview.json
 
