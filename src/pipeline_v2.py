@@ -12,13 +12,16 @@ No --only-user-id (scheduled/cron mode) — the full pipeline:
        pool persists across runs, unlike v1's fresh-scrape-every-day model).
     3. profile_embed.backfill_profile_embeddings() — only hash-changed profiles.
     4. Per active user with a complete profile: gate_v2 -> vector top-N
-       (src.match_v2.TOP_N) -> Tier 1 -> Tier 2 (threshold below) -> matches_v2,
-       excluding jobs already matched to that user
-       (src.match_v2.fetch_matched_job_ids) from the candidate pool BEFORE
-       gating — without this, a user's existing strong matches would keep
-       winning top-N vector-rerank slots forever, starving new jobs from ever
-       reaching Tier 1, on top of re-spending Tier 2 and re-emailing the same
-       jobs every run.
+       (src.match_v2.TOP_N) -> Tier 1 -> Tier 2 -> matches_v2, excluding jobs
+       already matched to that user (src.match_v2.fetch_matched_job_ids) from
+       the candidate pool BEFORE gating — without this, a user's existing
+       strong matches would keep winning top-N vector-rerank slots forever,
+       starving new jobs from ever reaching Tier 1, on top of re-spending
+       Tier 2 and re-emailing the same jobs every run. Only candidates with
+       tier1_score >= that user's own scoring_weights.insert_threshold
+       (0-1 in storage, scaled to tier1_score's 0-100 range — see
+       _match_and_notify_user) ever reach Tier 2 or matches_v2; anything below
+       is dropped outright — no near-miss tier, no partial-fit row of any kind.
     5. Digest email per user with new matches this run (email_on_match, not
        dry-run) — reuses src.notify.send_match_digest() UNCHANGED, same
        best-effort/never-raise contract as v1; v2's `matches_v2` fields are
@@ -70,7 +73,6 @@ from src.user_store import fetch_users
 
 log = logging.getLogger(__name__)
 
-_TIER2_THRESHOLD = 65
 _ADAPTERS = [EightyThousandHoursAdapter, ProbablyGoodAdapter, IAPAdapter]
 
 _JOBS_POOL_COLUMNS = "id,title,org,canonical_url,location_field,raw_description,enrichment,source_board"
@@ -160,8 +162,14 @@ def _match_and_notify_user(
         for s in scores if s.job_id in top_by_id
     ]
 
+    # scoring_weights.insert_threshold is stored 0-1 (fractional); tier1_score is
+    # 0-100 (see src/models/tier1_rerank.py's JobScore). Scale up before comparing
+    # — this is this user's own per-user bar, read fresh off their rubric every
+    # run, not a global constant shared across users.
+    threshold = user.rubric["threshold"] * 100
+
     tier2_result = run_tier2_enrich(
-        client, anthropic_client, candidates=candidates, threshold=_TIER2_THRESHOLD,
+        client, anthropic_client, candidates=candidates, threshold=threshold,
         run_id=run_id, trigger=trigger,
     )
 
@@ -169,7 +177,7 @@ def _match_and_notify_user(
     # by construction, new — matched_ids already excluded every pre-existing
     # match from the candidate pool before gating even ran, so no before/after
     # diffing is needed to know what's new for the digest.
-    qualifying_job_ids = [c["job"]["id"] for c in candidates if c["tier1_score"] >= _TIER2_THRESHOLD]
+    qualifying_job_ids = [c["job"]["id"] for c in candidates if c["tier1_score"] >= threshold]
     notified = False
     if qualifying_job_ids and user.profile.get("email_on_match") and not dry_run:
         new_rows = fetch_all(

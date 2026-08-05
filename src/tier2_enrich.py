@@ -48,7 +48,8 @@ _TOOL_NAME = "enrich_posting"
 _MAX_TOKENS = 2048
 _POLL_INTERVAL_SECONDS = 10
 _POLL_TIMEOUT_SECONDS = 3600
-_DEFAULT_THRESHOLD = 65
+_DEFAULT_THRESHOLD = 65  # fallback only — pipeline_v2.py always passes each user's own
+                         # scoring_weights.insert_threshold (scaled to 0-100) explicitly
 _LIST_FIELDS = ("emphasize_in_cv", "deemphasize")
 
 # Sonnet is priced well above Haiku — VERIFY AGAINST https://www.anthropic.com/pricing
@@ -268,7 +269,7 @@ def _candidate_context(key: str, c: dict) -> dict:
 
 
 def tier2_enrich(
-    client, anthropic_client, *, candidates: list[dict], threshold: int = _DEFAULT_THRESHOLD,
+    client, anthropic_client, *, candidates: list[dict], threshold: float = _DEFAULT_THRESHOLD,
     run_id: str | None = None, trigger: str | None = None,
 ) -> dict:
     """candidates: [{"user_id", "profile", "job", "tier1_score", "tier1_reason"}, ...]
@@ -293,7 +294,7 @@ def tier2_enrich(
 
     if not qualifying:
         log.info(
-            "tier2_enrich: 0/%d candidate(s) clear threshold %d — nothing to do",
+            "tier2_enrich: 0/%d candidate(s) clear threshold %s — nothing to do",
             len(candidates), threshold,
         )
         return {"considered": len(candidates), "enriched": 0, "skipped_below_threshold": skipped, "failed": 0}

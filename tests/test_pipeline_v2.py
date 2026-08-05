@@ -87,9 +87,13 @@ def test_build_digest_payload_skips_row_with_no_matching_job():
 # _match_and_notify_user — skip logic
 # ---------------------------------------------------------------------------
 
-def _user_context(profile: dict):
+def _user_context(profile: dict, rubric: dict | None = None):
     from src.schemas import UserContext
-    return UserContext(user_id="u1", profile=profile, rubric={})
+    # threshold: 0.65 mirrors _weights_row()'s old-style default and the "below 65"
+    # comments on tests further down that pre-date per-user threshold wiring —
+    # 0.65 * 100 == 65, so those tests' score=40/score=80 fixtures still mean what
+    # their comments say without every one of them needing its own rubric override.
+    return UserContext(user_id="u1", profile=profile, rubric=rubric or {"threshold": 0.65})
 
 
 def test_match_and_notify_user_skips_empty_profile(fake_client):
@@ -156,6 +160,65 @@ def test_match_and_notify_user_dry_run_skips_tier1_tier2_entirely(fake_client, m
 
     assert result["tier1_scored"] == 0
     assert result["notified"] is False
+
+
+# ---------------------------------------------------------------------------
+# Per-user insert_threshold — scoring_weights.insert_threshold (0-1 in storage)
+# scaled to tier1_score's 0-100 range, read fresh per user, no near-miss tier.
+# ---------------------------------------------------------------------------
+
+def test_match_and_notify_user_scales_threshold_from_0_1_to_0_100(fake_client, monkeypatch):
+    user = _user_context(
+        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": False},
+        rubric={"threshold": 0.8},
+    )
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
+        "u1": {"scores": [JobScore(job_id="job-1", score=80, reason="x")]},
+    })
+
+    captured = {}
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: (
+        captured.update(k), {"considered": 1, "enriched": 0, "skipped_below_threshold": 1, "failed": 0},
+    )[1])
+
+    _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
+
+    assert captured["threshold"] == 80.0  # 0.8 * 100, not the raw 0.8
+
+
+def test_match_and_notify_user_uses_this_users_own_threshold_not_a_global_constant(fake_client, monkeypatch):
+    """Same tier1_score (70) against two different per-user thresholds must
+    qualify for one user and not the other — proves the threshold is read from
+    this user's own rubric, not a shared/global constant."""
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
+        "u1": {"scores": [JobScore(job_id="job-1", score=70, reason="x")]},
+    })
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
+        "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
+    })
+    digest_calls = []
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: digest_calls.append(user_id))
+    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 70, "tier2": {}}])
+
+    lenient_user = _user_context(
+        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True},
+        rubric={"threshold": 0.6},  # 60 -> 70 qualifies
+    )
+    result_lenient = _match_and_notify_user(fake_client, object(), lenient_user, [_job()], dry_run=False)
+    assert result_lenient["notified"] is True
+
+    digest_calls.clear()
+    strict_user = _user_context(
+        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True},
+        rubric={"threshold": 0.85},  # 85 -> 70 does not qualify
+    )
+    result_strict = _match_and_notify_user(fake_client, object(), strict_user, [_job()], dry_run=False)
+    assert result_strict["notified"] is False
+    assert digest_calls == []
 
 
 def test_match_and_notify_user_calls_tier1_then_tier2(fake_client, monkeypatch):
