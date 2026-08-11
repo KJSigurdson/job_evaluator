@@ -48,6 +48,16 @@ compute-without-writing. src.match_v2/src.tier1_rerank/src.tier2_enrich do
 not (they always write) — retrofitting that was out of scope here — so
 dry_run skips the entire per-user matching+digest step rather than spending
 real LLM cost on a preview it can't actually withhold from being written.
+
+`pipeline_runs` (shared with v1 — see src/run_store.py): run() opens one row
+here (_open_pipeline_run) BEFORE anything else, using the same run_id every
+run_metrics write below stamps — run_metrics.run_id is a foreign key to
+pipeline_runs.run_id, so every stage write this run makes (ingest/enrich/
+tier1/tier2/match) depends on that parent row already existing. Closed
+(_close_pipeline_run) in a finally, status='complete'/'failed' — same
+open/close shape as v1's start_run()/complete_run(), but v2 owns run_id
+generation itself (needed so every stage shares one id), so it can't reuse
+those v1 functions directly. No-op in dry_run, same as every other write here.
 """
 from __future__ import annotations
 
@@ -80,6 +90,66 @@ _JOBS_POOL_COLUMNS = "id,title,org,canonical_url,location_field,raw_description,
 
 def _fetch_enriched_jobs_pool(client) -> list[dict]:
     return fetch_all(client.table("jobs").select(_JOBS_POOL_COLUMNS).eq("status", "enriched"))
+
+
+def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool) -> None:
+    """Insert the `pipeline_runs` parent row for *run_id* — MUST happen before
+    any run_metrics write this run makes (ingest/enrich/tier1/tier2/match all
+    stamp run_metrics.run_id with this same run_id), because run_metrics.run_id
+    is a foreign key to pipeline_runs.run_id. Without a matching parent row,
+    every one of those stage inserts 23503s (confirmed: this table/FK is shared
+    with v1's pipeline.py — see src/run_store.py — which has always opened its
+    own row via start_run() before writing anything; v2 generates its own
+    run_id up front instead of letting start_run() mint one, so it needs its
+    own open/close pair here rather than reusing that v1 function).
+
+    Deliberately NOT wrapped in try/except like run_store.py's telemetry
+    writes: this row isn't just observability for v2 — it's a hard prerequisite
+    every later run_metrics write depends on via the FK, so a failure here
+    should surface immediately and stop the run, not be swallowed into a
+    confusing 23503 several stages later.
+
+    No-op in dry_run — nothing downstream writes run_metrics in that mode
+    either (ingest.py/enrich_jobs.py/_match_and_notify_user all skip their own
+    writes when dry_run=True), so there would be nothing for this row to
+    parent.
+    """
+    if dry_run:
+        return
+    client.table("pipeline_runs").insert({
+        "run_id": run_id,
+        "status": "running",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "trigger": trigger,
+    }).execute()
+
+
+def _close_pipeline_run(client, *, run_id: str, status: str, user_count: int | None, dry_run: bool) -> None:
+    """Finalize the pipeline_runs row _open_pipeline_run wrote — status is
+    'complete' or 'failed', matching v1's src/run_store.py vocabulary (the two
+    pipelines now share this table). user_count is the only v1-style total
+    populated here (len(user_results) — the rest of v1's total_* columns, e.g.
+    total_scored/total_inserted, describe a fresh-scrape-per-run model that
+    doesn't map cleanly onto v2's shared, persistent job pool; left NULL rather
+    than guessed). No-op in dry_run (nothing was opened).
+
+    Unlike _open_pipeline_run, failures here ARE swallowed (logged, not
+    raised) — by the time this runs, every stage that actually depended on the
+    parent row existing has already succeeded or the run is already failing
+    for its own reason; a telemetry-only failure to record the final status
+    must not mask that outcome or crash an otherwise-successful run, same
+    principle as run_store.py's own writes.
+    """
+    if dry_run:
+        return
+    try:
+        client.table("pipeline_runs").update({
+            "status": status,
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "user_count": user_count,
+        }).eq("run_id", run_id).execute()
+    except Exception as exc:
+        log.warning("pipeline_runs close (run %s, status=%s) failed — telemetry only, ignored: %r", run_id, status, exc)
 
 
 def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dict]) -> list[dict]:
@@ -210,6 +280,9 @@ def run(
     anthropic_client = _anthropic_client if _anthropic_client is not None else anthropic.Anthropic()
     track_quota = only_user_id is not None and not dry_run
     succeeded = False
+    user_results: list[dict] = []  # defined before try/finally — _close_pipeline_run
+                                    # in finally needs this even if we never reach the
+                                    # per-user loop (e.g. a failure during ingest)
     # One run_id ties every stage's run_metrics row (ingest/enrich/tier1/tier2/
     # match) back to this single invocation of run(); trigger distinguishes the
     # cron-scheduled full pipeline from a manual --only-user-id call.
@@ -217,6 +290,11 @@ def run(
     trigger = "manual" if only_user_id is not None else "scheduled"
 
     try:
+        # MUST happen before anything writes run_metrics — every stage below
+        # (ingest/enrich/tier1/tier2/match) stamps run_metrics.run_id with this
+        # same run_id, and that column is a foreign key to pipeline_runs.run_id.
+        _open_pipeline_run(client, run_id=run_id, trigger=trigger, dry_run=dry_run)
+
         if track_quota:
             set_status(client, only_user_id, "running")
 
@@ -267,7 +345,6 @@ def run(
         jobs_pool = _fetch_enriched_jobs_pool(client)
         log.info("Matching against %d enriched job(s)", len(jobs_pool))
 
-        user_results = []
         gate_rejections: dict[str, dict] = {}
         for user in users:
             result = _match_and_notify_user(
@@ -301,6 +378,10 @@ def run(
     finally:
         if track_quota and succeeded:
             set_status(client, only_user_id, "complete", completed=True)
+        _close_pipeline_run(
+            client, run_id=run_id, status="complete" if succeeded else "failed",
+            user_count=len(user_results), dry_run=dry_run,
+        )
 
 
 # ---------------------------------------------------------------------------

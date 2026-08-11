@@ -374,6 +374,94 @@ def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result
     })
 
 
+# ---------------------------------------------------------------------------
+# pipeline_runs open/close — run_metrics.run_id is a foreign key to
+# pipeline_runs.run_id, so every stage's run_metrics write this run makes
+# depends on this row existing FIRST. See _open_pipeline_run/_close_pipeline_run.
+# ---------------------------------------------------------------------------
+
+def test_run_opens_pipeline_runs_row_before_any_stage_runs(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "complete"
+    assert row["trigger"] == "scheduled"
+    assert row["started_at"] is not None
+    assert row["completed_at"] is not None
+
+
+def test_run_opens_pipeline_runs_row_with_same_run_id_as_run_metrics(fake_client, monkeypatch):
+    """The actual bug this fixes: every run_metrics row this run writes must
+    reference a run_id that a pipeline_runs row with that same id already
+    exists for (run_metrics.run_id -> pipeline_runs.run_id FK)."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
+        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 1},
+    })
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [pipeline_run] = fake_client.table("pipeline_runs").rows
+    [metrics_row] = [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"]
+    assert metrics_row["run_id"] == pipeline_run["run_id"]
+
+
+def test_run_manual_mode_opens_pipeline_runs_row_with_trigger_manual(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["trigger"] == "manual"
+    assert row["status"] == "complete"
+
+
+def test_run_closes_pipeline_runs_row_as_failed_on_exception(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+
+    def _boom(*a, **k):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", _boom)
+
+    with pytest.raises(RuntimeError):
+        run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "failed"
+    assert row["completed_at"] is not None
+
+
+def test_run_no_users_manual_mode_still_opens_and_closes_pipeline_runs_row_failed(fake_client):
+    with pytest.raises(RuntimeError):
+        run(only_user_id="nonexistent", _client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "failed"
+
+
+def test_run_dry_run_never_writes_pipeline_runs_row(fake_client, monkeypatch):
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 3, "top": [_job()]})
+
+    run(dry_run=True, _client=fake_client, _anthropic_client=object())
+
+    assert fake_client.table("pipeline_runs").rows == []
+
+
 def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     calls = []
