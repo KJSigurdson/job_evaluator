@@ -354,6 +354,61 @@ def test_match_and_notify_user_digest_failure_does_not_raise(fake_client, monkey
 
 
 # ---------------------------------------------------------------------------
+# _ADAPTER_REGISTRY — IAP disabled, its .fetch() (and thus its Google
+# Sheets credentials) never touched; 80k/ProbablyGood remain active.
+# ---------------------------------------------------------------------------
+
+def test_adapter_registry_iap_is_disabled():
+    from src.adapters.iap import IAPAdapter
+    entries = dict(pipeline_v2._ADAPTER_REGISTRY)
+    assert entries[IAPAdapter] is False
+
+
+def test_adapter_registry_80k_and_probably_good_are_enabled():
+    from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter
+    from src.adapters.probably_good import ProbablyGoodAdapter
+    entries = dict(pipeline_v2._ADAPTER_REGISTRY)
+    assert entries[EightyThousandHoursAdapter] is True
+    assert entries[ProbablyGoodAdapter] is True
+
+
+def test_adapters_derived_list_excludes_disabled_iap():
+    from src.adapters.iap import IAPAdapter
+    assert IAPAdapter not in pipeline_v2._ADAPTERS
+    assert len(pipeline_v2._ADAPTERS) == 2
+
+
+def test_run_scheduled_mode_logs_active_and_skipped_adapters(fake_client, monkeypatch, caplog):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    with caplog.at_level("INFO"):
+        run(_client=fake_client, _anthropic_client=object())
+
+    [log_line] = [r.message for r in caplog.records if r.message.startswith("Adapters active:")]
+    assert "EightyThousandHoursAdapter" in log_line
+    assert "ProbablyGoodAdapter" in log_line
+    assert "IAPAdapter" in log_line  # named in the skipped half, not silently dropped
+
+
+def test_run_manual_mode_does_not_log_adapter_line(fake_client, monkeypatch, caplog):
+    """Manual mode never touches adapters at all — the active/skipped log line
+    is scoped to the scheduled-mode adapter-fetch step, not printed as a
+    no-op in a mode that never reaches it."""
+    _seed_active_user(fake_client)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    with caplog.at_level("INFO"):
+        run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    assert not any(r.message.startswith("Adapters active:") for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
 # run() — scheduled (full) mode vs manual DB-only mode
 # ---------------------------------------------------------------------------
 
@@ -364,7 +419,10 @@ class _NoopAdapter:
 
 def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None):
     from src.ingest import IngestCounts
-    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_NoopAdapter, _NoopAdapter, _NoopAdapter])
+    # Two, not three — matches the real active-adapter count now that IAP is
+    # disabled (see _ADAPTER_REGISTRY); these are dummy classes either way, so
+    # the exact count has no bearing on what this helper actually verifies.
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_NoopAdapter, _NoopAdapter])
     monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run, **k: ingest_result or IngestCounts())
     monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: enrich_result or {
         "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,

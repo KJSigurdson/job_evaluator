@@ -6,7 +6,8 @@ Usage:
     python -m src.pipeline_v2 [--dry-run] [--only-user-id ID]
 
 No --only-user-id (scheduled/cron mode) — the full pipeline:
-    1. Adapters (80k, ProbablyGood, IAP) -> ingest.ingest() (dedup/alias into `jobs`).
+    1. Active adapters (see _ADAPTER_REGISTRY — currently 80k, ProbablyGood;
+       IAP disabled) -> ingest.ingest() (dedup/alias into `jobs`).
     2. enrich_jobs.enrich_jobs() — only status='pending_enrich' rows (new or
        content-changed); steady-state stays small by design (the shared jobs
        pool persists across runs, unlike v1's fresh-scrape-every-day model).
@@ -83,7 +84,26 @@ from src.user_store import fetch_users
 
 log = logging.getLogger(__name__)
 
-_ADAPTERS = [EightyThousandHoursAdapter, ProbablyGoodAdapter, IAPAdapter]
+# Source adapter registry — every known adapter, with an explicit enabled flag.
+# Toggle here to disable a source without deleting its adapter code (its
+# module, tests, and the underlying src/sources/*.py fetch code it wraps all
+# stay intact — see each adapter module for that reuse). Re-enable by flipping
+# back to True; no other change needed. Disabling an adapter here also means
+# its .fetch() is never called, so any credentials that adapter alone needs
+# (e.g. IAPAdapter's GOOGLE_SERVICE_ACCOUNT_JSON/IAP_SHEET_ID/IAP_SHEET_TAB —
+# read lazily inside src/sources/iap.py's fetch_raw_rows(), not at import
+# time) are never required, even if the environment still provides them.
+#
+# IAP disabled 2026-08-18 — the referral sheet's postings are lower-signal
+# and no longer worth the per-run Sheets API call; the sheet itself is
+# untouched, so re-enabling is a pure flag flip if that changes.
+_ADAPTER_REGISTRY: list[tuple[type, bool]] = [
+    (EightyThousandHoursAdapter, True),
+    (ProbablyGoodAdapter, True),
+    (IAPAdapter, False),
+]
+
+_ADAPTERS = [cls for cls, enabled in _ADAPTER_REGISTRY if enabled]
 
 _JOBS_POOL_COLUMNS = "id,title,org,canonical_url,location_field,raw_description,enrichment,source_board"
 
@@ -301,6 +321,10 @@ def run(
         ingest_counts = None
         enrich_result = None
         if only_user_id is None:
+            active_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if enabled]
+            skipped_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if not enabled]
+            log.info("Adapters active: %s | skipped (disabled): %s", active_names, skipped_names)
+
             postings = []
             for adapter_cls in _ADAPTERS:
                 try:
