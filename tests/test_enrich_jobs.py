@@ -170,8 +170,21 @@ class _FakeSucceededResult:
 
 
 class _FakeErroredResult:
-    def __init__(self, kind="errored"):
+    """kind='errored' (the default) additionally carries a nested
+    error.error.type — error_type='invalid_request_error' by default, since
+    that's the one error type _classify_batch_result treats as genuinely
+    terminal (matches this fixture's original "permanently broken" intent);
+    pass error_type='api_error'/'overloaded_error' to exercise the new
+    transient/requeue path instead. kind='expired'/'canceled' carry no error
+    payload at all, matching the real API's MessageBatchExpiredResult/
+    MessageBatchCanceledResult shape (type-only, no error field)."""
+    def __init__(self, kind="errored", error_type="invalid_request_error"):
         self._dump = {"type": kind}
+        if kind == "errored":
+            self._dump["error"] = {
+                "type": "error",
+                "error": {"type": error_type, "message": f"simulated {error_type}"},
+            }
 
     def model_dump(self, mode="json"):
         return self._dump
@@ -225,6 +238,18 @@ class _FakeAnthropicClient:
         self.messages = _FakeMessagesAPI(_FakeBatchesAPI(rounds))
 
 
+def _batch_submission_row(batch_id="orphaned_batch", *, module="enrich_jobs", status="submitted", **overrides) -> dict:
+    """created_at/updated_at are NOT NULL with a default in the real schema —
+    always present on a real row. Defaults here to "now" (neither expired
+    nor a stale claim) so tests don't need to think about batch_poll's age
+    checks unless that's specifically what they're exercising."""
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    defaults = dict(batch_id=batch_id, module=module, status=status, created_at=now, updated_at=now)
+    defaults.update(overrides)
+    return defaults
+
+
 def _job_row(job_id="job-1", **overrides) -> dict:
     defaults = dict(
         id=job_id, title="Head of Data", org="GiveDirectly",
@@ -246,7 +271,7 @@ def test_enrich_jobs_happy_path_all_succeed_round_one(fake_client, monkeypatch):
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
+    assert summary == {"status": "complete", "selected": 1, "enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "enriched"
     assert row["enrichment"]["summary"] == _valid_enrichment_dict()["summary"]
@@ -274,21 +299,27 @@ def test_enrich_jobs_failure_then_successful_retry(fake_client, monkeypatch):
     assert "previous attempt" in retry_prompt.lower()
 
 
-def test_enrich_jobs_fails_both_rounds_marks_stale_never_writes_partial(fake_client, monkeypatch):
+def test_enrich_jobs_invalid_request_error_marks_stale_no_retry_call(fake_client, monkeypatch):
+    """invalid_request_error is genuinely terminal (the API itself rejected
+    the request — a retry prompt can't fix that) — classified 'stale'
+    directly on round 1, with NO round-2 retry batch submitted at all. This
+    is the fix for the pre-Phase-1 bug: errored/canceled/expired items used
+    to fall through to the parse-failure branch, burning a second LLM call
+    on a retry that could never succeed, before finally landing on the exact
+    same 'stale' outcome anyway."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row(raw_description="original text")])
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("job-1", _FakeErroredResult())],
-        [_FakeResultItem("job-1", _FakeErroredResult())],
+        [_FakeResultItem("job-1", _FakeErroredResult(error_type="invalid_request_error"))],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 0, "stale": 1, "embeddings_skipped": True, "deferred": 0}
+    assert summary == {"status": "complete", "selected": 1, "enriched": 0, "stale": 1, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "stale"
     assert "enrichment" not in row or row.get("enrichment") is None  # never partially written
-    assert len(anthropic_client.messages.batches.created_batches) == 2
+    assert len(anthropic_client.messages.batches.created_batches) == 1  # no retry — genuinely terminal
 
 
 def test_enrich_jobs_mixed_batch_one_succeeds_one_permanently_fails(fake_client, monkeypatch):
@@ -297,9 +328,8 @@ def test_enrich_jobs_mixed_batch_one_succeeds_one_permanently_fails(fake_client,
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
             _FakeResultItem("job-good", _FakeSucceededResult(_block(_valid_enrichment_dict()))),
-            _FakeResultItem("job-bad", _FakeErroredResult()),
+            _FakeResultItem("job-bad", _FakeErroredResult(error_type="invalid_request_error")),
         ],
-        [_FakeResultItem("job-bad", _FakeErroredResult())],
     ])
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
@@ -309,6 +339,110 @@ def test_enrich_jobs_mixed_batch_one_succeeds_one_permanently_fails(fake_client,
     rows_by_id = {r["id"]: r for r in fake_client.table("jobs").rows}
     assert rows_by_id["job-good"]["status"] == "enriched"
     assert rows_by_id["job-bad"]["status"] == "stale"
+    assert len(anthropic_client.messages.batches.created_batches) == 1  # no retry for a terminal error
+
+
+# ---------------------------------------------------------------------------
+# Per-request terminal states — the real bug this phase fixes: expired/
+# canceled/transient-errored items must return to pending_enrich (no LLM
+# retry spent), while only invalid_request_error is genuinely terminal.
+# ---------------------------------------------------------------------------
+
+def test_enrich_jobs_expired_item_requeues_no_retry_call(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(kind="expired"))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"status": "complete", "selected": 1, "enriched": 0, "stale": 0, "requeued": 1, "embeddings_skipped": True, "deferred": 0}
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "pending_enrich"  # untouched, not stale
+    assert row["enriched_at"] is not None  # bumped — reuses the cooldown mechanism, no attempt counter
+    assert len(anthropic_client.messages.batches.created_batches) == 1  # no retry
+
+
+def test_enrich_jobs_canceled_item_requeues_no_retry_call(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(kind="canceled"))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["requeued"] == 1
+    assert summary["stale"] == 0
+    assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
+    assert len(anthropic_client.messages.batches.created_batches) == 1
+
+
+def test_enrich_jobs_api_error_requeues_no_retry_call(fake_client, monkeypatch):
+    """api_error/overloaded_error are transient/infra-side — requeued, not
+    treated as a reason to burn a second LLM call or mark the job stale."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(error_type="api_error"))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["requeued"] == 1
+    assert summary["stale"] == 0
+    assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
+    assert len(anthropic_client.messages.batches.created_batches) == 1
+
+
+def test_enrich_jobs_overloaded_error_requeues_no_retry_call(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(error_type="overloaded_error"))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["requeued"] == 1
+    assert summary["stale"] == 0
+
+
+def test_enrich_jobs_invalid_request_error_stale_not_requeued(fake_client, monkeypatch):
+    """The one error type that IS genuinely terminal — contrasted directly
+    against api_error/overloaded_error above."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(error_type="invalid_request_error"))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary["stale"] == 1
+    assert summary["requeued"] == 0
+    assert fake_client.table("jobs").rows[0]["status"] == "stale"
+
+
+def test_enrich_jobs_requeued_job_deferred_by_cooldown_next_run(fake_client, monkeypatch):
+    """The requeue mechanism reuses _split_cooldown — no second attempt
+    counter — so a requeued job is deferred out of selection on the VERY
+    NEXT run, same as a genuinely-enriched job would be."""
+    from src.enrich_jobs import _split_cooldown
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeErroredResult(kind="expired"))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    row = fake_client.table("jobs").rows[0]
+    eligible, deferred_ids = _split_cooldown([row])
+    assert eligible == []
+    assert deferred_ids == ["job-1"]
 
 
 def test_enrich_jobs_dry_run_makes_no_batch_and_writes_nothing(fake_client, monkeypatch):
@@ -370,7 +504,7 @@ def test_enrich_jobs_defers_job_enriched_within_cooldown(fake_client, monkeypatc
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True, "deferred": 1}
+    assert summary == {"status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 1}
     assert anthropic_client.messages.batches.created_batches == []
     # status untouched — stays pending_enrich so the run past the cutoff picks it up.
     assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
@@ -388,7 +522,7 @@ def test_enrich_jobs_selects_job_enriched_past_cooldown(fake_client, monkeypatch
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
+    assert summary == {"status": "complete", "selected": 1, "enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
 
 
 def test_enrich_jobs_never_enriched_job_is_not_deferred(fake_client, monkeypatch):
@@ -402,7 +536,103 @@ def test_enrich_jobs_never_enriched_job_is_not_deferred(fake_client, monkeypatch
 
     summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
-    assert summary == {"selected": 1, "enriched": 1, "stale": 0, "embeddings_skipped": True, "deferred": 0}
+    assert summary == {"status": "complete", "selected": 1, "enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
+
+
+# ---------------------------------------------------------------------------
+# Pending propagation — round 1 (or round 2) exhausts its poll budget.
+# resume_or_submit itself is exercised at the mechanics level in
+# tests/test_batch_poll.py; here we verify enrich_jobs() correctly PROPAGATES
+# a pending BatchOutcome rather than blocking or raising.
+# ---------------------------------------------------------------------------
+
+def test_enrich_jobs_propagates_pending_round1(fake_client, monkeypatch):
+    from src.batch_poll import BatchOutcome
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    pending = BatchOutcome(status="pending", batch_id="batch_x", elapsed_seconds=600.0, request_counts={"processing": 1})
+    monkeypatch.setattr(enrich_jobs, "resume_or_submit", lambda *a, **k: pending)
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=object(), run_id="run-1", trigger="scheduled")
+
+    assert summary["status"] == "pending"
+    assert summary["batch_id"] == "batch_x"
+    assert summary["request_counts"] == {"processing": 1}
+    # Nothing was retrieved — no jobs write for this job at all.
+    assert fake_client.table("jobs").rows[0]["status"] == "pending_enrich"
+
+
+def test_enrich_jobs_pending_still_writes_a_run_metrics_row(fake_client, monkeypatch):
+    """The actual gap this closes: previously, a timeout meant the 'enrich'
+    stage's run_metrics row simply never existed for that run_id at all
+    (confirmed against production — the 2026-09-14 incident)."""
+    from src.batch_poll import BatchOutcome
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    pending = BatchOutcome(status="pending", batch_id="batch_x")
+    monkeypatch.setattr(enrich_jobs, "resume_or_submit", lambda *a, **k: pending)
+
+    run_enrich_jobs(client=fake_client, anthropic_client=object(), run_id="run-1", trigger="scheduled")
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["run_id"] == "run-1"
+    assert metrics["stage"] == "enrich"
+
+
+def test_enrich_jobs_never_raises_timeout_error_on_pending(fake_client, monkeypatch):
+    """The actual bug report: enrich_jobs() used to raise TimeoutError and
+    crash the whole process. It must not, ever — a pending batch is a normal
+    outcome, not an error."""
+    from src.batch_poll import BatchOutcome
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    monkeypatch.setattr(enrich_jobs, "resume_or_submit", lambda *a, **k: BatchOutcome(status="pending", batch_id="x"))
+
+    # Must not raise anything at all.
+    run_enrich_jobs(client=fake_client, anthropic_client=object())
+
+
+def test_enrich_jobs_round2_pending_still_commits_round1_results(fake_client, monkeypatch):
+    """Round 1 fully ended and produced real results; round 2 (the retry
+    batch for round 1's parse failures) is the one that goes pending. Round
+    1's successes must still be committed — never lost waiting on the
+    slower part (same 'never lose already-paid-for output' philosophy as
+    this module's run_metrics-before-final-write ordering)."""
+    from src.batch_poll import BatchOutcome
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row("job-good"), _job_row("job-retry")])
+
+    round1_outcome = BatchOutcome(
+        status="ended", batch_id="batch_1",
+        results={
+            "job-good": {"type": "succeeded", "message": {
+                "content": [_block(_valid_enrichment_dict())], "usage": {"input_tokens": 10, "output_tokens": 5},
+            }},
+            "job-retry": {"type": "succeeded", "message": {
+                "content": [_block({"summary": "incomplete"})], "usage": {"input_tokens": 10, "output_tokens": 5},
+            }},
+        },
+    )
+    round2_outcome = BatchOutcome(status="pending", batch_id="batch_2_retry")
+
+    calls = {"n": 0}
+    def _fake_resume(*a, **k):
+        calls["n"] += 1
+        return round1_outcome if calls["n"] == 1 else round2_outcome
+    monkeypatch.setattr(enrich_jobs, "resume_or_submit", _fake_resume)
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=object())
+
+    assert summary["status"] == "pending"
+    assert summary["batch_id"] == "batch_2_retry"
+    assert summary["enriched"] == 1  # round 1's success committed
+    rows_by_id = {r["id"]: r for r in fake_client.table("jobs").rows}
+    assert rows_by_id["job-good"]["status"] == "enriched"
+    assert rows_by_id["job-retry"]["status"] == "pending_enrich"  # untouched — still mid-retry
 
 
 def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client, monkeypatch):
@@ -666,7 +896,7 @@ def test_enrich_jobs_resumes_outstanding_batch_instead_of_resubmitting(fake_clie
     polling that batch_id, never submit fresh (duplicate, already-paid-for) work."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
-    fake_client.seed("batch_submissions", [{"batch_id": "orphaned_batch", "module": "enrich_jobs", "status": "submitted"}])
+    fake_client.seed("batch_submissions", [_batch_submission_row()])
     anthropic_client = _FakeAnthropicClient(rounds=[])  # .create() must never be called
 
     class _ResumableBatchesAPI(_FakeBatchesAPI):

@@ -146,8 +146,13 @@ def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool) -> N
 
 def _close_pipeline_run(client, *, run_id: str, status: str, user_count: int | None, dry_run: bool) -> None:
     """Finalize the pipeline_runs row _open_pipeline_run wrote — status is
-    'complete' or 'failed', matching v1's src/run_store.py vocabulary (the two
-    pipelines now share this table). user_count is the only v1-style total
+    'complete' or 'failed' (matching v1's src/run_store.py vocabulary — the
+    two pipelines now share this table), or 'incomplete' — enrichment
+    (src.enrich_jobs.enrich_jobs) returned a 'pending' result (its Batches
+    API poll budget was exhausted, not an error) and run() stopped cleanly
+    before matching on partial data; distinct from 'failed' so an ops
+    dashboard doesn't page on something that's expected to just resume next
+    run (or via src/drain_batches.py's hourly check). user_count is the only v1-style total
     populated here (len(user_results) — the rest of v1's total_* columns, e.g.
     total_scored/total_inserted, describe a fresh-scrape-per-run model that
     doesn't map cleanly onto v2's shared, persistent job pool; left NULL rather
@@ -299,7 +304,13 @@ def run(
     client = _client if _client is not None else get_client()
     anthropic_client = _anthropic_client if _anthropic_client is not None else anthropic.Anthropic()
     track_quota = only_user_id is not None and not dry_run
-    succeeded = False
+    # Pessimistic by default, upgraded only once we're sure — matches v1's
+    # src/pipeline.py's run_status convention. 'incomplete' (distinct from
+    # 'failed') is reached only when enrichment itself returns 'pending' (its
+    # Batches API poll budget was exhausted, not an error) — see the pending
+    # gate below. only_user_id mode can never reach 'incomplete': it skips
+    # enrichment entirely (steps 1-3 below only run when only_user_id is None).
+    run_outcome = "failed"
     user_results: list[dict] = []  # defined before try/finally — _close_pipeline_run
                                     # in finally needs this even if we never reach the
                                     # per-user loop (e.g. a failure during ingest)
@@ -344,6 +355,21 @@ def run(
             )
             log.info("Enrich: %s", enrich_result)
 
+            if enrich_result.get("status") == "pending":
+                # The enrichment batch (round 1 or round 2 — see
+                # src.enrich_jobs.enrich_jobs) didn't finish within its poll
+                # budget. NOT an error — the Anthropic Batches API only
+                # guarantees completion within 24h, and matching on a
+                # partially-enriched jobs pool would be wrong regardless of
+                # why enrichment is incomplete. Stop here, before profile
+                # embedding refresh and the per-user matching loop, and let
+                # the next scheduled run (or src/drain_batches.py's hourly
+                # check) resume it — the batch itself, and the jobs still at
+                # status='pending_enrich', are untouched and safe to resume.
+                run_outcome = "incomplete"
+                log.info("Enrichment pending — stopping this run before matching (run_id=%s)", run_id)
+                return {"ingest": ingest_counts, "enrich": enrich_result, "users": [], "status": run_outcome}
+
             profile_embed_result = backfill_profile_embeddings(client) if not dry_run else {
                 "selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0,
             }
@@ -359,7 +385,7 @@ def run(
             if track_quota:
                 raise RuntimeError(f"only_user_id={only_user_id}: no profile+scoring_weights row found")
             log.warning("No users with both a profile and scoring_weights row — nothing to do")
-            succeeded = True
+            run_outcome = "complete"
             return {"ingest": ingest_counts, "enrich": enrich_result, "users": []}
 
         if only_user_id is not None and not dry_run:
@@ -392,7 +418,7 @@ def run(
                 "gate_rejections": gate_rejections,
             }).execute()
 
-        succeeded = True
+        run_outcome = "complete"
         return {"ingest": ingest_counts, "enrich": enrich_result, "users": user_results}
 
     except Exception:
@@ -400,10 +426,10 @@ def run(
             set_status(client, only_user_id, "failed")
         raise
     finally:
-        if track_quota and succeeded:
+        if track_quota and run_outcome == "complete":
             set_status(client, only_user_id, "complete", completed=True)
         _close_pipeline_run(
-            client, run_id=run_id, status="complete" if succeeded else "failed",
+            client, run_id=run_id, status=run_outcome,
             user_count=len(user_results), dry_run=dry_run,
         )
 

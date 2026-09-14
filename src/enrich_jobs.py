@@ -9,55 +9,66 @@ v1 code path.
 Flow per run:
   1. Select every job with status='pending_enrich' (optionally capped via `limit`,
      for sampling before committing to the full backlog).
-  2. Submit ONE Anthropic Batches API request per job (custom_id = job id) — or,
-     if a prior run left an outstanding (submitted but not yet retrieved) batch
-     for this module, resume polling THAT one instead of submitting new work
-     (see src.supabase_client.find_outstanding_batch — protects against a runner
-     dying mid-poll and the next run duplicating an already-paid-for batch).
-  3. Poll until the batch finishes, fetch results, and immediately persist every
-     raw result to `batch_results` (src.supabase_client.persist_batch_results) —
-     BEFORE any parsing/validation/DB-write risk, so a crash anywhere after this
-     point never loses paid-for Anthropic output; see reprocess_staged() for the
-     recovery path.
-  4. Parse each result via _merge_tool_use_blocks (same pattern as scoring.py's/
-     enrich.py's identical helper — duplicated here per this codebase's established
-     no-shared-utils convention) and validate against
-     src.models.job_enrichment.JobEnrichment (strict).
-  5. Any job that failed to parse/validate, or whose batch result wasn't
-     "succeeded", gets ONE retry: a second, smaller batch containing only those
-     jobs, with the validation/parse error appended to the prompt. A job that
-     fails AGAIN is marked status='stale' and logged — NEVER written with partial
-     enrichment.
-  6. run_metrics is written right after usage is tallied (round 1 + round 2, if
-     any) — BEFORE the final `jobs` write — so a crash in that final write no
-     longer loses the cost record, only requires the write to be retried (see
-     reprocess_staged()).
-  7. Successfully enriched jobs get a title+summary embedding via Voyage AI
+  2. Submit ONE Anthropic Batches API request per job (custom_id = job id) via
+     src.batch_poll.resume_or_submit — which resumes a prior run's outstanding
+     (not yet retrieved) batch instead of submitting duplicate work if one exists,
+     and NEVER blocks past its poll budget (~600s, see src.batch_poll). If the
+     batch hasn't finished within budget, this returns a 'pending' outcome — not
+     an error — and enrich_jobs() stops cleanly, propagating 'pending' to its
+     caller (src.pipeline_v2.run(), which then skips matching on partial data
+     this run). The next run, or src/drain_batches.py's hourly check, resumes it.
+  3. Once the batch ends, results are fetched and immediately persisted to
+     `batch_results` (src.supabase_client.persist_batch_results) — BEFORE any
+     parsing/validation/DB-write risk, so a crash anywhere after this point never
+     loses paid-for Anthropic output; see reprocess_staged() for the recovery path.
+  4. Each result is classified by its terminal state (_classify_batch_result)
+     before parsing:
+       - succeeded -> parsed via _merge_tool_use_blocks (same pattern as
+         scoring.py's/enrich.py's identical helper — duplicated here per this
+         codebase's established no-shared-utils convention) and validated
+         against src.models.job_enrichment.JobEnrichment (strict). A
+         parse/validation failure here gets ONE retry: a second, smaller batch
+         with the error appended to the prompt; still-failing after that retry
+         is marked status='stale' — NEVER written with partial enrichment.
+       - expired, canceled, or an errored item whose error type is NOT
+         invalid_request_error (e.g. api_error, overloaded_error — transient/
+         infra-side) -> requeued: left at status='pending_enrich' with
+         enriched_at bumped to now, so src._split_cooldown's EXISTING
+         re-enrich-cooldown mechanism naturally defers re-selecting it for
+         _RE_ENRICH_COOLDOWN_DAYS rather than burning an LLM call on it again
+         next run. No new "attempt counter" column — this reuses that
+         mechanism deliberately.
+       - errored with error type invalid_request_error -> genuinely terminal,
+         marked status='stale' directly, no retry (a differently-worded prompt
+         can't fix a request the API itself rejected).
+  5. run_metrics is written right after usage is tallied — BEFORE the final
+     `jobs` write — so a crash in that final write no longer loses the cost
+     record, only requires the write to be retried (see reprocess_staged()). A
+     run_metrics row is now ALSO written on the 'pending' path (previously this
+     row simply never existed if the batch didn't finish in time).
+  6. Successfully enriched jobs get a title+summary embedding via Voyage AI
      (voyage-3.5, 1024 dims) if VOYAGE_API_KEY is set; if not, the embedding step is
      skipped (embedding stays NULL) and this is reported clearly — enrichment
      itself is never blocked on the embedding key being absent.
-  8. Batched writes to `jobs` (uniform-payload update, same NULL-fill-avoidance
-     rule as src/ingest.py).
+  7. Batched writes to `jobs` (uniform-payload update, same NULL-fill-avoidance
+     rule as src/ingest.py) — tolerant of a job_id with no matching `jobs` row
+     (logged and skipped, not a KeyError): src/drain_batches.py's apply_drained_batch()
+     derives job metadata fresh from `jobs` by id rather than carrying it over from
+     whatever run originally submitted the batch, so a job deleted in between is a
+     real, expected possibility there, not just defensive paranoia.
 """
 from __future__ import annotations
 
 import logging
 import os
-import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
 from pydantic import ValidationError
 
+from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.job_enrichment import JobEnrichment
-from src.supabase_client import (
-    chunked_upsert,
-    fetch_all,
-    find_outstanding_batch,
-    persist_batch_results,
-    record_batch_retrieved,
-    record_batch_submitted,
-)
+from src.supabase_client import chunked_upsert, fetch_all
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +76,6 @@ _MODULE = "enrich_jobs"
 _MODEL = "claude-haiku-4-5"
 _TOOL_NAME = "enrich_job"
 _MAX_TOKENS = 1024
-_POLL_INTERVAL_SECONDS = 10
-_POLL_TIMEOUT_SECONDS = 3600  # batches can legitimately take up to 24h; this run waits up to 1h before giving up
 
 # A job whose content_hash keeps changing (see src/ingest.py's cross-board/minor-
 # update guardrails — this is the backstop behind those) is re-enriched at most
@@ -228,7 +237,8 @@ def build_retry_prompt(*, title: str, org: str, location_field: str | None,
 
 # ---------------------------------------------------------------------------
 # Response parsing — pure, unit-testable without hitting the Anthropic API.
-# Operates on plain dicts (result.model_dump(mode="json") — see _run_batch()),
+# Operates on plain dicts (result.model_dump(mode="json") — see src.batch_poll's
+# _poll_claimed_batch()),
 # not Anthropic SDK objects, so the live path and reprocess_staged()'s replay
 # path (fed from batch_results.raw jsonb) share identical parsing code with no
 # dual-shape handling.
@@ -256,18 +266,105 @@ def _parse_enrichment(message: dict) -> JobEnrichment:
 
 
 def _parse_one_result(result: dict) -> tuple[JobEnrichment | None, dict | None, str | None]:
-    """Given one raw batch result dict, return (enrichment, usage, error) —
-    exactly one of (enrichment, error) is non-None. usage is None only when the
-    batch item itself didn't succeed (nothing to tally). Shared by the live
-    round-1/round-2 loops and reprocess_staged(), so recovery uses the exact
-    same per-item logic as a normal run."""
-    if result["type"] != "succeeded":
-        return None, None, f"batch result type={result['type']!r}"
+    """Given one raw batch result dict of type 'succeeded', return
+    (enrichment, usage, error) — exactly one of (enrichment, error) is
+    non-None. Callers must only pass results already classified as
+    'succeeded' by _classify_batch_result — this function no longer branches
+    on result["type"] itself (see _classify_batch_result for that)."""
     usage = result["message"]["usage"]
     try:
         return _parse_enrichment(result["message"]), usage, None
     except (IndexError, AttributeError, ValidationError) as exc:
         return None, usage, str(exc)
+
+
+# ---------------------------------------------------------------------------
+# Per-request terminal-state classification. The Batches API's per-item
+# result "type" is one of succeeded/errored/canceled/expired (confirmed
+# against the installed anthropic SDK's type stubs — anthropic.types.messages.
+# message_batch_result.MessageBatchResult); an "errored" item additionally
+# carries error.error.type, one of invalid_request_error/authentication_error/
+# permission_error/not_found_error/rate_limit_error/timeout_error/
+# overloaded_error/api_error/billing_error (anthropic.types.shared.error_type.
+# ErrorType).
+# ---------------------------------------------------------------------------
+
+def _classify_batch_result(result: dict) -> str:
+    """Classify one raw batch result into a disposition:
+      - 'succeeded': call _parse_one_result on it as normal.
+      - 'requeue': expired, canceled, or errored with a transient/infra-side
+        error type (api_error, overloaded_error, or anything not explicitly
+        invalid_request_error — fail safe toward retryable rather than
+        silently dropping a future error type this codebase hasn't seen yet).
+        No LLM call is spent on these — see _write_jobs_for_round's requeued
+        handling for how they get back to pending_enrich.
+      - 'stale': errored with invalid_request_error — the API itself
+        rejected the request; a differently-worded retry prompt can't fix
+        that, so this is genuinely terminal, unlike a parse/validation
+        failure on a 'succeeded' result (which still gets one retry).
+    """
+    result_type = result["type"]
+    if result_type == "succeeded":
+        return "succeeded"
+    if result_type in ("expired", "canceled"):
+        return "requeue"
+    if result_type == "errored":
+        error_type = ((result.get("error") or {}).get("error") or {}).get("type")
+        if error_type == "invalid_request_error":
+            return "stale"
+        return "requeue"
+    return "requeue"  # unrecognized future type — fail safe, never silently drop
+
+
+def _requeue_reason(result: dict) -> str:
+    if result["type"] == "errored":
+        error_type = ((result.get("error") or {}).get("error") or {}).get("type")
+        return f"errored ({error_type})"
+    return f"batch result type={result['type']!r}"
+
+
+def _stale_reason(result: dict) -> str:
+    message = ((result.get("error") or {}).get("error") or {}).get("message", "")
+    return f"invalid_request_error: {message}"
+
+
+def _process_round(results: dict) -> dict:
+    """Classify+parse every item in one Batches API round's raw *results*
+    ({custom_id: raw_dict}). Pure — no I/O, no retry submission (that's the
+    caller's decision). Returns {'enriched': {job_id: JobEnrichment},
+    'parse_failures': {job_id: error_str} (a 'succeeded' result that failed
+    JobEnrichment validation — the ONLY bucket callers may choose to retry),
+    'requeued': {job_id: reason_str}, 'stale': {job_id: reason_str},
+    'input_tokens': int, 'output_tokens': int}."""
+    enriched: dict[str, JobEnrichment] = {}
+    parse_failures: dict[str, str] = {}
+    requeued: dict[str, str] = {}
+    stale: dict[str, str] = {}
+    total_input_tokens = 0
+    total_output_tokens = 0
+
+    for job_id, result in results.items():
+        disposition = _classify_batch_result(result)
+        if disposition == "requeue":
+            requeued[job_id] = _requeue_reason(result)
+            continue
+        if disposition == "stale":
+            stale[job_id] = _stale_reason(result)
+            continue
+        enrichment, usage, error = _parse_one_result(result)
+        if usage is not None:
+            total_input_tokens += usage["input_tokens"]
+            total_output_tokens += usage["output_tokens"]
+        if enrichment is not None:
+            enriched[job_id] = enrichment
+        else:
+            parse_failures[job_id] = error
+
+    return {
+        "enriched": enriched, "parse_failures": parse_failures,
+        "requeued": requeued, "stale": stale,
+        "input_tokens": total_input_tokens, "output_tokens": total_output_tokens,
+    }
 
 
 _TOOL_SCHEMA = {
@@ -293,48 +390,6 @@ def _batch_request(job_id: str, prompt: str) -> dict:
             "messages": [{"role": "user", "content": prompt}],
         },
     }
-
-
-def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = _MODULE) -> dict:
-    """Submit *requests* (custom_id -> params) as one Batches API call — or, if a
-    prior run left an outstanding (submitted but not yet retrieved) batch for
-    *module*, resume polling THAT one instead, ignoring *requests* entirely
-    (whatever's already in flight is trusted as-is; any newly-pending work not
-    covered by it is simply picked up on the next normal run). Poll until
-    finished, fetch results, persist every raw result to `batch_results`
-    immediately (before any parsing/write risk), and return {custom_id: raw_dict}.
-
-    Blocking (time.sleep polling) — this module is invoked as a cron/manual job,
-    not from within the real-time v1 pipeline.
-    """
-    batch_id = find_outstanding_batch(client, module)
-    if batch_id is not None:
-        log.warning(
-            "Resuming outstanding batch %s for module %r instead of submitting new work "
-            "(a prior run likely didn't finish polling it)", batch_id, module,
-        )
-    else:
-        batch = anthropic_client.messages.batches.create(requests=requests)
-        batch_id = batch.id
-        record_batch_submitted(client, batch_id, module)
-        log.info("Submitted batch %s with %d request(s)", batch_id, len(requests))
-
-    deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS
-    while True:
-        batch = anthropic_client.messages.batches.retrieve(batch_id)
-        if batch.processing_status == "ended":
-            break
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"Batch {batch_id} did not finish within {_POLL_TIMEOUT_SECONDS}s")
-        log.info("Batch %s still %s — polling again in %ds", batch_id, batch.processing_status, _POLL_INTERVAL_SECONDS)
-        time.sleep(_POLL_INTERVAL_SECONDS)
-
-    results = {}
-    for item in anthropic_client.messages.batches.results(batch_id):
-        results[item.custom_id] = item.result.model_dump(mode="json")
-    persist_batch_results(client, batch_id, results)
-    record_batch_retrieved(client, batch_id)
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -399,41 +454,88 @@ def _embed_enriched(enriched: dict[str, JobEnrichment], by_id: dict[str, dict]) 
 
 
 def _write_enrichment(client, *, enriched: dict[str, JobEnrichment], failures: dict[str, str],
-                       by_id: dict[str, dict], embeddings: dict[str, list[float]]) -> None:
+                       requeued: dict[str, str], by_id: dict[str, dict],
+                       embeddings: dict[str, list[float]]) -> set[str]:
     """Batched writes to `jobs` — uniform payload per group, same
-    NULL-fill-avoidance rule as src/ingest.py: enriched-job updates and
-    stale-job updates are separate calls. canonical_url/source_board/
-    content_hash are NOT NULL with no default — Postgres validates NOT NULL on
-    an upsert's INSERT branch even though every one of these rows already
-    exists and only the ON CONFLICT DO UPDATE branch actually fires (same
-    quirk already hit and fixed in src/ingest.py), so every payload here must
-    carry them through even though this step conceptually only touches
-    enrichment fields (confirmed the hard way against production).
+    NULL-fill-avoidance rule as src/ingest.py: enriched-job updates,
+    stale-job updates, and requeued-job updates are separate calls.
+    canonical_url/source_board/content_hash are NOT NULL with no default —
+    Postgres validates NOT NULL on an upsert's INSERT branch even though
+    every one of these rows already exists and only the ON CONFLICT DO
+    UPDATE branch actually fires (same quirk already hit and fixed in
+    src/ingest.py), so every payload here must carry them through even
+    though this step conceptually only touches enrichment fields (confirmed
+    the hard way against production).
+
+    A job_id with no by_id entry is logged and skipped, not a KeyError — the
+    caller may be src.drain_batches.apply_drained_batch(), which derives
+    by_id fresh from `jobs` by id rather than carrying it over from whatever
+    run originally submitted the batch, so a job deleted in between (or,
+    theoretically, any other by_id gap) is a real, expected possibility here,
+    not just defensive paranoia. No job_ids column/schema change needed for
+    this — by_id is always freshly queried, never persisted.
+
+    Returns the set of job_ids skipped entirely (across all three buckets) —
+    callers use this to report counts reflecting what was actually WRITTEN,
+    not just what was classified before the by_id check.
     """
     now = datetime.now(timezone.utc).isoformat()
-    enriched_updates = [
-        {
+    skipped: set[str] = set()
+
+    def _row(job_id: str, bucket: str) -> dict | None:
+        row = by_id.get(job_id)
+        if row is None:
+            log.error("_write_enrichment: no job metadata for %s (bucket=%r) — skipping this write", job_id, bucket)
+            skipped.add(job_id)
+        return row
+
+    enriched_updates = []
+    for job_id, enrichment in enriched.items():
+        row = _row(job_id, "enriched")
+        if row is None:
+            continue
+        enriched_updates.append({
             "id": job_id,
-            "canonical_url": by_id[job_id]["canonical_url"],
-            "source_board": by_id[job_id]["source_board"],
-            "content_hash": by_id[job_id]["content_hash"],
+            "canonical_url": row["canonical_url"],
+            "source_board": row["source_board"],
+            "content_hash": row["content_hash"],
             "enrichment": enrichment.model_dump(mode="json"),
             "embedding": embeddings.get(job_id),
             "enriched_at": now,
             "status": "enriched",
-        }
-        for job_id, enrichment in enriched.items()
-    ]
-    stale_updates = [
-        {
+        })
+
+    stale_updates = []
+    for job_id in failures:
+        row = _row(job_id, "stale")
+        if row is None:
+            continue
+        stale_updates.append({
             "id": job_id,
-            "canonical_url": by_id[job_id]["canonical_url"],
-            "source_board": by_id[job_id]["source_board"],
-            "content_hash": by_id[job_id]["content_hash"],
+            "canonical_url": row["canonical_url"],
+            "source_board": row["source_board"],
+            "content_hash": row["content_hash"],
             "status": "stale",
-        }
-        for job_id in failures
-    ]
+        })
+
+    requeued_updates = []
+    for job_id in requeued:
+        row = _row(job_id, "requeued")
+        if row is None:
+            continue
+        # status/enrichment deliberately NOT referenced — the job stays at
+        # whatever status it already has (pending_enrich); only enriched_at
+        # is bumped, piggybacking on _split_cooldown's EXISTING enriched_at-
+        # based deferral so a transient batch failure (expired/canceled/
+        # api_error/overloaded_error) doesn't get re-attempted every single
+        # run forever. See _split_cooldown's docstring.
+        requeued_updates.append({
+            "id": job_id,
+            "canonical_url": row["canonical_url"],
+            "source_board": row["source_board"],
+            "content_hash": row["content_hash"],
+            "enriched_at": now,
+        })
 
     # chunked_upsert, not one .upsert().execute() for the whole list: confirmed
     # the hard way against production — an unchunked ~1136-row upsert here (each
@@ -443,6 +545,106 @@ def _write_enrichment(client, *, enriched: dict[str, JobEnrichment], failures: d
         chunked_upsert(client.table("jobs"), enriched_updates, on_conflict="id")
     if stale_updates:
         chunked_upsert(client.table("jobs"), stale_updates, on_conflict="id")
+    if requeued_updates:
+        chunked_upsert(client.table("jobs"), requeued_updates, on_conflict="id")
+
+    return skipped
+
+
+def _finalize_round(
+    client, *, by_id: dict[str, dict], enriched: dict[str, JobEnrichment],
+    stale: dict[str, str], requeued: dict[str, str],
+    total_input_tokens: int, total_output_tokens: int, enrichment_calls: int,
+    run_id: str | None, trigger: str | None, write_run_metrics: bool,
+) -> dict:
+    """Shared tail: write run_metrics (unless write_run_metrics=False —
+    reprocess_staged()'s case, where the normal live path already wrote it
+    before the crash being recovered from, so writing it again would
+    double-count cost already recorded), then always write `jobs`.
+
+    Shared by enrich_jobs()'s own synchronous round-1(+round-2) flow and
+    src.drain_batches.apply_drained_batch() — everything upstream of this
+    (how results were classified, whether a retry was attempted) differs
+    between those callers; this function only ever sees the FINAL,
+    fully-resolved tally for one enrichment attempt.
+
+    Returns {"enriched", "stale", "requeued", "embeddings_skipped"} (int/int/int/bool).
+    """
+    if write_run_metrics:
+        # jobs_enriched here reflects the CLASSIFIED count, not the post-write
+        # count returned below — run_metrics is deliberately written before
+        # _write_enrichment (crash-safety: a crash in that write must not
+        # lose the cost record), so the rare by_id-miss skip isn't yet known
+        # at this point. The gap only matters for a job_id with no matching
+        # `jobs` row at all, an edge case this count very slightly overstates.
+        now = datetime.now(timezone.utc).isoformat()
+        client.table("run_metrics").insert({
+            "run_at": now,
+            "run_id": run_id,
+            "stage": "enrich",
+            "trigger": trigger,
+            "jobs_enriched": len(enriched),
+            "enrichment_calls": enrichment_calls,
+            "estimated_cost_usd": round(
+                total_input_tokens / 1_000_000 * _HAIKU_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT
+                + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
+                4,
+            ),
+        }).execute()
+
+    for job_id, reason in stale.items():
+        log.error("Job %s permanently failed enrichment, marking stale: %s", job_id, reason)
+    for job_id, reason in requeued.items():
+        log.warning("Job %s returned to pending_enrich (no LLM retry spent): %s", job_id, reason)
+
+    embeddings = _embed_enriched(enriched, by_id)
+    skipped = _write_enrichment(client, enriched=enriched, failures=stale, requeued=requeued, by_id=by_id, embeddings=embeddings)
+
+    applied_enriched = len(enriched.keys() - skipped)
+    applied_stale = len(stale.keys() - skipped)
+    applied_requeued = len(requeued.keys() - skipped)
+
+    log.info(
+        "Enrichment applied: %d enriched, %d stale, %d requeued, embeddings_skipped=%s",
+        applied_enriched, applied_stale, applied_requeued, not embeddings_available(),
+    )
+    return {
+        "enriched": applied_enriched, "stale": applied_stale, "requeued": applied_requeued,
+        "embeddings_skipped": not embeddings_available(),
+    }
+
+
+def apply_drained_batch(client, results: dict, *, run_id: str | None = None, trigger: str | None = None) -> dict:
+    """Apply an already-ended batch's *results* ({custom_id: raw_dict}) with
+    NO retry attempt — used by src/drain_batches.py, which must never submit
+    new work (see that module's docstring: no ingest, no matching, no digest
+    — draining only ever finishes applying work someone else already decided
+    to submit). A parse/validation failure encountered here goes straight to
+    'stale' — the same terminal outcome an enrich_jobs()-driven round-2 retry
+    would likely reach anyway if that retry also failed; draining just
+    doesn't spend a second LLM call finding that out.
+
+    Derives job metadata fresh from `jobs` by id (results.keys() ARE the job
+    ids — custom_id = job_id, see _batch_request) rather than requiring a
+    caller-supplied by_id, mirroring reprocess_staged()'s existing pattern —
+    this is what lets this function apply a batch whose submitting run's own
+    in-memory state (its pending-jobs query result) is long gone.
+    """
+    job_ids = list(results.keys())
+    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", job_ids))
+    by_id = {row["id"]: row for row in rows}
+
+    round_result = _process_round(results)
+    stale = dict(round_result["stale"])
+    for job_id, error in round_result["parse_failures"].items():
+        stale[job_id] = f"{error} (parse failure — no retry attempted while draining)"
+
+    return _finalize_round(
+        client, by_id=by_id, enriched=round_result["enriched"], stale=stale,
+        requeued=round_result["requeued"],
+        total_input_tokens=round_result["input_tokens"], total_output_tokens=round_result["output_tokens"],
+        enrichment_calls=len(results), run_id=run_id, trigger=trigger, write_run_metrics=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -451,10 +653,15 @@ def _write_enrichment(client, *, enriched: dict[str, JobEnrichment], failures: d
 
 def _split_cooldown(rows: list[dict]) -> tuple[list[dict], list[str]]:
     """Split *rows* into (eligible, deferred_job_ids). A row is deferred when its
-    enriched_at is more recent than _RE_ENRICH_COOLDOWN_DAYS ago — its
-    content_hash changed again since then (status flipped back to
-    pending_enrich by src/ingest.py) but the cooldown caps actual re-enrich
-    spend to at most once per window. status stays pending_enrich for a
+    enriched_at is more recent than _RE_ENRICH_COOLDOWN_DAYS ago. enriched_at is
+    bumped in two distinct situations, both intentional (see _write_enrichment):
+    a real successful enrichment, OR a 'requeued' outcome (expired/canceled/
+    transient-errored batch item — never actually enriched, but still worth
+    deferring so a persistently-failing job doesn't burn an LLM call every
+    single run). Either way: its content_hash changed again since then (status
+    flipped back to pending_enrich by src/ingest.py, or was never changed away
+    from pending_enrich to begin with) but the cooldown caps actual re-enrich
+    attempts to at most once per window. status stays pending_enrich for a
     deferred row, so the run right after the cutoff elapses picks it up
     normally — nothing here is lost, only delayed."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=_RE_ENRICH_COOLDOWN_DAYS)
@@ -482,7 +689,14 @@ def enrich_jobs(
     that deliberately includes "Remote" postings) rather than taking arbitrary DB
     order.
 
-    Returns a summary dict: {selected, enriched, stale, embeddings_skipped, deferred}.
+    Returns a summary dict. status='complete': {status, selected, enriched, stale,
+    requeued, embeddings_skipped, deferred}. status='pending' (the batch — round 1
+    OR round 2 — didn't finish within src.batch_poll's budget; NOT an error, NEVER
+    raises): {status, batch_id, request_counts, selected, deferred, ...whatever of
+    enriched/stale/requeued/embeddings_skipped round 1 already committed before
+    round 2 went pending, if that's the round that stalled}. Callers (src.pipeline_v2.
+    run()) must check result["status"] and stop before matching on a 'pending' result
+    — enrichment is incomplete, not failed.
     """
     query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich")
     if job_ids is not None:
@@ -497,14 +711,14 @@ def enrich_jobs(
     if dry_run:
         log.info("DRY RUN — would enrich %d job(s) (%d deferred by re-enrich cooldown)", len(rows), len(deferred_ids))
         return {
-            "selected": len(rows), "enriched": 0, "stale": 0,
+            "status": "complete", "selected": len(rows), "enriched": 0, "stale": 0, "requeued": 0,
             "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
         }
 
     if not rows:
         log.info("No pending_enrich jobs found — nothing to do (%d deferred by cooldown)", len(deferred_ids))
         return {
-            "selected": 0, "enriched": 0, "stale": 0,
+            "status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0,
             "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
         }
 
@@ -518,27 +732,47 @@ def enrich_jobs(
         ))
         for row in rows
     ]
-    results = _run_batch(anthropic_client, requests, client=client)
-    total_api_calls = len(requests)
+    outcome = resume_or_submit(
+        anthropic_client, client, module=_MODULE, requests=requests,
+        budget_seconds=DEFAULT_POLL_BUDGET_SECONDS,
+    )
+    if outcome.status == "pending":
+        # Nothing was retrieved, so nothing to write to `jobs`. Still write a
+        # run_metrics row for the enrich stage on this run_id — previously
+        # this row simply never existed on a timeout (confirmed against
+        # production: the 2026-09-14 incident this whole mechanism exists
+        # for left zero 'enrich' stage rows for its run_id).
+        client.table("run_metrics").insert({
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id, "stage": "enrich", "trigger": trigger, "jobs_enriched": 0,
+        }).execute()
+        log.info(
+            "Enrichment pending — batch %s not finished within budget (elapsed %.0fs, "
+            "counts=%s) — resuming next run.",
+            outcome.batch_id, outcome.elapsed_seconds, outcome.request_counts,
+        )
+        return {
+            "status": "pending", "batch_id": outcome.batch_id, "request_counts": outcome.request_counts,
+            "selected": len(rows), "deferred": len(deferred_ids),
+        }
 
-    enriched: dict[str, JobEnrichment] = {}
-    failures: dict[str, str] = {}
-    total_input_tokens = 0
-    total_output_tokens = 0
+    round1 = _process_round(outcome.results)
+    enriched = round1["enriched"]
+    requeued = round1["requeued"]
+    stale = round1["stale"]
+    total_input_tokens = round1["input_tokens"]
+    total_output_tokens = round1["output_tokens"]
+    enrichment_calls = len(requests)
+    retry_pending = None
 
-    for job_id, result in results.items():
-        enrichment, usage, error = _parse_one_result(result)
-        if usage is not None:
-            total_input_tokens += usage["input_tokens"]
-            total_output_tokens += usage["output_tokens"]
-        if enrichment is not None:
-            enriched[job_id] = enrichment
-        else:
-            failures[job_id] = error
-
-    # Round 2 — one retry for whatever failed, with the error appended
-    if failures:
-        log.warning("%d job(s) failed round 1, retrying once: %s", len(failures), list(failures.keys()))
+    # Round 2 — one retry for parse/validation failures only, with the error
+    # appended. Requeued/stale items from round 1 are NOT retried (see this
+    # module's docstring on per-request terminal-state classification).
+    if round1["parse_failures"]:
+        log.warning(
+            "%d job(s) failed round 1, retrying once: %s",
+            len(round1["parse_failures"]), list(round1["parse_failures"].keys()),
+        )
         retry_requests = [
             _batch_request(job_id, build_retry_prompt(
                 title=by_id[job_id]["title"], org=by_id[job_id]["org"],
@@ -546,80 +780,74 @@ def enrich_jobs(
                 description=by_id[job_id]["raw_description"] or "",
                 validation_error=error,
             ))
-            for job_id, error in failures.items()
+            for job_id, error in round1["parse_failures"].items()
         ]
-        retry_results = _run_batch(anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry")
-        total_api_calls += len(retry_requests)
-
-        still_failing: dict[str, str] = {}
-        for job_id, result in retry_results.items():
-            enrichment, usage, error = _parse_one_result(result)
-            if usage is not None:
-                total_input_tokens += usage["input_tokens"]
-                total_output_tokens += usage["output_tokens"]
-            if enrichment is not None:
-                enriched[job_id] = enrichment
-            else:
-                still_failing[job_id] = f"{error} (retry)"
-
-        failures = still_failing
-
-    for job_id, reason in failures.items():
-        log.error("Job %s permanently failed enrichment, marking stale: %s", job_id, reason)
+        enrichment_calls += len(retry_requests)
+        retry_outcome = resume_or_submit(
+            anthropic_client, client, module=f"{_MODULE}_retry", requests=retry_requests,
+            budget_seconds=DEFAULT_POLL_BUDGET_SECONDS,
+        )
+        if retry_outcome.status == "pending":
+            retry_pending = retry_outcome
+        else:
+            round2 = _process_round(retry_outcome.results)
+            enriched.update(round2["enriched"])
+            requeued.update(round2["requeued"])
+            stale.update(round2["stale"])
+            for job_id, error in round2["parse_failures"].items():
+                stale[job_id] = f"{error} (retry)"
+            total_input_tokens += round2["input_tokens"]
+            total_output_tokens += round2["output_tokens"]
 
     # run_metrics written NOW — right after usage is tallied, BEFORE the final
     # `jobs` write below — so a crash in that write no longer loses the cost
     # record (confirmed the hard way: this used to be written last, and a
     # crashed write meant ~$2.65 of paid Anthropic output went unrecorded).
-    now = datetime.now(timezone.utc).isoformat()
-    client.table("run_metrics").insert({
-        "run_at": now,
-        "run_id": run_id,
-        "stage": "enrich",
-        "trigger": trigger,
-        "jobs_enriched": len(enriched),
-        # NOT tier1_calls — this is enrich_jobs.py's own Haiku call count, a
-        # different stage from tier1_rerank.py's Tier 1 rerank calls. Writing it
-        # into tier1_calls conflated the two (confirmed: every "Enrich" stage row
-        # was double-booked into the Tier 1 column, making per-stage call volume
-        # unreadable from run_metrics alone).
-        "enrichment_calls": total_api_calls,
-        "estimated_cost_usd": round(
-            total_input_tokens / 1_000_000 * _HAIKU_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT
-            + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
-            4,
-        ),
-    }).execute()
+    # Round 1's results are committed here even if round 2 itself went
+    # pending — never lose already-resolved output waiting on a slower part.
+    summary = _finalize_round(
+        client, by_id=by_id, enriched=enriched, stale=stale, requeued=requeued,
+        total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
+        enrichment_calls=enrichment_calls, run_id=run_id, trigger=trigger, write_run_metrics=True,
+    )
 
-    embeddings = _embed_enriched(enriched, by_id)
-    _write_enrichment(client, enriched=enriched, failures=failures, by_id=by_id, embeddings=embeddings)
+    if retry_pending is not None:
+        log.info(
+            "Enrichment partially applied (round 1 committed) — retry batch %s not "
+            "finished within budget (elapsed %.0fs, counts=%s) — resuming next run.",
+            retry_pending.batch_id, retry_pending.elapsed_seconds, retry_pending.request_counts,
+        )
+        return {
+            "status": "pending", "batch_id": retry_pending.batch_id,
+            "request_counts": retry_pending.request_counts,
+            "selected": len(rows), "deferred": len(deferred_ids), **summary,
+        }
 
     log.info(
-        "Enrichment complete: %d selected, %d enriched, %d stale, %d deferred by cooldown, embeddings_skipped=%s",
-        len(rows), len(enriched), len(failures), len(deferred_ids), not embeddings_available(),
+        "Enrichment complete: %d selected, %d deferred by cooldown, %s",
+        len(rows), len(deferred_ids), summary,
     )
-    return {
-        "selected": len(rows), "enriched": len(enriched), "stale": len(failures),
-        "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
-    }
+    return {"status": "complete", "selected": len(rows), "deferred": len(deferred_ids), **summary}
 
 
 def reprocess_staged(client, batch_id: str) -> dict:
     """Recovery path: reprocess unprocessed `batch_results` rows for *batch_id*
     WITHOUT calling the Anthropic API again — the raw results are already
-    staged from a prior run's `_run_batch()` call that didn't finish (crashed
-    somewhere after retrieval, e.g. during the final `jobs` write). Re-derives
-    each job's original metadata (title/org/canonical_url/source_board/
-    content_hash) from `jobs` by id, re-runs the SAME `_parse_one_result()`
-    logic the live path uses, recomputes embeddings for anything that parses
-    successfully (the original run's embeddings, if any were computed, were
-    only ever in-memory and are lost along with everything else that crashed),
-    and redoes the final `jobs` write. Does NOT retry a second time on parse
-    failure (that would need a new LLM call, defeating "without re-calling the
-    API") — anything that still fails to parse here is marked stale directly.
-    Does NOT write run_metrics — the normal path already wrote it (right after
-    usage tallying, before the write that crashed), so writing it again here
-    would double-count cost that was already recorded.
+    staged from a prior run's poll that didn't finish (crashed somewhere
+    after retrieval, e.g. during the final `jobs` write). Re-derives each
+    job's original metadata (title/org/canonical_url/source_board/
+    content_hash) from `jobs` by id, re-runs the SAME classification
+    (_classify_batch_result/_process_round) and parsing logic the live path
+    uses, recomputes embeddings for anything that parses successfully (the
+    original run's embeddings, if any were computed, were only ever
+    in-memory and are lost along with everything else that crashed), and
+    redoes the final `jobs` write. Does NOT retry a second time on parse
+    failure (that would need a new LLM call, defeating "without re-calling
+    the API") — anything that still fails to parse here is marked stale
+    directly, same as a requeue/stale-classified item. Does NOT write
+    run_metrics — the normal path already wrote it (right after usage
+    tallying, before the write that crashed), so writing it again here would
+    double-count cost that was already recorded.
 
     Returns {"selected", "enriched", "stale"}.
     """
@@ -630,34 +858,37 @@ def reprocess_staged(client, batch_id: str) -> dict:
         log.info("reprocess_staged: no unprocessed batch_results for batch %s", batch_id)
         return {"selected": 0, "enriched": 0, "stale": 0}
 
-    job_ids = [row["custom_id"] for row in staged]
-    raw_by_job_id = {row["custom_id"]: row["raw"] for row in staged}
-    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", job_ids))
+    results = {row["custom_id"]: row["raw"] for row in staged}
+    raw_by_job_id = results
+
+    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", list(results.keys())))
     by_id = {row["id"]: row for row in rows}
 
-    enriched: dict[str, JobEnrichment] = {}
-    failures: dict[str, str] = {}
-    for row in staged:
-        job_id = row["custom_id"]
-        if job_id not in by_id:
-            log.error("reprocess_staged: staged result for job %s but that job no longer exists — skipping", job_id)
-            continue
-        enrichment, _usage, error = _parse_one_result(row["raw"])
-        if enrichment is not None:
-            enriched[job_id] = enrichment
-        else:
-            failures[job_id] = error
+    round_result = _process_round(results)
+    stale = dict(round_result["stale"])
+    for job_id, error in round_result["parse_failures"].items():
+        stale[job_id] = f"{error} (parse failure during reprocess — no retry)"
 
-    for job_id, reason in failures.items():
-        log.error("reprocess_staged: job %s permanently failed enrichment, marking stale: %s", job_id, reason)
+    # Computed BEFORE _finalize_round (which will itself log+skip these at
+    # the jobs-write step), purely so processed_ids below can exclude them:
+    # nothing more can be done for a job that no longer exists, and leaving
+    # its batch_results row unprocessed (rather than silently discarding the
+    # evidence) matches this function's pre-existing behavior for that case.
+    all_ids = round_result["enriched"].keys() | stale.keys() | round_result["requeued"].keys()
+    missing_ids = all_ids - by_id.keys()
+    for job_id in missing_ids:
+        log.error("reprocess_staged: staged result for job %s but that job no longer exists — skipping", job_id)
 
-    embeddings = _embed_enriched(enriched, by_id)
-    _write_enrichment(client, enriched=enriched, failures=failures, by_id=by_id, embeddings=embeddings)
+    summary = _finalize_round(
+        client, by_id=by_id, enriched=round_result["enriched"], stale=stale,
+        requeued=round_result["requeued"], total_input_tokens=0, total_output_tokens=0,
+        enrichment_calls=0, run_id=None, trigger=None, write_run_metrics=False,
+    )
 
     # raw is NOT NULL with no default — same upsert-INSERT-branch quirk as
     # `jobs`' canonical_url/source_board/content_hash, so it must be carried
     # through here too even though this write only means to touch `processed`.
-    processed_ids = list(enriched.keys()) + list(failures.keys())
+    processed_ids = list(all_ids - missing_ids)
     if processed_ids:
         chunked_upsert(
             client.table("batch_results"),
@@ -666,10 +897,10 @@ def reprocess_staged(client, batch_id: str) -> dict:
         )
 
     log.info(
-        "reprocess_staged: batch %s -> %d selected, %d enriched, %d stale",
-        batch_id, len(staged), len(enriched), len(failures),
+        "reprocess_staged: batch %s -> %d selected, %d enriched, %d stale, %d requeued",
+        batch_id, len(staged), summary["enriched"], summary["stale"], summary["requeued"],
     )
-    return {"selected": len(staged), "enriched": len(enriched), "stale": len(failures)}
+    return {"selected": len(staged), "enriched": summary["enriched"], "stale": summary["stale"]}
 
 
 def backfill_embeddings(client) -> dict:

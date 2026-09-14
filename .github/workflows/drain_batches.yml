@@ -1,0 +1,50 @@
+# Hourly batch drainer — mops up Anthropic Batches API work the daily
+# pipeline (daily.yml) left mid-flight when its own poll budget ran out
+# before a batch reached 'ended' (see src/batch_poll.py, src/drain_batches.py).
+#
+# Does NOT scrape, match, or send digest email. Safe to run concurrently with
+# daily.yml: both go through src.batch_poll.resume_or_submit's atomic claim
+# (compare-and-swap on batch_submissions.status), so at most one of them is
+# ever actually polling/applying a given batch at a time — see
+# src/batch_poll.py's module docstring for the full rationale.
+
+name: Drain pending batches
+
+on:
+  schedule:
+    - cron: "15 * * * *"   # hourly, offset from daily.yml's 06:00 UTC run
+  workflow_dispatch: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  drain:
+    runs-on: ubuntu-latest
+    # A single drain cycle does at most one brief (DRAIN_POLL_BUDGET_SECONDS,
+    # currently 0 — a single check, no sleeping) retrieve() call per module,
+    # then applies anything 'ended'. Minutes, not hours — this is not the
+    # daily pipeline's long-poll budget.
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.14
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Drain pending batches
+        env:
+          ANTHROPIC_API_KEY:         ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          VOYAGE_API_KEY:             ${{ secrets.VOYAGE_API_KEY }}
+        run: python -m src.drain_batches

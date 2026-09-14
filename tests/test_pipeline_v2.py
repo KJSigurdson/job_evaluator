@@ -645,6 +645,73 @@ def test_run_skips_gate_rejections_row_when_nothing_rejected(fake_client, monkey
     assert [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"] == []
 
 
+# ---------------------------------------------------------------------------
+# Enrichment 'pending' gate — enrich_jobs() returned status='pending' (its
+# Batches API poll budget was exhausted, not an error). run() must stop
+# cleanly before profile-embedding refresh and the per-user matching loop —
+# never match on a partially-enriched jobs pool.
+# ---------------------------------------------------------------------------
+
+def test_run_stops_before_per_user_loop_when_enrichment_pending(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    pending_result = {"status": "pending", "batch_id": "batch_x", "request_counts": {"processing": 3}}
+    _patch_full_pipeline_noops(monkeypatch, enrich_result=pending_result)
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("must not reach per-user matching when enrichment is pending")
+
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", _should_not_run)
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert result["users"] == []
+    assert result["enrich"] == pending_result
+    assert result["status"] == "incomplete"
+
+
+def test_run_pending_closes_pipeline_runs_as_incomplete_not_failed(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch, enrich_result={"status": "pending", "batch_id": "batch_x"})
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "incomplete"
+    assert row["status"] != "failed"
+    assert row["completed_at"] is not None
+
+
+def test_run_pending_does_not_write_gate_rejections_row(fake_client, monkeypatch):
+    """The match-stage gate_rejections aggregate row only makes sense once
+    the per-user loop actually ran — it must not exist at all when the run
+    stopped before ever reaching that loop."""
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch, enrich_result={"status": "pending", "batch_id": "batch_x"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    assert [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"] == []
+
+
+def test_run_complete_enrichment_proceeds_normally_to_matching(fake_client, monkeypatch):
+    """Sanity check on the gate's condition itself: a normal status='complete'
+    enrich_result must NOT trip the pending gate."""
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch, enrich_result={
+        "status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0,
+        "embeddings_skipped": True, "deferred": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert len(result["users"]) == 1
+    assert result.get("status") != "incomplete"
+
+
 def test_run_dry_run_skips_tier1_and_tier2_but_still_gates(fake_client, monkeypatch):
     """dry_run still computes gate_v2/vector rerank (free — no LLM cost) but
     never reaches Tier 1/Tier 2 (the only steps with real $ cost here)."""
