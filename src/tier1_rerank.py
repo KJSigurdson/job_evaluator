@@ -54,7 +54,7 @@ from pydantic import ValidationError
 
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.tier1_rerank import JobScore, Tier1RerankOutput
-from src.supabase_client import chunked_upsert, fetch_all, fetch_batch_manifest, mark_batch_results_processed
+from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, fetch_batch_manifest, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -386,8 +386,11 @@ def fetch_valid_verdict_job_ids(client, user_id: str, profile_content_hash: str 
     if not verdicts:
         return set()
 
+    # This user's EVERY verdict, not just ones above threshold — grows
+    # unbounded over time, so this MUST chunk its .in_() rather than fetch
+    # all job_ids in one request (see fetch_all_in/_IN_FILTER_CHUNK_SIZE).
     job_ids = [v["job_id"] for v in verdicts]
-    jobs_rows = fetch_all(client.table("jobs").select("id,enriched_at").in_("id", job_ids))
+    jobs_rows = fetch_all_in(client.table("jobs"), "id", job_ids, select_cols="id,enriched_at")
     current_enriched_at = {r["id"]: r["enriched_at"] for r in jobs_rows}
 
     valid: set[str] = set()

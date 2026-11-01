@@ -16,6 +16,7 @@ import json
 import logging
 
 from src.schemas import ExcludedUser, UserContext
+from src.supabase_client import fetch_all_in
 
 log = logging.getLogger(__name__)
 
@@ -208,17 +209,15 @@ def _fetch_experiences(
     if not user_ids:
         return {}, {}
 
-    experiences_query = client.table("experiences").select("*")
-    achievements_query = client.table("experience_achievements").select("*")
     if only_user_id is not None:
-        experiences_query = experiences_query.eq("user_id", only_user_id)
-        achievements_query = achievements_query.eq("user_id", only_user_id)
+        experience_rows = client.table("experiences").select("*").eq("user_id", only_user_id).execute().data or []
+        achievement_rows = client.table("experience_achievements").select("*").eq("user_id", only_user_id).execute().data or []
     else:
-        experiences_query = experiences_query.in_("user_id", user_ids)
-        achievements_query = achievements_query.in_("user_id", user_ids)
-
-    experience_rows = experiences_query.execute().data or []
-    achievement_rows = achievements_query.execute().data or []
+        # user_ids grows with every registered user — chunk the .in_() via
+        # fetch_all_in rather than one request per table with every id (see
+        # src.supabase_client._IN_FILTER_CHUNK_SIZE).
+        experience_rows = fetch_all_in(client.table("experiences"), "user_id", user_ids)
+        achievement_rows = fetch_all_in(client.table("experience_achievements"), "user_id", user_ids)
 
     experiences_by_user: dict[str, list[dict]] = {}
     for row in experience_rows:

@@ -68,7 +68,7 @@ from pydantic import ValidationError
 
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.job_enrichment import JobEnrichment
-from src.supabase_client import chunked_upsert, fetch_all, mark_batch_results_processed
+from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -689,7 +689,12 @@ def apply_drained_batch(client, results: dict, *, batch_id: str | None = None, r
     about that bookkeeping aren't forced to supply it.
     """
     job_ids = list(results.keys())
-    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", job_ids))
+    # One batch can cover the whole pending_enrich backlog — potentially
+    # thousands of ids — so this MUST chunk its .in_() (see
+    # fetch_all_in/_IN_FILTER_CHUNK_SIZE; confirmed for real that an
+    # unchunked equivalent in src.closure.close_jobs() blew up a GET URL
+    # into a Cloudflare 520 at 1,665 ids).
+    rows = fetch_all_in(client.table("jobs"), "id", job_ids, select_cols=_JOB_SELECT_COLUMNS)
     by_id = {row["id"]: row for row in rows}
 
     round_result = _process_round(results)
@@ -771,16 +776,25 @@ def enrich_jobs(
     """
     # fetch_all, not a plain .execute(): PostgREST silently truncates a response
     # at db.max_rows (1000) — the pending_enrich backlog can exceed that.
-    pending_query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich")
-    reenrich_query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "enriched")
     if job_ids is not None:
-        pending_query = pending_query.in_("id", job_ids)
-        reenrich_query = reenrich_query.in_("id", job_ids)
-    pending_rows = fetch_all(pending_query)
+        # Caller-supplied sample set — typically small, but chunked via
+        # fetch_all_in regardless (see _IN_FILTER_CHUNK_SIZE) rather than
+        # trusting every caller to keep it that way.
+        pending_rows = fetch_all_in(
+            client.table("jobs"), "id", job_ids, select_cols=_JOB_SELECT_COLUMNS,
+            filter_fn=lambda q: q.eq("status", "pending_enrich"),
+        )
+        reenrich_rows_raw = fetch_all_in(
+            client.table("jobs"), "id", job_ids, select_cols=_JOB_SELECT_COLUMNS,
+            filter_fn=lambda q: q.eq("status", "enriched"),
+        )
+    else:
+        pending_rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich"))
+        reenrich_rows_raw = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "enriched"))
     # reenrich_requested_at IS NOT NULL filtered client-side, not via the
     # query builder — simpler than a raw PostgREST NOT filter string and needs
     # no new capability from the (already paginating) fetch_all/fake-client path.
-    reenrich_rows = [row for row in fetch_all(reenrich_query) if row.get("reenrich_requested_at") is not None]
+    reenrich_rows = [row for row in reenrich_rows_raw if row.get("reenrich_requested_at") is not None]
     rows = pending_rows + reenrich_rows
     rows, deferred_ids = _split_cooldown(rows)
     if limit is not None:
@@ -952,7 +966,9 @@ def reprocess_staged(client, batch_id: str) -> dict:
     results = {row["custom_id"]: row["raw"] for row in staged}
     raw_by_job_id = results
 
-    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", list(results.keys())))
+    # Same unbounded-backlog concern as apply_drained_batch() above — chunk
+    # via fetch_all_in, never a single .in_() with every staged id.
+    rows = fetch_all_in(client.table("jobs"), "id", list(results.keys()), select_cols=_JOB_SELECT_COLUMNS)
     by_id = {row["id"]: row for row in rows}
 
     round_result = _process_round(results)

@@ -92,7 +92,7 @@ from src.match_v2 import fetch_matched_job_ids, gate_survivors_with_rejections, 
 from src.notify import send_match_digest
 from src.profile_embed import backfill_profile_embeddings, build_embedding_text
 from src.quota_store import set_status
-from src.supabase_client import fetch_all, get_client
+from src.supabase_client import fetch_all, fetch_all_in, get_client
 from src.tier1_rerank import TIER1_MAX_PER_USER, fetch_valid_verdict_job_ids, rerank_tier1_batch
 from src.tier2_enrich import fetch_candidates as fetch_tier2_candidates
 from src.tier2_enrich import tier2_enrich as run_tier2_enrich
@@ -399,9 +399,9 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
     qualifying_job_ids = [c["job"]["id"] for c in candidates]
     notified = False
     if qualifying_job_ids and user.profile.get("email_on_match"):
-        new_rows = fetch_all(
-            client.table("matches_v2").select("job_id,tier1_score,tier2")
-            .eq("user_id", user.user_id).in_("job_id", qualifying_job_ids)
+        new_rows = fetch_all_in(
+            client.table("matches_v2"), "job_id", qualifying_job_ids,
+            select_cols="job_id,tier1_score,tier2", filter_fn=lambda q: q.eq("user_id", user.user_id),
         )
         if new_rows:
             jobs_by_id = {c["job"]["id"]: c["job"] for c in candidates}

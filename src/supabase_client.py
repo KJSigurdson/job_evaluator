@@ -10,6 +10,19 @@ log = logging.getLogger(__name__)
 _PAGE_SIZE = 1000
 _WRITE_CHUNK_SIZE = 500
 
+# PostgREST encodes EVERY filter — including .in_() — as part of the request
+# URL's query string, for GET *and* for PATCH/UPDATE (the row data goes in
+# the body, but the WHERE-equivalent filters never do). An unbounded id list
+# therefore makes an unbounded URL, which can fail as a proxy-level 5xx long
+# before any Postgres-side limit is reached: confirmed for real when
+# src.closure.close_jobs() re-fetched 1,665 UUIDs via a single
+# .in_("id", job_ids) — a ~65KB GET URL — and Cloudflare returned a 520, not
+# a PostgREST error. _WRITE_CHUNK_SIZE above is a DIFFERENT, unrelated limit
+# (POST-body row count, for chunked_upsert/chunked_insert's statement-timeout
+# concern) — it does not protect against this failure mode at all, since the
+# body isn't the problem here. See fetch_all_in().
+_IN_FILTER_CHUNK_SIZE = 100
+
 
 def get_client():
     """Build a Supabase client from SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY."""
@@ -44,6 +57,48 @@ def fetch_all(query, *, page_size: int = _PAGE_SIZE) -> list[dict]:
         if len(page) < page_size:
             break
         start += page_size
+    return rows
+
+
+def _chunk_values(values, size: int = _IN_FILTER_CHUNK_SIZE):
+    """Yield consecutive chunks of at most *size* from *values* — the shared
+    building block for any PostgREST .in_() filter. See _IN_FILTER_CHUNK_SIZE's
+    docstring for why this must be small (URL length), not the chunked_upsert/
+    chunked_insert row-count limit (POST body size / statement timeout)."""
+    values = list(values)
+    for i in range(0, len(values), size):
+        yield values[i:i + size]
+
+
+def fetch_all_in(
+    table, column: str, values, *, select_cols: str = "*", filter_fn=None,
+    chunk_size: int = _IN_FILTER_CHUNK_SIZE,
+) -> list[dict]:
+    """SELECT *select_cols* FROM *table* WHERE *column* IN *values*, chunking
+    *values* into groups of at most *chunk_size* (default _IN_FILTER_CHUNK_SIZE)
+    so no single request's .in_() filter can grow an unbounded URL — see
+    _IN_FILTER_CHUNK_SIZE's docstring for the real Cloudflare 520 this
+    prevents. Each chunk's own result set is paginated via fetch_all (a
+    single id-filtered chunk is normally well under fetch_all's 1000-row
+    page cap, but this stays correct even if a column isn't unique per id).
+    Merges every chunk's rows into one list, in no particular cross-chunk
+    order.
+
+    table: a client.table(name) handle (not a pre-built query) — this
+    function owns calling .select()/.in_() itself, once per chunk.
+    filter_fn: optional callable(query) -> query applied to EACH chunk's
+    query builder before .execute(), for an additional filter the original
+    (unchunked) call site had — e.g. `lambda q: q.eq("status", "enriched")`.
+    Returns [] immediately for an empty/falsy *values*, no request made.
+    """
+    if not values:
+        return []
+    rows: list[dict] = []
+    for chunk in _chunk_values(values, chunk_size):
+        query = table.select(select_cols).in_(column, chunk)
+        if filter_fn is not None:
+            query = filter_fn(query)
+        rows.extend(fetch_all(query))
     return rows
 
 
@@ -149,7 +204,7 @@ def fetch_batch_manifest(client, batch_id: str) -> dict | None:
     return rows[0]["manifest"] if rows else None
 
 
-def mark_batch_results_processed(client, batch_id: str, custom_ids: list[str], *, chunk_size: int = _WRITE_CHUNK_SIZE) -> None:
+def mark_batch_results_processed(client, batch_id: str, custom_ids: list[str], *, chunk_size: int = _IN_FILTER_CHUNK_SIZE) -> None:
     """Mark batch_results rows (batch_id, custom_id) as processed=True. Called by
     each Batches-API module's LIVE path once the corresponding downstream write
     (or, for a module with no further write of its own, parsing) has safely
@@ -165,11 +220,14 @@ def mark_batch_results_processed(client, batch_id: str, custom_ids: list[str], *
     processed=False regardless of outcome, including rows from months-old,
     fully successful enrichments, because only reprocess_staged() ever set this
     column.
+
+    chunk_size defaults to _IN_FILTER_CHUNK_SIZE (100), NOT _WRITE_CHUNK_SIZE
+    (500) — this UPDATE's .in_("custom_id", chunk) filter is still URL query
+    string, same as any SELECT's; the 500-row convention is for POST-body
+    row counts (chunked_upsert/chunked_insert), a different limit entirely.
     """
-    for i in range(0, len(custom_ids), chunk_size):
-        chunk = custom_ids[i:i + chunk_size]
-        if chunk:
-            client.table("batch_results").update({"processed": True}).eq("batch_id", batch_id).in_("custom_id", chunk).execute()
+    for chunk in _chunk_values(custom_ids, chunk_size):
+        client.table("batch_results").update({"processed": True}).eq("batch_id", batch_id).in_("custom_id", chunk).execute()
 
 
 def persist_batch_results(client, batch_id: str, results: dict) -> None:

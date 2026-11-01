@@ -45,7 +45,15 @@ class _FakeQuery:
         return self
 
     def in_(self, col: str, values) -> "_FakeQuery":
-        self._filters.append(("in", col, list(values)))
+        values = list(values)
+        # Recorded on the TABLE (not just this query), regardless of op
+        # (select/update) — real PostgREST URL-encodes .in_() filters for
+        # both, and a chunking regression (e.g. src.closure.close_jobs's
+        # real Cloudflare-520 incident: a single .in_("id", job_ids) with
+        # 1,665 UUIDs) must be catchable from either path. See
+        # src.supabase_client._IN_FILTER_CHUNK_SIZE/fetch_all_in.
+        self._table.in_call_sizes.append((col, len(values)))
+        self._filters.append(("in", col, values))
         return self
 
     def is_(self, col: str, val) -> "_FakeQuery":
@@ -131,6 +139,7 @@ class _FakeTable:
         self.upsert_calls: list[list[dict]] = []  # one entry (list of rows) per .upsert().execute() call
         self.update_calls: list[dict] = []  # one entry (payload dict) per .update().execute() call
         self.insert_calls: list[list[dict]] = []  # one entry (list of rows) per .insert().execute() call
+        self.in_call_sizes: list[tuple[str, int]] = []  # (column, len(values)) per .in_() call, any op
 
     def select(self, cols: str = "*") -> _FakeQuery:
         return _FakeQuery(self, "select").select(cols)

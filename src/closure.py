@@ -52,9 +52,15 @@ def plan_closures(client, *, complete_sources: frozenset[str] = frozenset()) -> 
 
     Returns {"by_rule": {"complete_source_stale": [job_id, ...],
     "safety_ceiling": [job_id, ...]}, "by_source": {source_board: count},
-    "total": int}. job_ids are included (not just counts) so a caller —
-    close_jobs() below, or a one-off review script — can act on or inspect
-    the exact set, not just a number.
+    "total": int, "rows_by_id": {job_id: row}}. job_ids are included (not
+    just counts) so a caller — close_jobs() below, or a one-off review
+    script — can act on or inspect the exact set, not just a number.
+    rows_by_id carries every qualifying row's full _JOB_SELECT_COLUMNS data
+    (id/canonical_url/source_board/content_hash/last_seen) specifically so
+    close_jobs() can build its update payload from THESE rows instead of
+    re-fetching the same job_ids a second time — confirmed for real: a
+    second fetch_all(.in_("id", job_ids)) with 1,665 ids made a ~65KB GET
+    URL that Cloudflare answered with a 520, not a PostgREST error.
 
     A job is counted under at most one rule: complete_source_stale takes
     priority over safety_ceiling for a job that qualifies under both (rule
@@ -69,22 +75,25 @@ def plan_closures(client, *, complete_sources: frozenset[str] = frozenset()) -> 
 
     by_rule: dict[str, list[str]] = {"complete_source_stale": [], "safety_ceiling": []}
     by_source: dict[str, int] = {}
+    rows_by_id: dict[str, dict] = {}
 
     for row in rows:
         last_seen = datetime.fromisoformat(row["last_seen"])
         if row["source_board"] in complete_sources and last_seen < complete_cutoff:
             by_rule["complete_source_stale"].append(row["id"])
             by_source[row["source_board"]] = by_source.get(row["source_board"], 0) + 1
+            rows_by_id[row["id"]] = row
         elif last_seen < ceiling_cutoff:
             by_rule["safety_ceiling"].append(row["id"])
             by_source[row["source_board"]] = by_source.get(row["source_board"], 0) + 1
+            rows_by_id[row["id"]] = row
 
     total = len(by_rule["complete_source_stale"]) + len(by_rule["safety_ceiling"])
     log.info(
         "plan_closures: %d job(s) would close (%d complete_source_stale, %d safety_ceiling) — by_source=%s",
         total, len(by_rule["complete_source_stale"]), len(by_rule["safety_ceiling"]), by_source,
     )
-    return {"by_rule": by_rule, "by_source": by_source, "total": total}
+    return {"by_rule": by_rule, "by_source": by_source, "total": total, "rows_by_id": rows_by_id}
 
 
 def close_jobs(
@@ -103,18 +112,26 @@ def close_jobs(
     by_rule_counts = {rule: len(ids) for rule, ids in plan["by_rule"].items()}
 
     if job_ids:
-        # canonical_url/source_board/content_hash are NOT NULL with no
-        # default — same upsert-INSERT-branch quirk as every other
-        # chunked_upsert call site in this codebase (src/ingest.py,
-        # src/enrich_jobs.py), confirmed the hard way against production
-        # there — must be carried through here too even though this write
-        # only means to touch `status`.
-        rows = fetch_all(client.table("jobs").select("id,canonical_url,source_board,content_hash").in_("id", job_ids))
-        updates = [
-            {"id": r["id"], "canonical_url": r["canonical_url"], "source_board": r["source_board"],
-             "content_hash": r["content_hash"], "status": "closed"}
-            for r in rows
-        ]
+        # Built from plan_closures()'s OWN rows (rows_by_id) — deliberately
+        # NOT a second fetch_all(.in_("id", job_ids)). That re-fetch used to
+        # exist here and, against a real 1,665-job backlog, built a ~65KB
+        # GET URL that Cloudflare answered with a 520 before PostgREST ever
+        # saw it: ingest completed, but closure wrote nothing and
+        # enrich/matching never ran that day. plan_closures already selected
+        # canonical_url/source_board/content_hash for every qualifying row —
+        # NOT NULL with no default, same upsert-INSERT-branch quirk as every
+        # other chunked_upsert call site in this codebase (src/ingest.py,
+        # src/enrich_jobs.py) — carried through here even though this write
+        # only means to touch `status`. chunked_upsert's own 500-row-per-call
+        # POST body chunking (not a URL filter, so not subject to the same
+        # failure mode) is what keeps this safe at any backlog size.
+        updates = []
+        for jid in job_ids:
+            row = plan["rows_by_id"][jid]
+            updates.append({
+                "id": jid, "canonical_url": row["canonical_url"], "source_board": row["source_board"],
+                "content_hash": row["content_hash"], "status": "closed",
+            })
         chunked_upsert(client.table("jobs"), updates, on_conflict="id")
         closed = len(updates)
     else:

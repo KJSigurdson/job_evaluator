@@ -46,7 +46,7 @@ from pydantic import ValidationError
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.match_v2 import fetch_matched_job_ids
 from src.schemas import Tier2EnrichmentOutput
-from src.supabase_client import chunked_upsert, fetch_all, mark_batch_results_processed
+from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -276,9 +276,10 @@ def fetch_candidates(
     if not verdicts:
         return []
 
-    jobs_rows = fetch_all(
-        client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", [v["job_id"] for v in verdicts])
-    )
+    # >= threshold verdicts for one user, but that can still grow into the
+    # hundreds over time — chunk the .in_() rather than fetch all job_ids in
+    # one request (see fetch_all_in/_IN_FILTER_CHUNK_SIZE).
+    jobs_rows = fetch_all_in(client.table("jobs"), "id", [v["job_id"] for v in verdicts], select_cols=_JOB_SELECT_COLUMNS)
     jobs_by_id = {j["id"]: j for j in jobs_rows}
 
     candidates = []

@@ -8,11 +8,14 @@ via .range() until every row is collected.
 from __future__ import annotations
 
 from src.supabase_client import (
+    _IN_FILTER_CHUNK_SIZE,
     chunked_insert,
     chunked_upsert,
     fetch_all,
+    fetch_all_in,
     fetch_batch_manifest,
     find_outstanding_batch,
+    mark_batch_results_processed,
     persist_batch_results,
     record_batch_retrieved,
     record_batch_submitted,
@@ -100,6 +103,97 @@ def test_chunked_insert_splits_into_multiple_calls(fake_client):
     assert len(insert_calls) == 3
     assert [len(c) for c in insert_calls] == [100, 100, 50]
     assert len(fake_client.table("jobs").rows) == 250
+
+
+# ---------------------------------------------------------------------------
+# fetch_all_in — chunked .in_() filter, merged results. Regression coverage
+# for a real incident: src.closure.close_jobs() re-fetched 1,665 job_ids via
+# a single .in_("id", job_ids), building a ~65KB GET URL that Cloudflare
+# answered with a 520 before PostgREST ever saw it.
+# ---------------------------------------------------------------------------
+
+def test_in_filter_chunk_size_is_100():
+    """Deliberately small — this is a URL-length limit (every PostgREST
+    filter, .in_() included, is query-string-encoded), NOT the 500-row
+    _WRITE_CHUNK_SIZE used by chunked_upsert/chunked_insert's POST bodies."""
+    assert _IN_FILTER_CHUNK_SIZE == 100
+
+
+def test_fetch_all_in_merges_results_across_chunks(fake_client):
+    fake_client.seed("jobs", [{"id": i} for i in range(250)])
+
+    rows = fetch_all_in(fake_client.table("jobs"), "id", list(range(250)), chunk_size=100)
+
+    assert sorted(r["id"] for r in rows) == list(range(250))
+
+
+def test_fetch_all_in_never_exceeds_chunk_size_per_request(fake_client):
+    fake_client.seed("jobs", [{"id": i} for i in range(250)])
+
+    fetch_all_in(fake_client.table("jobs"), "id", list(range(250)), chunk_size=100)
+
+    sizes = [size for col, size in fake_client.table("jobs").in_call_sizes if col == "id"]
+    assert sizes == [100, 100, 50]
+
+
+def test_fetch_all_in_default_chunk_size_is_in_filter_chunk_size(fake_client):
+    fake_client.seed("jobs", [{"id": i} for i in range(250)])
+
+    fetch_all_in(fake_client.table("jobs"), "id", list(range(250)))
+
+    sizes = [size for col, size in fake_client.table("jobs").in_call_sizes if col == "id"]
+    assert all(size <= _IN_FILTER_CHUNK_SIZE for size in sizes)
+    assert len(sizes) == 3  # 250 / 100, rounded up
+
+
+def test_fetch_all_in_empty_values_no_request(fake_client):
+    assert fetch_all_in(fake_client.table("jobs"), "id", []) == []
+    assert fake_client.table("jobs").in_call_sizes == []
+
+
+def test_fetch_all_in_respects_select_cols(fake_client):
+    fake_client.seed("jobs", [{"id": "job-1", "title": "Head of Data", "org": "GiveDirectly"}])
+
+    [row] = fetch_all_in(fake_client.table("jobs"), "id", ["job-1"], select_cols="id,title")
+
+    # The fake doesn't project columns (mirrors other tests in this file),
+    # but the call itself must not raise with a narrower select_cols.
+    assert row["id"] == "job-1"
+
+
+def test_fetch_all_in_applies_filter_fn_to_every_chunk(fake_client):
+    fake_client.seed("jobs", [
+        {"id": "job-1", "status": "pending_enrich"},
+        {"id": "job-2", "status": "enriched"},
+    ])
+
+    rows = fetch_all_in(
+        fake_client.table("jobs"), "id", ["job-1", "job-2"],
+        filter_fn=lambda q: q.eq("status", "pending_enrich"),
+    )
+
+    assert [r["id"] for r in rows] == ["job-1"]
+
+
+# ---------------------------------------------------------------------------
+# mark_batch_results_processed — same URL-length concern as fetch_all_in,
+# since .in_() is query-string-encoded for UPDATE too, not just SELECT.
+# ---------------------------------------------------------------------------
+
+def test_mark_batch_results_processed_default_chunk_is_in_filter_chunk_size(fake_client):
+    custom_ids = [f"job-{i}" for i in range(250)]
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": cid, "processed": False} for cid in custom_ids])
+
+    mark_batch_results_processed(fake_client, "batch_1", custom_ids)
+
+    sizes = [size for col, size in fake_client.table("batch_results").in_call_sizes if col == "custom_id"]
+    assert sizes == [100, 100, 50]
+    assert all(r["processed"] is True for r in fake_client.table("batch_results").rows)
+
+
+def test_mark_batch_results_processed_empty_list_no_calls(fake_client):
+    mark_batch_results_processed(fake_client, "batch_1", [])
+    assert fake_client.table("batch_results").in_call_sizes == []
 
 
 # ---------------------------------------------------------------------------

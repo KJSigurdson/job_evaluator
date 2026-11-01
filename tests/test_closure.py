@@ -177,3 +177,34 @@ def test_close_jobs_writes_run_metrics_even_when_nothing_closed(fake_client):
 
     [metrics] = fake_client.table("run_metrics").rows
     assert metrics["closure_summary"]["closed"] == 0
+
+
+def test_close_jobs_large_backlog_never_makes_one_giant_in_request(fake_client):
+    """Regression for a real incident: close_jobs() used to re-fetch every
+    qualifying job_id via a second fetch_all(.in_("id", job_ids)) — against
+    a 1,665-job backlog that was a ~65KB GET URL, and Cloudflare answered
+    with a 520 before PostgREST ever saw it. Ingest completed; closure wrote
+    nothing; enrich/matching never ran that day. close_jobs() must now build
+    its update payload from plan_closures()'s OWN rows (no second fetch at
+    all), and the write itself (chunked_upsert) must still go out in bounded
+    chunks — never one request carrying all 2,000 rows."""
+    jobs = [_job(f"job-{i}", source_board="80000_hours", last_seen_days_ago=4) for i in range(2000)]
+    fake_client.seed("jobs", jobs)
+
+    result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))
+
+    assert result["closed"] == 2000
+    # No .in_() filter — on ANY table, select or update — may carry more
+    # than _IN_FILTER_CHUNK_SIZE (100) values in one request.
+    table = fake_client.table("jobs")
+    assert table.in_call_sizes, "expected at least the status in_() filter from plan_closures"
+    assert all(size <= 100 for _col, size in table.in_call_sizes)
+    # And specifically: no .in_("id", ...) call at all — the redundant
+    # re-fetch this test guards against is gone entirely, not just chunked.
+    assert not any(col == "id" for col, _size in table.in_call_sizes)
+    # The write itself must be chunked too (chunked_upsert's 500-row POST
+    # body cap) — 2,000 rows means more than one upsert call.
+    upsert_calls = table.upsert_calls
+    assert len(upsert_calls) == 4
+    assert all(len(chunk) <= 500 for chunk in upsert_calls)
+    assert sum(len(chunk) for chunk in upsert_calls) == 2000
