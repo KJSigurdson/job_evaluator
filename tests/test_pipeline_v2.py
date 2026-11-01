@@ -297,10 +297,11 @@ def test_finish_user_matching_scales_threshold_from_0_1_to_0_100(fake_client, mo
 
     _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
 
-    assert captured["threshold"] == 80.0  # 0.8 * 100, not the raw 0.8
+    assert captured["threshold"] == 80  # 0.8 * 100, not the raw 0.8
+    assert isinstance(captured["threshold"], int)
 
 
-@pytest.mark.parametrize("stored_threshold,expected_scaled", [(0.65, 65.0), (0.7, 70.0), (0.75, 75.0)])
+@pytest.mark.parametrize("stored_threshold,expected_scaled", [(0.65, 65), (0.7, 70), (0.75, 75), (0.725, 73)])
 def test_finish_user_matching_scales_real_production_threshold_values(fake_client, monkeypatch, stored_threshold, expected_scaled):
     """Pins the *100 scaling against the ACTUAL values confirmed live against
     production's scoring_weights.insert_threshold (0.65/0.7/0.75 — fractional
@@ -309,7 +310,14 @@ def test_finish_user_matching_scales_real_production_threshold_values(fake_clien
     65. If insert_threshold were ever actually stored as 65 instead of 0.65,
     this *100 would produce 6500 — unreachable against a 0-100 tier1_score
     — so this test is the regression guard for that scenario, not proof it's
-    currently happening (it isn't, per the live query)."""
+    currently happening (it isn't, per the live query).
+
+    0.725 is the fractional case: tier1_verdicts.score is an INTEGER column,
+    and 0.725 * 100 = 72.5 sent as a .gte() filter value gets stringified
+    into the request URL as "72.5" — Postgres rejects that outright trying
+    to parse it as an integer (22P02 invalid input syntax for type integer).
+    math.ceil() rounds UP to 73, the direction that preserves ">=" semantics
+    against an integer column."""
     user = _user_context(
         {"career_goals": "x", "hard_constraints": {}, "email_on_match": False},
         rubric={"threshold": stored_threshold},
@@ -322,6 +330,7 @@ def test_finish_user_matching_scales_real_production_threshold_values(fake_clien
     _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
 
     assert captured["threshold"] == expected_scaled
+    assert isinstance(captured["threshold"], int)
 
 
 def test_finish_user_matching_calls_fetch_candidates_then_tier2(fake_client, monkeypatch):

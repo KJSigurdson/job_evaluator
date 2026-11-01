@@ -63,6 +63,16 @@ class _FakeQuery:
         return self
 
     def gte(self, col: str, val) -> "_FakeQuery":
+        # Recorded on the TABLE, same as in_call_sizes — real PostgREST
+        # stringifies every filter value into the request URL regardless of
+        # Python type, so a float threshold against an INTEGER column
+        # becomes a literal like "72.5" in the query string, which Postgres
+        # then rejects trying to parse as an integer (confirmed for real:
+        # 22P02 invalid input syntax for type integer, tier1_verdicts.score).
+        # This fake has no real schema/type-checking, so it can't catch that
+        # on its own — a test must inspect gte_calls directly to verify the
+        # VALUE, not just the row-filtering RESULT, is the right type.
+        self._table.gte_calls.append((col, val))
         self._filters.append(("gte", col, val))
         return self
 
@@ -149,6 +159,7 @@ class _FakeTable:
         self.update_calls: list[dict] = []  # one entry (payload dict) per .update().execute() call
         self.insert_calls: list[list[dict]] = []  # one entry (list of rows) per .insert().execute() call
         self.in_call_sizes: list[tuple[str, int]] = []  # (column, len(values)) per .in_() call, any op
+        self.gte_calls: list[tuple[str, object]] = []  # (column, value) per .gte() call — value's TYPE matters, see .gte()
         self.raise_on_execute: dict[str, Exception] = {}  # op ("insert"/"upsert"/"update"/"select") -> exception to raise on .execute()
 
     def select(self, cols: str = "*") -> _FakeQuery:

@@ -291,6 +291,25 @@ def test_tier2_enrich_skips_below_threshold_candidates(fake_client):
     assert len(anthropic_client.messages.batches.created_batches[0]) == 1  # only the qualifying one submitted
 
 
+def test_tier2_enrich_fractional_threshold_rounds_up_not_down(fake_client):
+    """threshold=72.5 (e.g. a 0.725 rubric scaled by 100) must behave as if
+    it were 73, not 72 — a candidate scoring exactly 72 must NOT qualify.
+    This is a pure Python comparison (no DB query), so it wouldn't crash
+    without the ceil, but it must still agree with fetch_candidates()'s own
+    ceil'd DB filter rather than silently using a different effective bar."""
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+    candidates = [_candidate(job_id="job-73", tier1_score=73), _candidate(job_id="job-72", tier1_score=72)]
+
+    result = run_tier2_enrich(fake_client, anthropic_client, candidates=candidates, threshold=72.5)
+
+    assert result["considered"] == 2
+    assert result["enriched"] == 1
+    assert result["skipped_below_threshold"] == 1
+    assert len(anthropic_client.messages.batches.created_batches[0]) == 1  # only job-73 submitted
+
+
 def test_tier2_enrich_no_qualifying_candidates_makes_no_batch_call(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[])
     candidates = [_candidate(tier1_score=10)]
@@ -628,6 +647,28 @@ def test_fetch_candidates_excludes_below_threshold(fake_client):
     fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
 
     assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65) == []
+
+
+@pytest.mark.parametrize("threshold,expected_int", [(65.0, 65), (70.0, 70), (75.0, 75), (72.5, 73)])
+def test_fetch_candidates_sends_an_int_to_the_score_filter(fake_client, threshold, expected_int):
+    """Regression for a real incident: tier1_verdicts.score is an INTEGER
+    column, and a fractional threshold (user.rubric["threshold"] * 100,
+    e.g. 0.725 * 100 = 72.5) sent as a .gte() filter value gets stringified
+    into the request URL as "72.5" — Postgres rejects that outright trying
+    to parse it as an integer (22P02 invalid input syntax for type integer).
+    65.0/70.0/75.0 are the exact production scoring_weights.insert_threshold
+    values (0.65/0.7/0.75 * 100) confirmed live in an earlier turn; 72.5 is
+    the fractional case ceil() exists for (0.725 * 100 -> 73, rounding UP
+    so ">=" semantics against an integer column are preserved exactly)."""
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=expected_int)])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+
+    fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=threshold)
+
+    [(col, value)] = fake_client.table("tier1_verdicts").gte_calls
+    assert col == "score"
+    assert value == expected_int
+    assert isinstance(value, int) and not isinstance(value, bool)
 
 
 def test_fetch_candidates_excludes_already_matched_job(fake_client):

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 import yaml
@@ -263,9 +264,22 @@ def fetch_candidates(
     A verdict (or the caller's *profile_content_hash*) with a null hash is
     always treated as stale/invalid, never as a match — see the loop below.
 
+    *threshold* is accepted as a float (callers scale a 0-1 rubric value by
+    100) but rounded UP to an int here before it ever reaches the .gte()
+    filter — tier1_verdicts.score is an INTEGER column, and a fractional
+    value like 72.5 gets stringified into the request URL as "72.5", which
+    Postgres rejects outright trying to parse as an integer (confirmed for
+    real: 22P02 invalid input syntax for type integer). Rounding UP (not
+    down) is the direction that preserves ">=" semantics against an integer
+    column: "score >= 72.5" and "score >= 73" select the identical set of
+    integer scores. This is a defensive SECOND ceil — src.pipeline_v2.py's
+    caller already ceils before passing threshold in — so this function is
+    correct even if some other caller passes a raw, un-ceil'd float.
+
     Returns [{"user_id", "profile", "job", "tier1_score", "tier1_reason"}, ...]
     — tier2_enrich()'s own expected candidate shape.
     """
+    threshold = math.ceil(threshold)
     verdicts = fetch_all(
         client.table("tier1_verdicts").select("*").eq("user_id", user_id).gte("score", threshold)
     )
@@ -345,6 +359,13 @@ def tier2_enrich(
 
     Returns {"considered", "enriched", "skipped_below_threshold", "failed"}.
     """
+    # Same ceil as fetch_candidates() — c["tier1_score"] is an int sourced
+    # from tier1_verdicts.score, and comparing it against a stray float
+    # threshold here wouldn't crash (this is a plain Python >=, not a DB
+    # query), but ceiling it keeps this function's notion of "qualifying"
+    # identical to fetch_candidates()'s, rather than two threshold values
+    # that happen to agree today only because floor/ceil rarely disagree.
+    threshold = math.ceil(threshold)
     qualifying = [c for c in candidates if c["tier1_score"] >= threshold]
     skipped = len(candidates) - len(qualifying)
 

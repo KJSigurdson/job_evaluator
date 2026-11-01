@@ -77,6 +77,7 @@ those v1 functions directly. No-op in dry_run, same as every other write here.
 from __future__ import annotations
 
 import logging
+import math
 import uuid
 from datetime import datetime, timezone
 
@@ -363,7 +364,17 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
     # 0-100 (see src/models/tier1_rerank.py's JobScore). Scale up before comparing
     # — this is this user's own per-user bar, read fresh off their rubric every
     # run, not a global constant shared across users.
-    threshold = user.rubric["threshold"] * 100
+    #
+    # math.ceil(), not a plain *100: tier1_verdicts.score is an INTEGER column,
+    # and a fractional threshold (e.g. 0.725 * 100 = 72.5) sent as a .gte()
+    # filter value gets stringified into the request URL as "72.5" — Postgres
+    # then rejects it outright trying to parse "72.5" as an integer (confirmed
+    # for real: 22P02 invalid input syntax for type integer). Rounding UP (not
+    # down, not banker's rounding) preserves ">=" semantics against an integer
+    # column: "score >= 72.5" and "score >= 73" select exactly the same set of
+    # integer scores, so ceil is the one rounding direction that can't
+    # accidentally admit a score the fractional threshold would have excluded.
+    threshold = math.ceil(user.rubric["threshold"] * 100)
 
     # tier1_scored reports how many candidates Tier 1 actually scored for
     # this user THIS run (the chunks Phase A built) — not how many Tier 2
