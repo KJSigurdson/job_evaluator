@@ -586,6 +586,25 @@ def test_rerank_tier1_batch_writes_run_metrics(fake_client):
     assert metrics["estimated_cost_usd"] > 0
 
 
+def test_rerank_tier1_batch_survives_run_metrics_insert_failure(fake_client, caplog):
+    """insert_run_metrics() never raises — a schema-drift failure writing
+    the observability row must not undo or block on the verdicts already
+    written above it (see src.supabase_client.insert_run_metrics's own
+    tests for the real incident this guards)."""
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
+
+    with caplog.at_level("ERROR"):
+        result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())  # must not raise
+
+    assert result == {"status": "complete", "scored": 1, "failed": 0}
+    assert fake_client.table("tier1_verdicts").rows  # the real write survived
+    assert fake_client.table("run_metrics").rows == []
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
 def test_rerank_tier1_batch_pending_writes_zero_count_run_metrics_and_stops(fake_client, monkeypatch):
     from src.batch_poll import BatchOutcome
 

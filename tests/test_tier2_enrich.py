@@ -350,6 +350,24 @@ def test_tier2_enrich_run_metrics_stamped_with_run_id_stage_trigger(fake_client)
     assert metrics["trigger"] == "scheduled"
 
 
+def test_tier2_enrich_survives_run_metrics_insert_failure(fake_client, caplog):
+    """insert_run_metrics() never raises — a schema-drift failure writing
+    the observability row must not undo or block on matches_v2 rows already
+    written above it."""
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
+
+    with caplog.at_level("ERROR"):
+        result = run_tier2_enrich(fake_client, anthropic_client, candidates=[_candidate()])  # must not raise
+
+    assert result["enriched"] == 1
+    assert fake_client.table("matches_v2").rows  # the real write survived
+    assert fake_client.table("run_metrics").rows == []
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
 def test_tier2_enrich_multiple_users_same_job_distinct_custom_ids(fake_client):
     """custom_id is index-based (see tier2_enrich()'s by_key), not derived from
     user_id/job_id — the Batches API caps custom_id at 64 characters, and two

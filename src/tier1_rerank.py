@@ -54,7 +54,14 @@ from pydantic import ValidationError
 
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.tier1_rerank import JobScore, Tier1RerankOutput
-from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, fetch_batch_manifest, mark_batch_results_processed
+from src.supabase_client import (
+    chunked_upsert,
+    fetch_all,
+    fetch_all_in,
+    fetch_batch_manifest,
+    insert_run_metrics,
+    mark_batch_results_processed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -460,10 +467,10 @@ def rerank_tier1_batch(
         # Nothing was retrieved — see enrich_jobs.enrich_jobs()'s identical
         # reasoning: still write a run_metrics row for the tier1 stage so
         # this run_id has SOME record, rather than a silent gap.
-        client.table("run_metrics").insert({
+        insert_run_metrics(client, {
             "run_at": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id, "stage": "tier1", "trigger": trigger, "tier1_calls": 0,
-        }).execute()
+        })
         log.info(
             "rerank_tier1_batch: batch %s not finished within budget (elapsed %.0fs, "
             "counts=%s) — resuming next run.",
@@ -539,7 +546,7 @@ def rerank_tier1_batch(
     mark_batch_results_processed(client, outcome.batch_id, list(outcome.results.keys()))
 
     now = datetime.now(timezone.utc).isoformat()
-    client.table("run_metrics").insert({
+    insert_run_metrics(client, {
         "run_at": now,
         "run_id": run_id,
         "stage": "tier1",
@@ -550,7 +557,7 @@ def rerank_tier1_batch(
             + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
             4,
         ),
-    }).execute()
+    })
 
     if retry_pending is not None:
         log.info(

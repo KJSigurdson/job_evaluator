@@ -68,7 +68,7 @@ from pydantic import ValidationError
 
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.job_enrichment import JobEnrichment
-from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, mark_batch_results_processed
+from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, insert_run_metrics, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -620,7 +620,7 @@ def _finalize_round(
         enriched_without_embedding = len(fetch_all(
             client.table("jobs").select("id").eq("status", "enriched").is_("embedding", "null")
         ))
-        client.table("run_metrics").insert({
+        insert_run_metrics(client, {
             "run_at": now,
             "run_id": run_id,
             "stage": "enrich",
@@ -633,7 +633,7 @@ def _finalize_round(
                 + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
                 4,
             ),
-        }).execute()
+        })
 
     for job_id, reason in stale.items():
         log.error("Job %s permanently failed enrichment, marking stale: %s", job_id, reason)
@@ -839,10 +839,10 @@ def enrich_jobs(
         # this row simply never existed on a timeout (confirmed against
         # production: the 2026-09-14 incident this whole mechanism exists
         # for left zero 'enrich' stage rows for its run_id).
-        client.table("run_metrics").insert({
+        insert_run_metrics(client, {
             "run_at": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id, "stage": "enrich", "trigger": trigger, "jobs_enriched": 0,
-        }).execute()
+        })
         log.info(
             "Enrichment pending — batch %s not finished within budget (elapsed %.0fs, "
             "counts=%s) — resuming next run.",

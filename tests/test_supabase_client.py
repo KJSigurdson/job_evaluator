@@ -15,6 +15,7 @@ from src.supabase_client import (
     fetch_all_in,
     fetch_batch_manifest,
     find_outstanding_batch,
+    insert_run_metrics,
     mark_batch_results_processed,
     persist_batch_results,
     record_batch_retrieved,
@@ -303,3 +304,40 @@ def test_persist_batch_results_is_idempotent_on_resume(fake_client):
 
     rows = fake_client.table("batch_results").rows
     assert len(rows) == 1
+
+
+# ---------------------------------------------------------------------------
+# insert_run_metrics — NEVER raises. Regression for a real incident:
+# close_jobs() closed 1,665 jobs for real (4 chunked upserts, all 200 OK),
+# then its OWN run_metrics insert 400'd with PGRST204 ("Could not find the
+# 'closure_summary' column" — a migration that existed in the repo but
+# hadn't actually been applied) and that exception aborted the run before
+# enrich/matching ever started, even though the closure work itself had
+# already fully committed. Observability must never be able to do that.
+# ---------------------------------------------------------------------------
+
+def test_insert_run_metrics_writes_row_on_success(fake_client):
+    insert_run_metrics(fake_client, {"stage": "ingest", "jobs_ingested": 5})
+
+    [row] = fake_client.table("run_metrics").rows
+    assert row == {"stage": "ingest", "jobs_ingested": 5}
+
+
+def test_insert_run_metrics_swallows_failure_and_logs_error(fake_client, caplog):
+    """The fake client has no real schema, so it can never catch a drift bug
+    like PGRST204 on its own — raise_on_execute is how a test simulates
+    "this specific .insert() call fails against real Postgres", which is
+    exactly what happened in production here."""
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception(
+        "PGRST204: Could not find the 'closure_summary' column of 'run_metrics' in the schema cache"
+    )
+    payload = {"stage": "closure", "closure_summary": {"closed": 1665}}
+
+    with caplog.at_level("ERROR"):
+        insert_run_metrics(fake_client, payload)  # must not raise
+
+    assert fake_client.table("run_metrics").rows == []
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "closure_summary" in errors[0].message  # full payload logged, not just the exception
+    assert "1665" in errors[0].message

@@ -195,6 +195,33 @@ def find_outstanding_batch(client, module: str) -> str | None:
     return rows[0]["batch_id"]
 
 
+def insert_run_metrics(client, payload: dict) -> None:
+    """Write one run_metrics row. NEVER raises — run_metrics is pure
+    observability (cost/volume reporting), and a failure writing it must
+    never abort a pipeline run that otherwise did real, successful work.
+
+    Confirmed for real: close_jobs() closed 1,665 jobs (4 chunked upserts,
+    all 200 OK) and only THEN tried to write its run_metrics row, which
+    400'd with PGRST204 ("Could not find the 'closure_summary' column") —
+    a migration that existed in the repo but hadn't actually been applied
+    to the live schema. That exception propagated straight up and aborted
+    the run: enrich/matching never ran that day, even though the closure
+    work itself had already fully and correctly committed. Observability
+    must never be able to do that.
+
+    On failure, logs the FULL PAYLOAD at ERROR (not just the exception) so
+    the metrics this row would have recorded are still recoverable from
+    logs even though the row itself is lost — there is no retry, by design:
+    a run_metrics row describes a stage that's already finished, so retrying
+    the insert later has nothing fresher to report and isn't worth the extra
+    code path for a telemetry-only write.
+    """
+    try:
+        client.table("run_metrics").insert(payload).execute()
+    except Exception as exc:
+        log.error("run_metrics insert failed (row lost, pipeline continues): %r — payload=%s", exc, payload)
+
+
 def fetch_batch_manifest(client, batch_id: str) -> dict | None:
     """The request-time manifest persisted by record_batch_submitted() for
     *batch_id*, if any — see that function's docstring. None for a batch

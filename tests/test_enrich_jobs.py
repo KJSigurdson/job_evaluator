@@ -713,6 +713,27 @@ def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client,
     assert metrics["estimated_cost_usd"] > 0
 
 
+def test_enrich_jobs_survives_run_metrics_insert_failure(fake_client, monkeypatch, caplog):
+    """insert_run_metrics() never raises — a schema-drift failure writing the
+    observability row must not abort enrichment, even though run_metrics is
+    written BEFORE the final `jobs` write here (deliberate crash-safety
+    ordering — see this module's docstring): the jobs write must still run."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
+
+    with caplog.at_level("ERROR"):
+        result = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)  # must not raise
+
+    assert result["enriched"] == 1
+    assert fake_client.table("jobs").rows[0]["status"] == "enriched"  # the real write survived
+    assert fake_client.table("run_metrics").rows == []
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
 def test_enrich_jobs_run_metrics_counts_enriched_jobs_missing_embedding(fake_client, monkeypatch):
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])

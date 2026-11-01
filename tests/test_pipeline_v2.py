@@ -982,6 +982,27 @@ def test_run_skips_gate_rejections_row_when_nothing_rejected(fake_client, monkey
     assert [r for r in fake_client.table("run_metrics").rows if r.get("stage") == "match"] == []
 
 
+def test_run_survives_every_run_metrics_insert_failing(fake_client, monkeypatch):
+    """The real incident this guards against: close_jobs() (and every other
+    stage) writes its own run_metrics row via insert_run_metrics(), which
+    never raises — a schema-drift failure there must not abort the run
+    before enrich/matching ever gets a chance to run, the way a raw
+    .insert().execute() call used to."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda client, user, jobs_pool, gate_rejections_out=None, **k: (
+        gate_rejections_out.update({user.user_id: {"location": 2}}) if gate_rejections_out is not None else None,
+        _prep(user.user_id, gate_survivor_count=0, job_cards=[]))[1])
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
+
+    result = run(_client=fake_client, _anthropic_client=object())  # must not raise
+
+    assert fake_client.table("run_metrics").rows == []
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "complete"
+    assert result["users"]
+
+
 # ---------------------------------------------------------------------------
 # Enrichment 'pending' gate — enrich_jobs() returned status='pending' (its
 # Batches API poll budget was exhausted, not an error). run() must stop

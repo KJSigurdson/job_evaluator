@@ -86,7 +86,7 @@ from datetime import datetime, timezone
 from src.adapters.base import JobPosting
 from src.dedup import org_title_key
 from src.job_normalize import RE_ENRICH_SIMILARITY_THRESHOLD, content_hash, normalize_job_url, text_similarity
-from src.supabase_client import chunked_insert, chunked_upsert, fetch_all
+from src.supabase_client import chunked_insert, chunked_upsert, fetch_all, insert_run_metrics
 
 log = logging.getLogger(__name__)
 
@@ -569,14 +569,14 @@ def ingest(
         chunked_upsert(client.table("job_aliases"), list(new_aliases.values()), on_conflict="alias_url")
 
     per_board_payload = {board: c.as_dict() for board, c in per_board_counts.items()}
-    client.table("run_metrics").insert({
+    insert_run_metrics(client, {
         "run_at": now,
         "run_id": run_id,
         "stage": "ingest",
         "trigger": trigger,
         "jobs_ingested": counts.ingested,
         "per_board": per_board_payload,
-    }).execute()
+    })
 
     log.info(
         "Ingest complete: %d posting(s) -> %d new, %d updated, %d minor, %d cross-board, %d unchanged, "

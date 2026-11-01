@@ -92,7 +92,7 @@ from src.match_v2 import fetch_matched_job_ids, gate_survivors_with_rejections, 
 from src.notify import send_match_digest
 from src.profile_embed import backfill_profile_embeddings, build_embedding_text
 from src.quota_store import set_status
-from src.supabase_client import fetch_all, fetch_all_in, get_client
+from src.supabase_client import fetch_all, fetch_all_in, get_client, insert_run_metrics
 from src.tier1_rerank import TIER1_MAX_PER_USER, fetch_valid_verdict_job_ids, rerank_tier1_batch
 from src.tier2_enrich import fetch_candidates as fetch_tier2_candidates
 from src.tier2_enrich import tier2_enrich as run_tier2_enrich
@@ -631,13 +631,13 @@ def run(
         # never wired up. Skipped in dry_run (no writes at all in that mode) and
         # when nothing was rejected (nothing to report).
         if gate_rejections and not dry_run:
-            client.table("run_metrics").insert({
+            insert_run_metrics(client, {
                 "run_at": datetime.now(timezone.utc).isoformat(),
                 "run_id": run_id,
                 "stage": "match",
                 "trigger": trigger,
                 "gate_rejections": gate_rejections,
-            }).execute()
+            })
 
         # Only now — after ingest/enrich/profile-embed/matching/digest have
         # ALL already run for every healthy source and active user — does a

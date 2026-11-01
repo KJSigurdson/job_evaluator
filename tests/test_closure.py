@@ -208,3 +208,24 @@ def test_close_jobs_large_backlog_never_makes_one_giant_in_request(fake_client):
     assert len(upsert_calls) == 4
     assert all(len(chunk) <= 500 for chunk in upsert_calls)
     assert sum(len(chunk) for chunk in upsert_calls) == 2000
+
+
+def test_close_jobs_survives_run_metrics_insert_failure(fake_client, caplog):
+    """The actual incident: close_jobs() closed 1,665 jobs for real (all
+    chunked upserts succeeded), then its own run_metrics insert 400'd with
+    PGRST204 and that exception aborted the run before enrich/matching ever
+    started — even though the closure itself had already fully committed.
+    close_jobs() must still return its normal result and leave the jobs
+    write in place when the metrics write fails."""
+    fake_client.seed("jobs", [_job("job-1", source_board="80000_hours", last_seen_days_ago=4)])
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception(
+        "PGRST204: Could not find the 'closure_summary' column"
+    )
+
+    with caplog.at_level("ERROR"):
+        result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))  # must not raise
+
+    assert result == {"closed": 1, "by_source": {"80000_hours": 1}, "by_rule": {"complete_source_stale": 1, "safety_ceiling": 0}}
+    assert fake_client.table("jobs").rows[0]["status"] == "closed"  # the real write survived
+    assert fake_client.table("run_metrics").rows == []  # the metrics row did not
+    assert any(r.levelname == "ERROR" for r in caplog.records)

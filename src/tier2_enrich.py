@@ -46,7 +46,7 @@ from pydantic import ValidationError
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.match_v2 import fetch_matched_job_ids
 from src.schemas import Tier2EnrichmentOutput
-from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, mark_batch_results_processed
+from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, insert_run_metrics, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -373,10 +373,10 @@ def tier2_enrich(
         # Nothing was retrieved — mirrors src.enrich_jobs.enrich_jobs()'s
         # identical reasoning: still write a run_metrics row for the tier2
         # stage so this run_id has SOME record, rather than a silent gap.
-        client.table("run_metrics").insert({
+        insert_run_metrics(client, {
             "run_at": datetime.now(timezone.utc).isoformat(),
             "run_id": run_id, "stage": "tier2", "trigger": trigger, "tier2_calls": 0,
-        }).execute()
+        })
         log.info(
             "tier2_enrich pending — batch %s not finished within budget (elapsed %.0fs, "
             "counts=%s) — resuming next run.",
@@ -456,7 +456,7 @@ def tier2_enrich(
     # Round 1's results are committed here even if round 2 itself went
     # pending — never lose already-resolved output waiting on a slower part.
     now = datetime.now(timezone.utc).isoformat()
-    client.table("run_metrics").insert({
+    insert_run_metrics(client, {
         "run_at": now,
         "run_id": run_id,
         "stage": "tier2",
@@ -467,7 +467,7 @@ def tier2_enrich(
             + total_output_tokens / 1_000_000 * _SONNET_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
             4,
         ),
-    }).execute()
+    })
 
     updates = [
         {

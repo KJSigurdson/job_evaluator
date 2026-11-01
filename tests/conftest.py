@@ -67,6 +67,15 @@ class _FakeQuery:
         return self
 
     def execute(self) -> _FakeResponse:
+        # Opt-in failure injection: this fake has no real schema, so it can
+        # never catch a drift bug like a missing column (PGRST204) on its
+        # own — a test that needs to exercise "what happens when THIS
+        # .insert()/.upsert()/.update() call fails against real Postgres"
+        # must set this explicitly. See src.supabase_client.insert_run_metrics's
+        # tests for the motivating real incident.
+        exc = self._table.raise_on_execute.get(self._op)
+        if exc is not None:
+            raise exc
         if self._op == "select":
             rows = self._table.rows
             for kind, col, val in self._filters:
@@ -140,6 +149,7 @@ class _FakeTable:
         self.update_calls: list[dict] = []  # one entry (payload dict) per .update().execute() call
         self.insert_calls: list[list[dict]] = []  # one entry (list of rows) per .insert().execute() call
         self.in_call_sizes: list[tuple[str, int]] = []  # (column, len(values)) per .in_() call, any op
+        self.raise_on_execute: dict[str, Exception] = {}  # op ("insert"/"upsert"/"update"/"select") -> exception to raise on .execute()
 
     def select(self, cols: str = "*") -> _FakeQuery:
         return _FakeQuery(self, "select").select(cols)

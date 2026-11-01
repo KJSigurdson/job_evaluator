@@ -72,6 +72,21 @@ def test_ingest_run_metrics_defaults_run_id_and_trigger_to_none(fake_client):
     assert row["stage"] == "ingest"
 
 
+def test_ingest_survives_run_metrics_insert_failure(fake_client, caplog):
+    """insert_run_metrics() never raises — a schema-drift failure writing
+    the observability row must not undo or block on the jobs/job_aliases
+    writes already committed above it."""
+    fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
+
+    with caplog.at_level("ERROR"):
+        counts = ingest([_posting()], client=fake_client)  # must not raise
+
+    assert counts == IngestCounts(ingested=1, new=1)
+    assert fake_client.table("jobs").rows  # the real write survived
+    assert fake_client.table("run_metrics").rows == []
+    assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # Same URL, same content — last_seen touch only
 # ---------------------------------------------------------------------------

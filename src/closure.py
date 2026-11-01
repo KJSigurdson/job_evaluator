@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from src.supabase_client import chunked_upsert, fetch_all
+from src.supabase_client import chunked_upsert, fetch_all, insert_run_metrics
 
 log = logging.getLogger(__name__)
 
@@ -103,7 +103,9 @@ def close_jobs(
     """Apply plan_closures()'s plan for real: status -> 'closed' for every
     job_id it identifies. Writes one run_metrics row (stage='closure') with
     the per-source/per-rule breakdown, same observability convention as
-    every other stage in this pipeline.
+    every other stage in this pipeline — via insert_run_metrics(), which
+    never raises, so a schema-drift/observability failure here can't undo
+    or block on the closure writes that already landed above.
 
     Returns {"closed": int, "by_source": {...}, "by_rule": {rule: count}}.
     """
@@ -137,13 +139,13 @@ def close_jobs(
     else:
         closed = 0
 
-    client.table("run_metrics").insert({
+    insert_run_metrics(client, {
         "run_at": datetime.now(timezone.utc).isoformat(),
         "run_id": run_id,
         "stage": "closure",
         "trigger": trigger,
         "closure_summary": {"closed": closed, "by_source": plan["by_source"], "by_rule": by_rule_counts},
-    }).execute()
+    })
 
     log.info("close_jobs: closed %d job(s) — by_source=%s, by_rule=%s", closed, plan["by_source"], by_rule_counts)
     return {"closed": closed, "by_source": plan["by_source"], "by_rule": by_rule_counts}
