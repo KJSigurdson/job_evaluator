@@ -1,8 +1,9 @@
 """Tests for src/adapters/probably_good.py's pure parse step (no network)."""
 from __future__ import annotations
 
-from src.adapters.base import JobPosting
-from src.adapters.probably_good import SOURCE_BOARD, parse_hits
+from src.adapters import probably_good
+from src.adapters.base import FetchResult, JobPosting
+from src.adapters.probably_good import ProbablyGoodAdapter, SOURCE_BOARD, parse_hits
 
 
 def _hit(**overrides) -> dict:
@@ -77,3 +78,19 @@ def test_parse_hits_preserves_order():
 def test_parse_hits_multiple_hits():
     postings = parse_hits([_hit(), _hit(title="Chief of Staff", url_external="https://example.org/cos")])
     assert len(postings) == 2
+
+
+# ---------------------------------------------------------------------------
+# fetch() — wraps fetch_raw_hits() into a FetchResult
+# ---------------------------------------------------------------------------
+
+def test_fetch_wraps_hits_into_fetch_result(monkeypatch):
+    monkeypatch.setattr(probably_good, "fetch_raw_hits", lambda: [_hit()])
+
+    result = ProbablyGoodAdapter().fetch()
+
+    assert isinstance(result, FetchResult)
+    assert len(result.postings) == 1
+    assert result.fetched == 1
+    assert result.nb_hits is None
+    assert result.complete is True

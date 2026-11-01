@@ -1,8 +1,9 @@
 """Tests for src/adapters/iap.py's pure parse step (no network)."""
 from __future__ import annotations
 
-from src.adapters.base import JobPosting
-from src.adapters.iap import SOURCE_BOARD, parse_rows
+from src.adapters import iap
+from src.adapters.base import FetchResult, JobPosting
+from src.adapters.iap import IAPAdapter, SOURCE_BOARD, parse_rows
 
 
 def cell(text: str = "", url: str | None = None) -> dict:
@@ -102,3 +103,25 @@ def test_parse_rows_location_none_when_blank():
     )
     [posting] = parse_rows(sheet(blank_loc_row))
     assert posting.location_field is None
+
+
+# ---------------------------------------------------------------------------
+# fetch() — wraps fetch_raw_rows() into a FetchResult
+# ---------------------------------------------------------------------------
+
+def test_fetch_wraps_rows_into_fetch_result(monkeypatch):
+    monkeypatch.setattr(iap, "fetch_raw_rows", lambda: sheet(row(
+        cell("Org"), cell("Title"), cell("x", url="https://example.org/x"),
+        cell(""), cell(""), cell(""), cell(""), cell(""), cell(""),
+    )))
+
+    result = IAPAdapter().fetch()
+
+    assert isinstance(result, FetchResult)
+    assert len(result.postings) == 1
+    assert result.fetched == len(sheet(row(
+        cell("Org"), cell("Title"), cell("x", url="https://example.org/x"),
+        cell(""), cell(""), cell(""), cell(""), cell(""), cell(""),
+    )))
+    assert result.nb_hits is None
+    assert result.complete is True

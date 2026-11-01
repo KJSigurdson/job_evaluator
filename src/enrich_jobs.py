@@ -68,7 +68,7 @@ from pydantic import ValidationError
 
 from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
 from src.models.job_enrichment import JobEnrichment
-from src.supabase_client import chunked_upsert, fetch_all
+from src.supabase_client import chunked_upsert, fetch_all, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -98,7 +98,7 @@ _VOYAGE_MODEL = "voyage-3.5"
 _VOYAGE_DIMENSIONS = 1024
 _VOYAGE_BATCH_SIZE = 128  # Voyage's per-request cap
 
-_JOB_SELECT_COLUMNS = "id,title,org,location_field,raw_description,canonical_url,source_board,content_hash,enriched_at"
+_JOB_SELECT_COLUMNS = "id,title,org,location_field,raw_description,canonical_url,source_board,content_hash,enriched_at,reenrich_requested_at"
 
 
 # ---------------------------------------------------------------------------
@@ -503,6 +503,12 @@ def _write_enrichment(client, *, enriched: dict[str, JobEnrichment], failures: d
             "embedding": embeddings.get(job_id),
             "enriched_at": now,
             "status": "enriched",
+            # Cleared on every successful enrichment — a job selected via the
+            # reenrich_requested_at path (see enrich_jobs()'s selection query)
+            # has its request fully satisfied by this write; a job selected via
+            # the plain pending_enrich path has this already null, so clearing
+            # it unconditionally is a no-op there.
+            "reenrich_requested_at": None,
         })
 
     stale_updates = []
@@ -556,6 +562,7 @@ def _finalize_round(
     stale: dict[str, str], requeued: dict[str, str],
     total_input_tokens: int, total_output_tokens: int, enrichment_calls: int,
     run_id: str | None, trigger: str | None, write_run_metrics: bool,
+    batch_id_by_job: dict[str, str] | None = None,
 ) -> dict:
     """Shared tail: write run_metrics (unless write_run_metrics=False —
     reprocess_staged()'s case, where the normal live path already wrote it
@@ -568,9 +575,35 @@ def _finalize_round(
     between those callers; this function only ever sees the FINAL,
     fully-resolved tally for one enrichment attempt.
 
+    batch_id_by_job, if given, maps each job_id in enriched/stale/requeued to the
+    batch_id whose raw result ultimately decided its outcome — used to mark that
+    (batch_id, job_id) row processed=True in `batch_results` immediately AFTER
+    `_write_enrichment` commits (never before — the whole point of `processed`
+    is "safely applied", so it must only flip once the write it's gating on has
+    actually happened). A job_id `_write_enrichment` itself skipped (no matching
+    `jobs` row) is excluded from marking, same as reprocess_staged()'s existing
+    missing_ids exclusion — nothing was actually applied for it, so its raw
+    result should stay available for a future recovery attempt.
+
     Returns {"enriched", "stale", "requeued", "embeddings_skipped"} (int/int/int/bool).
     """
     if write_run_metrics:
+        # Run the embedding backfill BEFORE counting the gap below, not after
+        # — so enriched_without_embedding reflects what's STILL missing once
+        # this run has done everything it can about it, not the stale
+        # pre-backfill backlog. Independent of (and safe to run regardless
+        # of) this round's own enriched/stale/requeued buckets below: it only
+        # ever touches OTHER already-enriched jobs still missing an
+        # embedding (e.g. ones enriched before VOYAGE_API_KEY existed, or
+        # that hit a transient Voyage failure on their own original run) —
+        # never the jobs_enriched cost record above, so a crash here can't
+        # lose anything this function already safely recorded. Best-effort:
+        # backfill_embeddings() never raises (a Voyage outage leaves the
+        # backlog count unchanged, logged, not fatal to this run).
+        backfill_result = backfill_embeddings(client)
+        if backfill_result["embedded"]:
+            log.info("Embedding backfill (enrich stage): %s", backfill_result)
+
         # jobs_enriched here reflects the CLASSIFIED count, not the post-write
         # count returned below — run_metrics is deliberately written before
         # _write_enrichment (crash-safety: a crash in that write must not
@@ -578,6 +611,15 @@ def _finalize_round(
         # at this point. The gap only matters for a job_id with no matching
         # `jobs` row at all, an edge case this count very slightly overstates.
         now = datetime.now(timezone.utc).isoformat()
+        # Backlog gauge, not a per-run delta: counts every status='enriched' job
+        # still missing an embedding RIGHT NOW — AFTER the backfill attempt
+        # just above, so this reflects what's genuinely still missing (e.g.
+        # Voyage itself down this run), not a stale pre-backfill count.
+        # Surfaces the gap match_v2_top_jobs's embedding IS NOT NULL filter
+        # creates silently otherwise.
+        enriched_without_embedding = len(fetch_all(
+            client.table("jobs").select("id").eq("status", "enriched").is_("embedding", "null")
+        ))
         client.table("run_metrics").insert({
             "run_at": now,
             "run_id": run_id,
@@ -585,6 +627,7 @@ def _finalize_round(
             "trigger": trigger,
             "jobs_enriched": len(enriched),
             "enrichment_calls": enrichment_calls,
+            "enriched_without_embedding": enriched_without_embedding,
             "estimated_cost_usd": round(
                 total_input_tokens / 1_000_000 * _HAIKU_SYNC_INPUT_USD_PER_MTOK * _BATCH_DISCOUNT
                 + total_output_tokens / 1_000_000 * _HAIKU_SYNC_OUTPUT_USD_PER_MTOK * _BATCH_DISCOUNT,
@@ -600,6 +643,16 @@ def _finalize_round(
     embeddings = _embed_enriched(enriched, by_id)
     skipped = _write_enrichment(client, enriched=enriched, failures=stale, requeued=requeued, by_id=by_id, embeddings=embeddings)
 
+    if batch_id_by_job:
+        applied_ids = (enriched.keys() | stale.keys() | requeued.keys()) - skipped
+        by_batch: dict[str, list[str]] = {}
+        for job_id in applied_ids:
+            bid = batch_id_by_job.get(job_id)
+            if bid is not None:
+                by_batch.setdefault(bid, []).append(job_id)
+        for bid, job_ids in by_batch.items():
+            mark_batch_results_processed(client, bid, job_ids)
+
     applied_enriched = len(enriched.keys() - skipped)
     applied_stale = len(stale.keys() - skipped)
     applied_requeued = len(requeued.keys() - skipped)
@@ -614,7 +667,7 @@ def _finalize_round(
     }
 
 
-def apply_drained_batch(client, results: dict, *, run_id: str | None = None, trigger: str | None = None) -> dict:
+def apply_drained_batch(client, results: dict, *, batch_id: str | None = None, run_id: str | None = None, trigger: str | None = None) -> dict:
     """Apply an already-ended batch's *results* ({custom_id: raw_dict}) with
     NO retry attempt — used by src/drain_batches.py, which must never submit
     new work (see that module's docstring: no ingest, no matching, no digest
@@ -629,6 +682,11 @@ def apply_drained_batch(client, results: dict, *, run_id: str | None = None, tri
     caller-supplied by_id, mirroring reprocess_staged()'s existing pattern —
     this is what lets this function apply a batch whose submitting run's own
     in-memory state (its pending-jobs query result) is long gone.
+
+    batch_id, if given, marks every applied job_id's batch_results row
+    processed=True once this call's write commits (see _finalize_round's
+    batch_id_by_job) — optional only so existing callers/tests that don't care
+    about that bookkeeping aren't forced to supply it.
     """
     job_ids = list(results.keys())
     rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", job_ids))
@@ -639,11 +697,13 @@ def apply_drained_batch(client, results: dict, *, run_id: str | None = None, tri
     for job_id, error in round_result["parse_failures"].items():
         stale[job_id] = f"{error} (parse failure — no retry attempted while draining)"
 
+    batch_id_by_job = {job_id: batch_id for job_id in job_ids} if batch_id else None
     return _finalize_round(
         client, by_id=by_id, enriched=round_result["enriched"], stale=stale,
         requeued=round_result["requeued"],
         total_input_tokens=round_result["input_tokens"], total_output_tokens=round_result["output_tokens"],
         enrichment_calls=len(results), run_id=run_id, trigger=trigger, write_run_metrics=True,
+        batch_id_by_job=batch_id_by_job,
     )
 
 
@@ -679,15 +739,26 @@ def enrich_jobs(
     *, client, anthropic_client, limit: int | None = None, dry_run: bool = False,
     job_ids: list[str] | None = None, run_id: str | None = None, trigger: str | None = None,
 ) -> dict:
-    """Enrich every job with status='pending_enrich' (capped at *limit* if given —
-    used for the sample run before committing to the full backlog), except jobs
-    re-enriched within the last _RE_ENRICH_COOLDOWN_DAYS (see _split_cooldown) —
-    those are deferred, not selected, this run. dry_run=True selects and reports
-    counts without submitting any batch or writing anything. job_ids, if given,
-    restricts selection to that specific set (still gated on
-    status='pending_enrich') — used to hand-pick a representative sample (e.g. one
-    that deliberately includes "Remote" postings) rather than taking arbitrary DB
-    order.
+    """Enrich every job with status='pending_enrich', PLUS every status='enriched'
+    job with reenrich_requested_at set (content changed again after a prior
+    successful enrichment — see src/ingest.py's real-content-change branch,
+    which sets this instead of flipping status back to pending_enrich). The
+    second set is what keeps a re-enriching job matchable in the meantime: it
+    stays status='enriched' — and thus in _fetch_enriched_jobs_pool's matching
+    pool — for the entire cooldown window, instead of disappearing from
+    matching for up to _RE_ENRICH_COOLDOWN_DAYS the way a direct pending_enrich
+    flip used to (confirmed in production: 393 jobs stuck cycling through this
+    exact loop, 310 of them at precisely 7 cycles — the cooldown period —
+    across July-November).
+
+    Both sets go through the SAME _RE_ENRICH_COOLDOWN_DAYS deferral
+    (_split_cooldown, keyed on enriched_at either way) — capped at *limit* if
+    given (used for the sample run before committing to the full backlog).
+    dry_run=True selects and reports counts without submitting any batch or
+    writing anything. job_ids, if given, restricts selection to that specific
+    set (still gated on the same status/reenrich_requested_at criteria) — used
+    to hand-pick a representative sample (e.g. one that deliberately includes
+    "Remote" postings) rather than taking arbitrary DB order.
 
     Returns a summary dict. status='complete': {status, selected, enriched, stale,
     requeued, embeddings_skipped, deferred}. status='pending' (the batch — round 1
@@ -698,12 +769,19 @@ def enrich_jobs(
     run()) must check result["status"] and stop before matching on a 'pending' result
     — enrichment is incomplete, not failed.
     """
-    query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich")
-    if job_ids is not None:
-        query = query.in_("id", job_ids)
     # fetch_all, not a plain .execute(): PostgREST silently truncates a response
     # at db.max_rows (1000) — the pending_enrich backlog can exceed that.
-    rows = fetch_all(query)
+    pending_query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "pending_enrich")
+    reenrich_query = client.table("jobs").select(_JOB_SELECT_COLUMNS).eq("status", "enriched")
+    if job_ids is not None:
+        pending_query = pending_query.in_("id", job_ids)
+        reenrich_query = reenrich_query.in_("id", job_ids)
+    pending_rows = fetch_all(pending_query)
+    # reenrich_requested_at IS NOT NULL filtered client-side, not via the
+    # query builder — simpler than a raw PostgREST NOT filter string and needs
+    # no new capability from the (already paginating) fetch_all/fake-client path.
+    reenrich_rows = [row for row in fetch_all(reenrich_query) if row.get("reenrich_requested_at") is not None]
+    rows = pending_rows + reenrich_rows
     rows, deferred_ids = _split_cooldown(rows)
     if limit is not None:
         rows = rows[:limit]
@@ -717,6 +795,11 @@ def enrich_jobs(
 
     if not rows:
         log.info("No pending_enrich jobs found — nothing to do (%d deferred by cooldown)", len(deferred_ids))
+        # Still worth running even with nothing new to enrich — this is the
+        # one path that otherwise never calls backfill_embeddings() at all,
+        # which would leave an existing embedding gap unaddressed on any day
+        # the pending_enrich/reenrich_requested backlog happens to be empty.
+        backfill_embeddings(client)
         return {
             "status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0,
             "embeddings_skipped": not embeddings_available(), "deferred": len(deferred_ids),
@@ -764,6 +847,12 @@ def enrich_jobs(
     total_output_tokens = round1["output_tokens"]
     enrichment_calls = len(requests)
     retry_pending = None
+    # Maps each job_id to whichever batch ultimately decided its outcome — round
+    # 2's batch_id overwrites round 1's below for any job_id that got retried,
+    # since round 2's result (not round 1's parse failure) is what's actually
+    # applied. Used only to mark batch_results.processed=True after the write
+    # below commits — see _finalize_round's batch_id_by_job param.
+    batch_id_by_job: dict[str, str] = {job_id: outcome.batch_id for job_id in outcome.results}
 
     # Round 2 — one retry for parse/validation failures only, with the error
     # appended. Requeued/stale items from round 1 are NOT retried (see this
@@ -798,6 +887,7 @@ def enrich_jobs(
                 stale[job_id] = f"{error} (retry)"
             total_input_tokens += round2["input_tokens"]
             total_output_tokens += round2["output_tokens"]
+            batch_id_by_job.update({job_id: retry_outcome.batch_id for job_id in retry_outcome.results})
 
     # run_metrics written NOW — right after usage is tallied, BEFORE the final
     # `jobs` write below — so a crash in that write no longer loses the cost
@@ -809,6 +899,7 @@ def enrich_jobs(
         client, by_id=by_id, enriched=enriched, stale=stale, requeued=requeued,
         total_input_tokens=total_input_tokens, total_output_tokens=total_output_tokens,
         enrichment_calls=enrichment_calls, run_id=run_id, trigger=trigger, write_run_metrics=True,
+        batch_id_by_job=batch_id_by_job,
     )
 
     if retry_pending is not None:

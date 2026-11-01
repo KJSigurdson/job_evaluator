@@ -1,8 +1,10 @@
 """Tests for src/adapters/eighty_thousand_hours.py's pure parse step (no network)."""
 from __future__ import annotations
 
-from src.adapters.base import JobPosting
-from src.adapters.eighty_thousand_hours import SOURCE_BOARD, parse_hits
+from src.adapters import eighty_thousand_hours
+from src.adapters.base import FetchResult, JobPosting
+from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter, SOURCE_BOARD, parse_hits
+from src.sources.eightyk import BucketedFetchResult
 
 
 def _hit(**overrides) -> dict:
@@ -72,3 +74,35 @@ def test_parse_hits_preserves_order():
 def test_parse_hits_multiple_hits():
     postings = parse_hits([_hit(), _hit(title="Chief of Staff", url_external="https://example.org/cos")])
     assert len(postings) == 2
+
+
+# ---------------------------------------------------------------------------
+# fetch() — wraps fetch_raw_hits_bucketed() into a FetchResult
+# ---------------------------------------------------------------------------
+
+def test_fetch_wraps_bucketed_result_into_fetch_result(monkeypatch):
+    monkeypatch.setattr(
+        eighty_thousand_hours, "fetch_raw_hits_bucketed",
+        lambda: BucketedFetchResult(hits=[_hit()], nb_hits=1, fetched=1, complete=True),
+    )
+
+    result = EightyThousandHoursAdapter().fetch()
+
+    assert isinstance(result, FetchResult)
+    assert len(result.postings) == 1
+    assert result.fetched == 1
+    assert result.nb_hits == 1
+    assert result.complete is True
+
+
+def test_fetch_propagates_incomplete_flag(monkeypatch):
+    monkeypatch.setattr(
+        eighty_thousand_hours, "fetch_raw_hits_bucketed",
+        lambda: BucketedFetchResult(hits=[], nb_hits=5, fetched=3, complete=False),
+    )
+
+    result = EightyThousandHoursAdapter().fetch()
+
+    assert result.complete is False
+    assert result.fetched == 3
+    assert result.nb_hits == 5

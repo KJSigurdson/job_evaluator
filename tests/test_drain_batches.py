@@ -57,7 +57,7 @@ def test_drain_ended_applies_via_apply_drained_batch(monkeypatch):
         return BatchOutcome(status="idle", batch_id=None)
 
     applied_calls = []
-    def _fake_apply(client_, results, *, run_id, trigger):
+    def _fake_apply(client_, results, *, batch_id=None, run_id, trigger):
         applied_calls.append((results, run_id, trigger))
         return {"enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True}
 

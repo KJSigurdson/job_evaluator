@@ -20,6 +20,7 @@ from src.supabase_client import (
     chunked_upsert,
     fetch_all,
     find_outstanding_batch,
+    mark_batch_results_processed,
     persist_batch_results,
     record_batch_retrieved,
     record_batch_submitted,
@@ -183,11 +184,14 @@ def _batch_request(user_id: str, prompt: str) -> dict:
     }
 
 
-def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = _MODULE) -> dict:
+def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = _MODULE) -> tuple[dict, str]:
     """Submit *requests*, or resume an outstanding batch for *module* if a prior
     run left one — see enrich_jobs.py's identical helper's docstring for the
     full rationale. Persists every raw result to `batch_results` immediately on
-    retrieval, before any parsing risk, and returns {custom_id: raw_dict}."""
+    retrieval, before any parsing risk, and returns ({custom_id: raw_dict}, batch_id)
+    — batch_id so the caller can mark these rows processed=True once parsing
+    resolves them (this module's only "risk window" — there's no further table
+    write of its own to gate on, unlike enrich_jobs.py/tier2_enrich.py)."""
     batch_id = find_outstanding_batch(client, module)
     if batch_id is not None:
         log.warning(
@@ -215,7 +219,7 @@ def _run_batch(anthropic_client, requests: list[dict], *, client, module: str = 
         results[item.custom_id] = item.result.model_dump(mode="json")
     persist_batch_results(client, batch_id, results)
     record_batch_retrieved(client, batch_id)
-    return results
+    return results, batch_id
 
 
 # ---------------------------------------------------------------------------
@@ -245,7 +249,7 @@ def rerank_tier1(
         ))
         for user_id, u in users.items()
     ]
-    results = _run_batch(anthropic_client, requests, client=client)
+    results, batch_id = _run_batch(anthropic_client, requests, client=client)
     total_api_calls = len(requests)
 
     scored: dict[str, Tier1RerankOutput] = {}
@@ -263,6 +267,11 @@ def rerank_tier1(
         else:
             failures[user_id] = error
 
+    # Marked processed=True now that every round-1 result has been resolved
+    # (scored or permanently/retriably failed) — mirrors reprocess_staged()'s
+    # own timing for this module, which has no further table write to gate on.
+    mark_batch_results_processed(client, batch_id, list(results.keys()))
+
     if failures:
         log.warning("%d user(s) failed round 1, retrying once: %s", len(failures), list(failures.keys()))
         retry_requests = [
@@ -272,7 +281,7 @@ def rerank_tier1(
             ))
             for user_id, error in failures.items()
         ]
-        retry_results = _run_batch(anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry")
+        retry_results, retry_batch_id = _run_batch(anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry")
         total_api_calls += len(retry_requests)
 
         still_failing: dict[str, str] = {}
@@ -285,6 +294,8 @@ def rerank_tier1(
                 scored[user_id] = output
             else:
                 still_failing[user_id] = f"{error} (retry)"
+
+        mark_batch_results_processed(client, retry_batch_id, list(retry_results.keys()))
 
         failures = still_failing
 

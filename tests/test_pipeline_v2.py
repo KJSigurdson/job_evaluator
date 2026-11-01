@@ -413,8 +413,11 @@ def test_run_manual_mode_does_not_log_adapter_line(fake_client, monkeypatch, cap
 # ---------------------------------------------------------------------------
 
 class _NoopAdapter:
+    source_board = "noop"
+
     def fetch(self):
-        return []
+        from src.adapters.base import FetchResult
+        return FetchResult(postings=[], fetched=0, nb_hits=None, complete=True)
 
 
 def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None):
@@ -525,9 +528,12 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
     calls = []
 
     class _TrackingAdapter:
+        source_board = "tracking"
+
         def fetch(self):
+            from src.adapters.base import FetchResult
             calls.append("adapter")
-            return []
+            return FetchResult(postings=[], fetched=0, nb_hits=None, complete=True)
 
     from src.ingest import IngestCounts
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_TrackingAdapter])
@@ -542,6 +548,75 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
     run(_client=fake_client, _anthropic_client=object())
 
     assert calls == ["adapter", "ingest", "enrich", "embed"]
+
+
+# ---------------------------------------------------------------------------
+# source_fetch_log — one row per adapter per scheduled run, including on a
+# failed fetch (complete=False), so closure (Phase 1B) has a fetch-
+# completeness signal to key off per source board.
+# ---------------------------------------------------------------------------
+
+def test_run_writes_source_fetch_log_row_per_adapter(fake_client, monkeypatch):
+    from src.adapters.base import FetchResult
+
+    class _Adapter80k:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=5, nb_hits=5, complete=True)
+
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_Adapter80k])
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("source_fetch_log").rows
+    assert row["source_board"] == "80000_hours"
+    assert row["fetched"] == 5
+    assert row["nb_hits"] == 5
+    assert row["complete"] is True
+    assert row["fetched_at"] is not None
+
+
+def test_run_writes_source_fetch_log_row_with_complete_false_on_adapter_failure(fake_client, monkeypatch):
+    class _FailingAdapter:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            raise RuntimeError("boom")
+
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_FailingAdapter])
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("source_fetch_log").rows
+    assert row["source_board"] == "80000_hours"
+    assert row["complete"] is False
+    assert row["fetched"] == 0
+
+
+def test_run_dry_run_writes_no_source_fetch_log(fake_client, monkeypatch):
+    from src.adapters.base import FetchResult
+
+    class _Adapter80k:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=5, nb_hits=5, complete=True)
+
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_Adapter80k])
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 0, "top": []})
+
+    run(dry_run=True, _client=fake_client, _anthropic_client=object())
+
+    assert fake_client.table("source_fetch_log").rows == []
 
 
 def test_run_manual_mode_skips_adapters_ingest_enrich(fake_client, monkeypatch):

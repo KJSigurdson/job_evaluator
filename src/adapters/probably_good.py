@@ -15,15 +15,21 @@ from __future__ import annotations
 
 import re
 
-from src.adapters.base import JobPosting, SourceAdapter
+from src.adapters.base import FetchResult, JobPosting, SourceAdapter
 from src.sources.probablygood import fetch_raw_hits
 
 SOURCE_BOARD = "probably_good"
 
 
 class ProbablyGoodAdapter(SourceAdapter):
-    def fetch(self) -> list[JobPosting]:
-        return parse_hits(fetch_raw_hits())
+    source_board = SOURCE_BOARD
+
+    def fetch(self) -> FetchResult:
+        # No known pagination cap on this source's own Algolia index today
+        # (unaudited — out of scope for the 80k fetch-cap fix) — complete=True
+        # reflects "nothing known to be missing", not a confirmed guarantee.
+        hits = fetch_raw_hits()
+        return FetchResult(postings=parse_hits(hits), fetched=len(hits), nb_hits=None, complete=True)
 
 
 def parse_hits(hits: list[dict]) -> list[JobPosting]:

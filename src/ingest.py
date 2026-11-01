@@ -34,7 +34,18 @@ Dedup has two layers:
      as a job_aliases row pointing at the existing job, NOT a new jobs row — the
      org/title index used for this check is updated as new jobs are decided within
      the SAME run, so two re-posts of a role that both arrive as "new" in one run
-     still correctly resolve to one job + one alias, not two job rows.
+     still correctly resolve to one job + one alias, not two job rows. The MATCHED
+     job's own last_seen is also bumped (see the post-loop alias_matched_job_ids
+     step) — without this, a job only ever rediscovered via alias would never have
+     its own row's last_seen touched at all, and src/closure.py's last_seen-based
+     rules would wrongly treat it as gone.
+
+A canonical_url match whose stored row is status='closed' (see src/closure.py)
+reopens instead of going through the comparisons above: 'enriched' if an
+enrichment already exists (plus reenrich_requested_at if the content ALSO
+changed since closing — same as the real-change branch below), else
+'pending_enrich'. Checked first, before the cross-board/hash comparisons,
+since "it's back" matters more here than which board revived it.
 
 Writes are batched into a small, FIXED number of round trips regardless of pool
 size (the v1 seen-cache lesson: uncapped per-row writes blew the GitHub Actions
@@ -69,32 +80,43 @@ class IngestCounts:
     cross_board: int = 0   # same canonical_url, different source board -> last_seen touch only, no re-enrich
     minor_update: int = 0  # content_hash changed but normalized-text similarity is above threshold -> text
                            # refreshed, no re-enrich (see RE_ENRICH_SIMILARITY_THRESHOLD)
+    reopened: int = 0      # status='closed' seen again -> 'enriched' or 'pending_enrich' (see src/closure.py)
 
     def as_dict(self) -> dict:
         return {
             "ingested": self.ingested, "new": self.new, "updated": self.updated,
             "unchanged": self.unchanged, "aliased": self.aliased,
             "cross_board": self.cross_board, "minor_update": self.minor_update,
+            "reopened": self.reopened,
         }
 
 
-def _fetch_existing_jobs(client) -> tuple[dict[str, dict], dict[str, str]]:
-    """Return (by_canonical_url, by_org_title) — one (possibly paginated) query
-    over `jobs`. source_board is needed to detect a cross-board same-URL
+def _fetch_existing_jobs(client) -> tuple[dict[str, dict], dict[str, str], dict[str, dict]]:
+    """Return (by_canonical_url, by_org_title, by_id) — one (possibly paginated)
+    query over `jobs`. source_board is needed to detect a cross-board same-URL
     collision (see the module docstring's "layer 1" note); raw_description is
     needed to compute normalized-text similarity when content_hash differs (see
-    RE_ENRICH_SIMILARITY_THRESHOLD) — enrichment/embedding are still excluded,
-    not needed by this step. Uses fetch_all(), not a plain .execute(): PostgREST
-    silently truncates a response at db.max_rows (1000) with no error, and an
-    incomplete read here means every row past that cutoff gets wrongly decided
-    "new" on this run — a real duplicate-insert/duplicate-alias bug, not just
-    an incomplete report (confirmed for real once `jobs` crossed 1000 rows)."""
+    RE_ENRICH_SIMILARITY_THRESHOLD). enrichment (presence only, not its
+    contents) decides whether a real content change keeps a job matchable
+    (see the real-change branch below); reenrich_requested_at is read so that
+    branch only ever sets it when it's currently null, never bumping an
+    already-pending request. embedding is still excluded, not needed by this
+    step. by_id (job_id -> row) backs the alias-sighting last_seen bump below
+    — a job matched via org/title (no URL in by_url for IT specifically) still
+    needs its OWN stored row's canonical_url/source_board/content_hash to
+    build that touch-only update. Uses fetch_all(), not a plain .execute():
+    PostgREST silently truncates a response at db.max_rows (1000) with no
+    error, and an incomplete read here means every row past that cutoff gets
+    wrongly decided "new" on this run — a real duplicate-insert/duplicate-alias
+    bug, not just an incomplete report (confirmed for real once `jobs` crossed
+    1000 rows)."""
     rows = fetch_all(client.table("jobs").select(
-        "id,canonical_url,content_hash,org,title,source_board,raw_description"
+        "id,canonical_url,content_hash,org,title,source_board,raw_description,enrichment,reenrich_requested_at,status"
     ))
     by_url = {row["canonical_url"]: row for row in rows}
     by_org_title = {org_title_key(row["org"] or "", row["title"] or ""): row["id"] for row in rows}
-    return by_url, by_org_title
+    by_id = {row["id"]: row for row in rows}
+    return by_url, by_org_title, by_id
 
 
 def ingest(
@@ -112,7 +134,7 @@ def ingest(
     trigger is 'scheduled' or 'manual' (see pipeline_v2.py). Both are optional
     (written as NULL) for standalone/CLI use outside pipeline_v2.
     """
-    by_url, by_org_title = _fetch_existing_jobs(client)
+    by_url, by_org_title, by_id = _fetch_existing_jobs(client)
 
     now = datetime.now(timezone.utc).isoformat()
     counts = IngestCounts()
@@ -130,7 +152,15 @@ def ingest(
     unchanged_updates: dict[str, dict] = {}  # canonical_url -> {canonical_url, source_board, content_hash, last_seen} only
     changed_updates: dict[str, dict] = {}    # canonical_url -> {canonical_url, raw_description, content_hash, last_seen, status}
     minor_updates: dict[str, dict] = {}      # canonical_url -> same shape as changed_updates minus status (no re-enrich)
+    reopened_updates: dict[str, dict] = {}   # canonical_url -> same shape as changed_updates, status='enriched'/'pending_enrich'
+                                              # (never 'closed') — kept separate from changed_updates so this
+                                              # module's counts distinguish a genuine content edit from a revival.
     new_aliases: dict[str, dict] = {}        # alias_url -> {alias_url, job_id, source_board}
+    alias_matched_job_ids: set[str] = set()  # job_ids the alias branch below resolved to this run — see
+                                              # the post-loop last_seen bump: without it, a job only ever
+                                              # seen via alias match (re-posted under a new URL every time)
+                                              # never gets its OWN last_seen touched, and a closure step
+                                              # keyed on last_seen would wrongly treat it as gone stale.
 
     for posting in postings:
         counts.ingested += 1
@@ -142,6 +172,38 @@ def ingest(
 
         existing = by_url.get(canonical)
         if existing is not None:
+            if existing.get("status") == "closed":
+                # Seen again — reopen (see src/closure.py and this module's
+                # docstring). Checked before cross-board/hash comparisons:
+                # "it's back" matters more than which board revived it or
+                # whether the text happens to match what it was closed with.
+                has_enrichment = existing.get("enrichment") is not None
+                content_changed = existing["content_hash"] != this_hash
+                reopen_payload = {
+                    "canonical_url": canonical,
+                    "source_board": posting.source_board,
+                    "raw_description": posting.description,
+                    "location_field": posting.location_field,
+                    "content_hash": this_hash,
+                    "last_seen": now,
+                }
+                if has_enrichment:
+                    reopen_payload["status"] = "enriched"
+                    if content_changed and existing.get("reenrich_requested_at") is None:
+                        reopen_payload["reenrich_requested_at"] = now
+                else:
+                    reopen_payload["status"] = "pending_enrich"
+                reopened_updates[canonical] = reopen_payload
+                counts.reopened += 1
+                board_counts.reopened += 1
+                by_url[canonical] = {
+                    "content_hash": this_hash, "source_board": posting.source_board,
+                    "raw_description": posting.description,
+                    "enrichment": existing.get("enrichment"),
+                    "reenrich_requested_at": reopen_payload.get("reenrich_requested_at", existing.get("reenrich_requested_at")),
+                    "status": reopen_payload["status"],
+                }
+                continue
             if existing["source_board"] != posting.source_board:
                 # Cross-board rediscovery of an already-known job (see module
                 # docstring) — NOT a content update. Leave raw_description/
@@ -162,6 +224,12 @@ def ingest(
                 counts.cross_board += 1
                 board_counts.cross_board += 1
                 continue
+            # Default for the in-memory by_url carry-forward below: unchanged/
+            # minor branches don't touch reenrich_requested_at at all (their
+            # upsert payloads omit the key, so the stored value is untouched),
+            # so the cache should likewise just carry forward whatever's
+            # already there. Only the real-change branch below overrides this.
+            next_reenrich_requested_at = existing.get("reenrich_requested_at")
             if existing["content_hash"] == this_hash:
                 # canonical_url/source_board/content_hash are NOT NULL with no
                 # default — Postgres validates NOT NULL on an upsert's INSERT
@@ -198,25 +266,58 @@ def ingest(
                 counts.minor_update += 1
                 board_counts.minor_update += 1
             else:
-                changed_updates[canonical] = {
+                # A job that's already been successfully enriched once keeps
+                # status='enriched' through a real content change instead of
+                # flipping to pending_enrich — reenrich_requested_at records
+                # that a re-enrich is owed, WITHOUT pulling the job out of
+                # _fetch_enriched_jobs_pool's matching pool for the up-to-
+                # _RE_ENRICH_COOLDOWN_DAYS it takes enrich_jobs.py to actually
+                # get back to it (see that module's selection query). A job
+                # with no enrichment yet (still mid-ingest, never successfully
+                # enriched) has nothing to preserve — pending_enrich as before.
+                # Only set reenrich_requested_at when it's currently null: a
+                # second real change before the first request is even
+                # serviced must not push the cooldown clock out further by
+                # overwriting an earlier request time.
+                has_enrichment = existing.get("enrichment") is not None
+                payload = {
                     "canonical_url": canonical,
                     "source_board": posting.source_board,
                     "raw_description": posting.description,
                     "location_field": posting.location_field,
                     "content_hash": this_hash,
                     "last_seen": now,
-                    "status": "pending_enrich",
                 }
+                if has_enrichment:
+                    payload["status"] = "enriched"
+                    next_reenrich_requested_at = existing.get("reenrich_requested_at") or now
+                    payload["reenrich_requested_at"] = next_reenrich_requested_at
+                else:
+                    payload["status"] = "pending_enrich"
+                    next_reenrich_requested_at = None
+                changed_updates[canonical] = payload
                 unchanged_updates.pop(canonical, None)  # a later "changed" occurrence supersedes an earlier "unchanged"/"minor" one
                 minor_updates.pop(canonical, None)
                 counts.updated += 1
                 board_counts.updated += 1
             # Keep in-memory state current so a THIRD+ occurrence of this same
             # canonical_url later in the batch compares against what this run just
-            # decided, not the original pre-batch Supabase state.
+            # decided, not the original pre-batch Supabase state. enrichment
+            # itself never changes here (ingest never writes it — only
+            # enrich_jobs.py does) so it's always safe to carry forward
+            # unchanged; reenrich_requested_at carries forward whatever this
+            # occurrence's payload just decided, so a third occurrence doesn't
+            # wrongly re-derive has_enrichment=False from a cache entry that
+            # dropped the field.
             by_url[canonical] = {
                 "content_hash": this_hash, "source_board": posting.source_board,
                 "raw_description": posting.description,
+                "enrichment": existing.get("enrichment"),
+                "reenrich_requested_at": next_reenrich_requested_at,
+                # Never 'closed' by this point — the reopen branch above
+                # handles that case with its own `continue` before reaching
+                # here, and none of unchanged/minor/changed ever sets it.
+                "status": existing.get("status"),
             }
             continue
 
@@ -232,6 +333,7 @@ def ingest(
             )
             counts.aliased += 1
             board_counts.aliased += 1
+            alias_matched_job_ids.add(matched_job_id)
             # Deliberately NOT added to by_url: an alias isn't a `jobs` row, so a
             # repeat of this canonical_url later in the batch should fall through
             # this same org/title-match branch again, not be compared against a
@@ -265,16 +367,46 @@ def ingest(
         # guarantees this row exists by the time any such follow-up update runs.
         by_url[canonical] = {
             "content_hash": this_hash, "source_board": posting.source_board,
-            "raw_description": posting.description,
+            "raw_description": posting.description, "enrichment": None,
+            "reenrich_requested_at": None, "status": "pending_enrich",
         }
         counts.new += 1
         board_counts.new += 1
 
+    # Alias-matched jobs get their OWN row's last_seen bumped too — a job only
+    # ever re-discovered via org/title alias (e.g. re-posted under a new URL
+    # every time) would otherwise never have its last_seen touched at all,
+    # since new_aliases only ever writes to job_aliases, never to `jobs`
+    # itself. Deferred to here (after the main loop, not inline in the alias
+    # branch above) so it only ever applies when that job's canonical_url
+    # wasn't ALSO directly touched this run by the URL-match branch above —
+    # that branch's own payload (whichever of changed/minor/unchanged it
+    # landed in) already carries a fresher last_seen and, for the "changed"
+    # case, a content_hash/status transition an alias-bump's stale snapshot
+    # must not clobber. A job_id with no by_id entry is one this run itself
+    # just inserted (new_jobs already stamped it with last_seen=now) — no
+    # action needed.
+    for job_id in alias_matched_job_ids:
+        row = by_id.get(job_id)
+        if row is None:
+            continue
+        own_canonical = row["canonical_url"]
+        if own_canonical in changed_updates or own_canonical in minor_updates or own_canonical in unchanged_updates:
+            continue
+        unchanged_updates[own_canonical] = {
+            "canonical_url": own_canonical,
+            "source_board": row["source_board"],
+            "content_hash": row["content_hash"],
+            "last_seen": now,
+        }
+
     if dry_run:
         log.info(
             "DRY RUN — ingest would write: %d new job(s), %d updated (content changed), %d minor "
-            "(cosmetic, no re-enrich), %d cross-board (no re-enrich), %d unchanged (last_seen touch), %d aliased",
-            counts.new, counts.updated, counts.minor_update, counts.cross_board, counts.unchanged, counts.aliased,
+            "(cosmetic, no re-enrich), %d cross-board (no re-enrich), %d unchanged (last_seen touch), "
+            "%d aliased, %d reopened",
+            counts.new, counts.updated, counts.minor_update, counts.cross_board, counts.unchanged,
+            counts.aliased, counts.reopened,
         )
         return counts
 
@@ -288,6 +420,8 @@ def ingest(
         chunked_upsert(client.table("jobs"), list(changed_updates.values()), on_conflict="canonical_url")
     if minor_updates:
         chunked_upsert(client.table("jobs"), list(minor_updates.values()), on_conflict="canonical_url")
+    if reopened_updates:
+        chunked_upsert(client.table("jobs"), list(reopened_updates.values()), on_conflict="canonical_url")
     if unchanged_updates:
         chunked_upsert(client.table("jobs"), list(unchanged_updates.values()), on_conflict="canonical_url")
     if new_aliases:
@@ -304,9 +438,10 @@ def ingest(
     }).execute()
 
     log.info(
-        "Ingest complete: %d posting(s) -> %d new, %d updated, %d minor, %d cross-board, %d unchanged, %d aliased",
+        "Ingest complete: %d posting(s) -> %d new, %d updated, %d minor, %d cross-board, %d unchanged, "
+        "%d aliased, %d reopened",
         counts.ingested, counts.new, counts.updated, counts.minor_update, counts.cross_board,
-        counts.unchanged, counts.aliased,
+        counts.unchanged, counts.aliased, counts.reopened,
     )
     return counts
 

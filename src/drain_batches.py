@@ -100,7 +100,7 @@ def drain(*, client=None, anthropic_client=None) -> dict:
                 )
                 continue
             # outcome.status == "ended"
-            summary = apply_drained_batch(client, outcome.results, run_id=run_id, trigger="drain")
+            summary = apply_drained_batch(client, outcome.results, batch_id=outcome.batch_id, run_id=run_id, trigger="drain")
             applied[module] = summary
             log.info("drain: applied module %r batch %s -> %s", module, outcome.batch_id, summary)
         return {"run_id": run_id, "applied": applied}

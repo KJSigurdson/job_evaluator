@@ -35,6 +35,7 @@ from src.supabase_client import (
     chunked_upsert,
     fetch_all,
     find_outstanding_batch,
+    mark_batch_results_processed,
     persist_batch_results,
     record_batch_retrieved,
     record_batch_submitted,
@@ -205,7 +206,7 @@ def _batch_request(custom_id: str, prompt: str) -> dict:
 def _run_batch(
     anthropic_client, requests: list[dict], *, client, module: str = _MODULE,
     context_by_custom_id: dict[str, dict] | None = None,
-) -> dict:
+) -> tuple[dict, str]:
     """Submit *requests*, or resume an outstanding batch for *module* if a prior
     run left one — see enrich_jobs.py's identical helper's docstring for the
     full rationale. Persists every raw result to `batch_results` immediately on
@@ -254,7 +255,7 @@ def _run_batch(
         to_persist = results
     persist_batch_results(client, batch_id, to_persist)
     record_batch_retrieved(client, batch_id)
-    return results
+    return results, batch_id
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +314,12 @@ def tier2_enrich(
         ))
         for key, c in by_key.items()
     ]
-    results = _run_batch(anthropic_client, requests, client=client, context_by_custom_id=context_by_key)
+    results, batch_id = _run_batch(anthropic_client, requests, client=client, context_by_custom_id=context_by_key)
     total_api_calls = len(requests)
+    # Maps each key to whichever batch's raw result it came from — marked
+    # processed=True only AFTER the matches_v2 write below commits (this
+    # module, unlike tier1_rerank.py, has a real write to gate the timing on).
+    batch_id_by_key: dict[str, str] = {key: batch_id for key in results}
 
     enriched: dict[str, Tier2EnrichmentOutput] = {}
     failures: dict[str, str] = {}
@@ -342,11 +347,12 @@ def tier2_enrich(
             for key, error in failures.items()
         ]
         retry_context = {key: context_by_key[key] for key in failures}
-        retry_results = _run_batch(
+        retry_results, retry_batch_id = _run_batch(
             anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry",
             context_by_custom_id=retry_context,
         )
         total_api_calls += len(retry_requests)
+        batch_id_by_key.update({key: retry_batch_id for key in retry_results})
 
         still_failing: dict[str, str] = {}
         for key, result in retry_results.items():
@@ -393,6 +399,19 @@ def tier2_enrich(
     ]
     if updates:
         chunked_upsert(client.table("matches_v2"), updates, on_conflict="user_id,job_id")
+
+    # Marked processed=True only now, AFTER the matches_v2 write above commits
+    # — a crash before this point leaves these rows unprocessed and recoverable
+    # via reprocess_staged(), same crash-safety principle as enrich_jobs.py.
+    # Every resolved key (enriched or permanently failed) is marked, same
+    # "resolved, not just succeeded" policy reprocess_staged() already uses.
+    by_batch: dict[str, list[str]] = {}
+    for key in (enriched.keys() | failures.keys()):
+        bid = batch_id_by_key.get(key)
+        if bid is not None:
+            by_batch.setdefault(bid, []).append(key)
+    for bid, keys in by_batch.items():
+        mark_batch_results_processed(client, bid, keys)
 
     log.info(
         "tier2_enrich complete: %d considered, %d skipped (below threshold), %d enriched, %d failed",

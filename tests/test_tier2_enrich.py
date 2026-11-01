@@ -417,6 +417,19 @@ def test_tier2_enrich_stages_context_alongside_raw_result(fake_client):
 
     [staged] = fake_client.table("batch_results").rows
     assert staged["raw"]["llm_result"]["type"] == "succeeded"
+
+
+def test_tier2_enrich_marks_batch_results_processed_after_matches_v2_write(fake_client):
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+
+    run_tier2_enrich(fake_client, anthropic_client, candidates=[_candidate(user_id="u1", job_id="job-1")])
+
+    [staged] = fake_client.table("batch_results").rows
+    assert staged["processed"] is True
+    [match] = fake_client.table("matches_v2").rows
+    assert match["user_id"] == "u1" and match["job_id"] == "job-1"
     assert staged["raw"]["context"]["user_id"] == "u1"
     assert staged["raw"]["context"]["job"]["id"] == "job-1"
     assert staged["raw"]["context"]["tier1_score"] == 80

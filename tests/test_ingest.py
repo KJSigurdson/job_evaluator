@@ -125,14 +125,17 @@ def test_ingest_unchanged_upsert_payload_has_uniform_minimal_keys(fake_client):
 # Same URL, content changed — re-enrich
 # ---------------------------------------------------------------------------
 
-def test_ingest_changed_content_updates_and_resets_status(fake_client):
+def test_ingest_changed_content_with_no_enrichment_yet_resets_status(fake_client):
+    """A job that's never been successfully enriched has nothing worth
+    preserving — real content change still flips it to pending_enrich, same
+    as before this phase's reenrich_requested_at change."""
     p = _posting(description="Updated description text.")
     canonical = normalize_job_url(p.url)
     fake_client.seed("jobs", [{
         "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
         "org": p.org, "title": p.title, "content_hash": content_hash("Old description text."),
-        "raw_description": "Old description text.", "status": "enriched",
-        "enrichment": {"summary": "stale enrichment"},
+        "raw_description": "Old description text.", "status": "pending_enrich",
+        "enrichment": None,
     }])
 
     counts = ingest([p], client=fake_client)
@@ -142,9 +145,56 @@ def test_ingest_changed_content_updates_and_resets_status(fake_client):
     assert row["status"] == "pending_enrich"
     assert row["raw_description"] == "Updated description text."
     assert row["content_hash"] == content_hash("Updated description text.")
+    assert row.get("reenrich_requested_at") is None
+
+
+def test_ingest_changed_content_with_existing_enrichment_stays_matchable(fake_client):
+    """A job that's already been successfully enriched once keeps
+    status='enriched' through a real content change instead of dropping out
+    of the matching pool for up to _RE_ENRICH_COOLDOWN_DAYS — it just gets
+    reenrich_requested_at stamped so enrich_jobs.py knows a re-enrich is
+    owed (see src/enrich_jobs.py's selection query)."""
+    p = _posting(description="Updated description text.")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("Old description text."),
+        "raw_description": "Old description text.", "status": "enriched",
+        "enrichment": {"summary": "stale enrichment"}, "reenrich_requested_at": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, updated=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    assert row["raw_description"] == "Updated description text."
+    assert row["content_hash"] == content_hash("Updated description text.")
+    assert row["reenrich_requested_at"] is not None
     # enrichment itself isn't cleared by ingest — the enrich worker overwrites it
     # once it re-processes this job; the upsert payload never references that key.
     assert row["enrichment"] == {"summary": "stale enrichment"}
+
+
+def test_ingest_changed_content_does_not_rebump_existing_reenrich_request(fake_client):
+    """A second real content change before enrich_jobs.py ever services the
+    first request must not push the cooldown clock out further by
+    overwriting the original request timestamp."""
+    p = _posting(description="Second updated description.")
+    canonical = normalize_job_url(p.url)
+    original_request_time = "2026-10-01T00:00:00+00:00"
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("First updated description."),
+        "raw_description": "First updated description.", "status": "enriched",
+        "enrichment": {"summary": "stale enrichment"}, "reenrich_requested_at": original_request_time,
+    }])
+
+    ingest([p], client=fake_client)
+
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    assert row["reenrich_requested_at"] == original_request_time
 
 
 def test_ingest_changed_upsert_payload_never_references_enrichment_fields(fake_client):
@@ -183,6 +233,25 @@ def test_ingest_org_title_match_creates_alias_not_new_job(fake_client):
     assert aliases[0]["job_id"] == "job-1"
     assert aliases[0]["alias_url"] == normalize_job_url(p.url)
     assert aliases[0]["source_board"] == "80000_hours"
+
+
+def test_ingest_org_title_match_bumps_canonical_jobs_last_seen(fake_client):
+    """A job only ever re-discovered via org/title alias (e.g. re-posted under
+    a new URL every run) must still have its OWN row's last_seen touched —
+    otherwise a closure step keyed on last_seen would wrongly treat it as
+    gone stale even though it's clearly still live (see this module's
+    post-loop alias_matched_job_ids bump)."""
+    p = _posting(url="https://otherboard.example.org/repost-of-head-of-data")
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": "https://jobs.80000hours.org/head-of-data",
+        "source_board": "80000_hours", "org": "GiveDirectly", "title": "Head of Data",
+        "content_hash": "irrelevant", "last_seen": "2026-01-01T00:00:00+00:00",
+    }])
+
+    ingest([p], client=fake_client)
+
+    [row] = [r for r in fake_client.table("jobs").rows if r["id"] == "job-1"]
+    assert row["last_seen"] != "2026-01-01T00:00:00+00:00"
 
 
 def test_ingest_org_title_match_is_case_and_whitespace_insensitive(fake_client):
@@ -467,3 +536,80 @@ def test_ingest_dry_run_computes_full_counts_across_all_paths(fake_client):
     assert counts == IngestCounts(ingested=4, new=1, updated=1, unchanged=1, aliased=1)
     assert len(fake_client.table("jobs").rows) == 3  # still just the 3 seeded rows — no writes happened
     assert fake_client.table("job_aliases").rows == []
+
+
+# ---------------------------------------------------------------------------
+# Reopening a closed job (see src/closure.py)
+# ---------------------------------------------------------------------------
+
+def test_ingest_reopens_closed_job_with_enrichment_to_enriched(fake_client):
+    p = _posting()
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "closed",
+        "enrichment": {"summary": "still good"}, "reenrich_requested_at": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, reopened=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    # Content unchanged from when it closed — nothing new to re-enrich.
+    assert row.get("reenrich_requested_at") is None
+
+
+def test_ingest_reopens_closed_job_with_enrichment_and_changed_content_flags_reenrich(fake_client):
+    p = _posting(description="Updated description since closing.")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("Old description."),
+        "raw_description": "Old description.", "status": "closed",
+        "enrichment": {"summary": "stale"}, "reenrich_requested_at": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, reopened=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    assert row["reenrich_requested_at"] is not None
+
+
+def test_ingest_reopens_closed_job_with_no_enrichment_to_pending_enrich(fake_client):
+    """A job closed before it was ever successfully enriched has nothing to
+    preserve — reopens straight to pending_enrich, same as a never-enriched
+    job's real-content-change branch."""
+    p = _posting()
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "closed", "enrichment": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, reopened=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "pending_enrich"
+
+
+def test_ingest_open_job_unaffected_by_reopen_branch(fake_client):
+    """Sanity check: a normal, still-open job must never be counted as
+    reopened — the branch is gated strictly on status == 'closed'."""
+    p = _posting()
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "enriched", "enrichment": {"summary": "x"},
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts.reopened == 0
+    assert counts.unchanged == 1

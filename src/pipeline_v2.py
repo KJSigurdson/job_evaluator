@@ -7,10 +7,18 @@ Usage:
 
 No --only-user-id (scheduled/cron mode) — the full pipeline:
     1. Active adapters (see _ADAPTER_REGISTRY — currently 80k, ProbablyGood;
-       IAP disabled) -> ingest.ingest() (dedup/alias into `jobs`).
-    2. enrich_jobs.enrich_jobs() — only status='pending_enrich' rows (new or
-       content-changed); steady-state stays small by design (the shared jobs
-       pool persists across runs, unlike v1's fresh-scrape-every-day model).
+       IAP disabled) -> ingest.ingest() (dedup/alias into `jobs`). Each
+       adapter's fetch-completeness is logged to `source_fetch_log`
+       (src.adapters.base.FetchResult) regardless of success/failure —
+       src.closure.close_jobs() reads this, but is NOT called from here yet
+       (Phase 1 shipped it report-only; wire-in is pending a review of a few
+       days' worth of source_fetch_log + refreshed last_seen history).
+    2. enrich_jobs.enrich_jobs() — status='pending_enrich' rows (new or
+       content-changed with no enrichment yet) PLUS status='enriched' rows
+       with reenrich_requested_at set (content changed again after a prior
+       successful enrichment — see ingest.ingest()'s real-change branch);
+       steady-state stays small by design (the shared jobs pool persists
+       across runs, unlike v1's fresh-scrape-every-day model).
     3. profile_embed.backfill_profile_embeddings() — only hash-changed profiles.
     4. Per active user with a complete profile: gate_v2 -> vector top-N
        (src.match_v2.TOP_N) -> Tier 1 -> Tier 2 -> matches_v2, excluding jobs
@@ -337,13 +345,36 @@ def run(
             log.info("Adapters active: %s | skipped (disabled): %s", active_names, skipped_names)
 
             postings = []
+            fetch_log_rows = []
             for adapter_cls in _ADAPTERS:
+                adapter = adapter_cls()
+                fetched_at = datetime.now(timezone.utc).isoformat()
                 try:
-                    fetched = adapter_cls().fetch()
-                    postings.extend(fetched)
-                    log.info("Adapter %s fetched %d posting(s)", adapter_cls.__name__, len(fetched))
+                    result = adapter.fetch()
+                    postings.extend(result.postings)
+                    fetch_log_rows.append({
+                        "run_id": run_id, "source_board": adapter.source_board,
+                        "fetched": result.fetched, "nb_hits": result.nb_hits,
+                        "complete": result.complete, "fetched_at": fetched_at,
+                    })
+                    log.info(
+                        "Adapter %s fetched %d posting(s) (fetched=%d, nb_hits=%s, complete=%s)",
+                        adapter_cls.__name__, len(result.postings), result.fetched, result.nb_hits, result.complete,
+                    )
                 except Exception:
                     log.exception("Adapter %s failed to fetch — skipping this source", adapter_cls.__name__)
+                    fetch_log_rows.append({
+                        "run_id": run_id, "source_board": adapter.source_board,
+                        "fetched": 0, "nb_hits": None, "complete": False, "fetched_at": fetched_at,
+                    })
+
+            # source_fetch_log row per adapter per run, even on failure (see
+            # FetchResult's docstring) — written here, not inside ingest.py,
+            # since fetch-completeness is a property of the ADAPTER call, not
+            # of ingest()'s dedup step. Skipped in dry_run, same convention as
+            # every other write in this module.
+            if fetch_log_rows and not dry_run:
+                client.table("source_fetch_log").insert(fetch_log_rows).execute()
 
             ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
             ingest_counts = ingest_counts_obj.as_dict()

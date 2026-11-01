@@ -13,15 +13,20 @@ as JobPosting.description rather than left empty.
 """
 from __future__ import annotations
 
-from src.adapters.base import JobPosting, SourceAdapter
+from src.adapters.base import FetchResult, JobPosting, SourceAdapter
 from src.sources.iap import RawRow, fetch_raw_rows
 
 SOURCE_BOARD = "iap"
 
 
 class IAPAdapter(SourceAdapter):
-    def fetch(self) -> list[JobPosting]:
-        return parse_rows(fetch_raw_rows())
+    source_board = SOURCE_BOARD
+
+    def fetch(self) -> FetchResult:
+        # A Sheets read has no "total available" concept to compare against —
+        # nb_hits=None, complete=True (nothing known to be missing).
+        rows = fetch_raw_rows()
+        return FetchResult(postings=parse_rows(rows), fetched=len(rows), nb_hits=None, complete=True)
 
 
 def parse_rows(rows: list[RawRow]) -> list[JobPosting]:

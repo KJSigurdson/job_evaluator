@@ -323,6 +323,17 @@ def test_rerank_tier1_persists_raw_results_before_parsing(fake_client):
     assert staged["raw"]["type"] == "succeeded"
 
 
+def test_rerank_tier1_marks_batch_results_processed_after_parsing(fake_client):
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+
+    rerank_tier1(fake_client, anthropic_client, users=_users_input())
+
+    [staged] = fake_client.table("batch_results").rows
+    assert staged["processed"] is True
+
+
 def test_rerank_tier1_resumes_outstanding_batch_instead_of_resubmitting(fake_client):
     fake_client.seed("batch_submissions", [{"batch_id": "orphaned_batch", "module": "tier1_rerank", "status": "submitted"}])
     anthropic_client = _FakeAnthropicClient(rounds=[])

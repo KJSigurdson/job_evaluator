@@ -525,6 +525,67 @@ def test_enrich_jobs_selects_job_enriched_past_cooldown(fake_client, monkeypatch
     assert summary == {"status": "complete", "selected": 1, "enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
 
 
+# ---------------------------------------------------------------------------
+# reenrich_requested_at selection — status='enriched' jobs that ingest.py's
+# real-content-change branch flagged for re-enrich without ever leaving the
+# matching pool (see that module). Selected alongside status='pending_enrich'
+# rows, subject to the SAME cooldown deferral.
+# ---------------------------------------------------------------------------
+
+def test_enrich_jobs_selects_enriched_job_with_reenrich_requested_past_cooldown(fake_client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    stale_enrich = (datetime.now(timezone.utc) - timedelta(days=8)).isoformat()
+    fake_client.seed("jobs", [_job_row(
+        "job-1", status="enriched", enriched_at=stale_enrich, reenrich_requested_at=stale_enrich,
+        enrichment={"summary": "old"},
+    )])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"status": "complete", "selected": 1, "enriched": 1, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
+    row = fake_client.table("jobs").rows[0]
+    assert row["status"] == "enriched"
+    # Successful re-enrichment clears the request — satisfied, nothing owed.
+    assert row["reenrich_requested_at"] is None
+
+
+def test_enrich_jobs_defers_enriched_job_with_reenrich_requested_within_cooldown(fake_client, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    fake_client.seed("jobs", [_job_row(
+        "job-1", status="enriched", enriched_at=recent, reenrich_requested_at=recent,
+        enrichment={"summary": "old"},
+    )])
+    anthropic_client = _FakeAnthropicClient(rounds=[])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 1}
+    # Stays matchable the whole time it's deferred — this is the whole point.
+    assert fake_client.table("jobs").rows[0]["status"] == "enriched"
+
+
+def test_enrich_jobs_ignores_enriched_job_with_no_reenrich_requested(fake_client, monkeypatch):
+    """status='enriched' with reenrich_requested_at still null is a normal,
+    already-settled job — must not be reselected just because it exists."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row(
+        "job-1", status="enriched", reenrich_requested_at=None, enrichment={"summary": "old"},
+    )])
+    anthropic_client = _FakeAnthropicClient(rounds=[])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    assert summary == {"status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0, "embeddings_skipped": True, "deferred": 0}
+
+
 def test_enrich_jobs_never_enriched_job_is_not_deferred(fake_client, monkeypatch):
     """enriched_at=None (never enriched, e.g. brand new) must never be deferred —
     the cooldown only applies to jobs that have actually been enriched before."""
@@ -650,6 +711,74 @@ def test_enrich_jobs_writes_run_metrics_with_cost_from_actual_usage(fake_client,
     assert metrics["jobs_enriched"] == 1
     assert metrics["enrichment_calls"] == 1
     assert metrics["estimated_cost_usd"] > 0
+
+
+def test_enrich_jobs_run_metrics_counts_enriched_jobs_missing_embedding(fake_client, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    fake_client.seed("jobs", [_job_row()])
+    # Two pre-existing jobs already enriched, already missing an embedding
+    # (e.g. enriched before VOYAGE_API_KEY existed) — the backlog this metric
+    # is meant to surface. A third, non-enriched job must not be counted.
+    fake_client.seed("jobs", [
+        {"id": "old-1", "canonical_url": "https://x/1", "source_board": "80000_hours",
+         "content_hash": "h1", "status": "enriched", "embedding": None},
+        {"id": "old-2", "canonical_url": "https://x/2", "source_board": "80000_hours",
+         "content_hash": "h2", "status": "enriched", "embedding": None},
+        {"id": "old-3", "canonical_url": "https://x/3", "source_board": "80000_hours",
+         "content_hash": "h3", "status": "stale", "embedding": None},
+    ])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["enriched_without_embedding"] == 2
+
+
+def test_enrich_jobs_backfills_missing_embeddings_as_part_of_the_enrich_stage(fake_client, monkeypatch):
+    """The enrich stage must clear any pre-existing embedding backlog itself
+    (not require a separate manual backfill_embeddings() call) — and
+    run_metrics.enriched_without_embedding must reflect that same-run
+    backfill, not the stale pre-backfill count."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(enrich_jobs, "embed_texts", lambda texts: [[0.1] * 1024 for _ in texts])
+    fake_client.seed("jobs", [_job_row()])
+    fake_client.seed("jobs", [
+        {"id": "old-1", "canonical_url": "https://x/1", "source_board": "80000_hours",
+         "content_hash": "h1", "status": "enriched", "embedding": None,
+         "title": "Old Role", "enrichment": {"summary": "an old enrichment"}},
+    ])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    old_row = next(r for r in fake_client.table("jobs").rows if r["id"] == "old-1")
+    assert old_row["embedding"] == [0.1] * 1024
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["enriched_without_embedding"] == 0
+
+
+def test_enrich_jobs_backfills_missing_embeddings_even_with_no_pending_backlog(fake_client, monkeypatch):
+    """The "nothing to enrich today" path must still clear an existing
+    embedding backlog — otherwise a day with an empty pending_enrich/
+    reenrich_requested backlog would leave it unaddressed indefinitely."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+    monkeypatch.setattr(enrich_jobs, "embed_texts", lambda texts: [[0.1] * 1024 for _ in texts])
+    fake_client.seed("jobs", [
+        {"id": "old-1", "canonical_url": "https://x/1", "source_board": "80000_hours",
+         "content_hash": "h1", "status": "enriched", "embedding": None,
+         "title": "Old Role", "enrichment": {"summary": "an old enrichment"}},
+    ])
+
+    summary = run_enrich_jobs(client=fake_client, anthropic_client=_FakeAnthropicClient(rounds=[]))
+
+    assert summary == {"status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0, "embeddings_skipped": False, "deferred": 0}
+    old_row = fake_client.table("jobs").rows[0]
+    assert old_row["embedding"] == [0.1] * 1024
 
 
 def test_enrich_jobs_run_metrics_stamped_with_run_id_stage_trigger(fake_client, monkeypatch):
@@ -833,6 +962,7 @@ def test_enrich_jobs_enriched_and_stale_updates_are_separate_upsert_calls(fake_c
     stale_call = next(c for c in upsert_calls if "enrichment" not in c[0])
     assert set(enriched_call[0].keys()) == {
         "id", "canonical_url", "source_board", "content_hash", "enrichment", "embedding", "enriched_at", "status",
+        "reenrich_requested_at",
     }
     assert set(stale_call[0].keys()) == {"id", "canonical_url", "source_board", "content_hash", "status"}
 
@@ -887,7 +1017,11 @@ def test_enrich_jobs_persists_raw_results_before_parsing(fake_client, monkeypatc
     [staged] = fake_client.table("batch_results").rows
     assert staged["custom_id"] == "job-1"
     assert staged["raw"]["type"] == "succeeded"
-    assert staged["processed"] is False  # left as staged — this module's own tables don't mark it processed
+    # Marked processed=True once the `jobs` write that applied it has committed
+    # — see mark_batch_results_processed(); staying False here would mean a
+    # fully-applied result is indistinguishable from one an incomplete run
+    # never got to.
+    assert staged["processed"] is True
 
 
 def test_enrich_jobs_resumes_outstanding_batch_instead_of_resubmitting(fake_client, monkeypatch):

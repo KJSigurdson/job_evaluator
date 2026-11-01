@@ -129,6 +129,29 @@ def find_outstanding_batch(client, module: str) -> str | None:
     return rows[0]["batch_id"]
 
 
+def mark_batch_results_processed(client, batch_id: str, custom_ids: list[str], *, chunk_size: int = _WRITE_CHUNK_SIZE) -> None:
+    """Mark batch_results rows (batch_id, custom_id) as processed=True. Called by
+    each Batches-API module's LIVE path once the corresponding downstream write
+    (or, for a module with no further write of its own, parsing) has safely
+    committed — mirroring the timing each module's reprocess_staged() recovery
+    path already uses when marking its own staged rows. Plain UPDATE, not
+    upsert: these rows already exist (persist_batch_results wrote them at
+    retrieval time), so there's no NOT-NULL-on-insert-branch concern here —
+    only `processed` needs to change.
+
+    Without this, every live-path success leaves its batch_results row
+    indistinguishable from one an incomplete run never got to apply — confirmed
+    for real against production: every batch_results row inspected had
+    processed=False regardless of outcome, including rows from months-old,
+    fully successful enrichments, because only reprocess_staged() ever set this
+    column.
+    """
+    for i in range(0, len(custom_ids), chunk_size):
+        chunk = custom_ids[i:i + chunk_size]
+        if chunk:
+            client.table("batch_results").update({"processed": True}).eq("batch_id", batch_id).in_("custom_id", chunk).execute()
+
+
 def persist_batch_results(client, batch_id: str, results: dict) -> None:
     """Persist every raw batch result for *batch_id* to batch_results,
     immediately on retrieval — before any parsing/validation/DB-write risk.

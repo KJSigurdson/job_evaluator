@@ -16,15 +16,26 @@ from __future__ import annotations
 
 import re
 
-from src.adapters.base import JobPosting, SourceAdapter
-from src.sources.eightyk import fetch_raw_hits
+from src.adapters.base import FetchResult, JobPosting, SourceAdapter
+from src.sources.eightyk import fetch_raw_hits_bucketed
 
 SOURCE_BOARD = "80000_hours"
 
 
 class EightyThousandHoursAdapter(SourceAdapter):
-    def fetch(self) -> list[JobPosting]:
-        return parse_hits(fetch_raw_hits())
+    source_board = SOURCE_BOARD
+
+    def fetch(self) -> FetchResult:
+        # fetch_raw_hits_bucketed(), not fetch_raw_hits() — the plain query
+        # silently drops postings past Algolia's paginationLimitedTo cliff
+        # once the index exceeds 1000 hits (confirmed against production:
+        # nbHits=1015, nbPages=1, page=1 empty). v1's own fetch() still calls
+        # fetch_raw_hits() directly, unaffected by this.
+        result = fetch_raw_hits_bucketed()
+        return FetchResult(
+            postings=parse_hits(result.hits), fetched=result.fetched,
+            nb_hits=result.nb_hits, complete=result.complete,
+        )
 
 
 def parse_hits(hits: list[dict]) -> list[JobPosting]:
