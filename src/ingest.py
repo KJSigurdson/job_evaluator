@@ -7,19 +7,31 @@ pipeline_run_users), and v1's own pipeline.py is not called from here.
 Dedup has two layers:
   1. Exact canonical_url match (after job_normalize.normalize_job_url) -> the same
      posting seen again.
-       - Different source_board than what's stored: this is a cross-board
-         rediscovery of an already-known job (the same posting legitimately
-         cross-listed on two boards under one URL), NOT a content update — each
-         board formats `description` completely differently (80k/ProbablyGood:
-         LLM-prose bullets; IAP: a terse "org | title | location | comp |
-         cause_area" string), so comparing content_hash across boards here would
-         flag nearly every shared posting as "changed" every single run forever,
-         regardless of whether the posting itself ever changed (confirmed for
-         real: 314/827 of one board's postings on a single day resolved to a
-         `jobs` row already stamped with a DIFFERENT source_board, entirely
-         explaining that day's ~320 "updated" count). Only last_seen is touched;
-         raw_description/content_hash/source_board are left as whichever board's
-         version is already stored.
+       - Different source_board than what's stored, and NEITHER board is
+         restricted (see _RESTRICTED_SOURCE_BOARDS), or BOTH are: this is a
+         cross-board rediscovery of an already-known job (the same posting
+         legitimately cross-listed on two boards under one URL), NOT a content
+         update — each board formats `description` completely differently
+         (80k/ProbablyGood: LLM-prose bullets; IAP: a terse "org | title |
+         location | comp | cause_area" string), so comparing content_hash
+         across boards here would flag nearly every shared posting as
+         "changed" every single run forever, regardless of whether the
+         posting itself ever changed (confirmed for real: 314/827 of one
+         board's postings on a single day resolved to a `jobs` row already
+         stamped with a DIFFERENT source_board, entirely explaining that
+         day's ~320 "updated" count). Only last_seen is touched;
+         raw_description/content_hash/source_board are left as whichever
+         board's version is already stored.
+       - Different source_board, and the STORED board is restricted while the
+         INCOMING one isn't: a permitted board's sighting of a URL currently
+         attributed to a restricted board always wins — the stored
+         raw_description/content_hash/source_board are overwritten with the
+         incoming (permitted) posting's, same enrichment-preserving status
+         logic as a same-board real content change below (confirmed live:
+         72 of 85 still-active IAP-sourced jobs also appear, same URL, in
+         80k's current feed — IAP simply got ingested first, historically,
+         and nothing until now ever let a later permitted-board sighting
+         correct that).
        - Same source_board, same content_hash -> just touch last_seen.
        - Same source_board, different content_hash -> a real same-source change.
          If the normalized-text similarity to the stored text is still at/above
@@ -30,15 +42,24 @@ Dedup has two layers:
   2. No URL match, but (normalized org, normalized title) matches an existing job
      (dedup.org_title_key — the same key the v1 pipeline already uses for its own
      re-post fallback) -> this is very likely the same role re-posted under a new
-     URL (a fresh listing, a redirected/renamed board URL, cross-posting). Recorded
-     as a job_aliases row pointing at the existing job, NOT a new jobs row — the
-     org/title index used for this check is updated as new jobs are decided within
-     the SAME run, so two re-posts of a role that both arrive as "new" in one run
-     still correctly resolve to one job + one alias, not two job rows. The MATCHED
-     job's own last_seen is also bumped (see the post-loop alias_matched_job_ids
-     step) — without this, a job only ever rediscovered via alias would never have
-     its own row's last_seen touched at all, and src/closure.py's last_seen-based
-     rules would wrongly treat it as gone.
+     URL (a fresh listing, a redirected/renamed board URL, cross-posting).
+       - If the matched job's stored board is restricted and the incoming
+         posting's board isn't: same "permitted wins" precedence as above, but
+         the URL itself also changed, so this ALSO re-points the job's
+         canonical_url to the incoming (permitted) URL and demotes the OLD
+         (restricted-board) URL to a job_aliases row instead of the reverse —
+         the matched job keeps its id (so matches_v2/batch_results references
+         stay valid), only canonical_url/source_board/raw_description/
+         content_hash/location_field change.
+       - Otherwise: recorded as a job_aliases row pointing at the existing job,
+         NOT a new jobs row — the org/title index used for this check is
+         updated as new jobs are decided within the SAME run, so two re-posts
+         of a role that both arrive as "new" in one run still correctly
+         resolve to one job + one alias, not two job rows. The MATCHED job's
+         own last_seen is also bumped (see the post-loop alias_matched_job_ids
+         step) — without this, a job only ever rediscovered via alias would
+         never have its own row's last_seen touched at all, and
+         src/closure.py's last_seen-based rules would wrongly treat it as gone.
 
 A canonical_url match whose stored row is status='closed' (see src/closure.py)
 reopens instead of going through the comparisons above: 'enriched' if an
@@ -69,6 +90,15 @@ from src.supabase_client import chunked_insert, chunked_upsert, fetch_all
 
 log = logging.getLogger(__name__)
 
+# Boards True North isn't permitted to pull postings' CONTENT from going
+# forward (the board itself may still legitimately be the one that first
+# surfaced a given URL/org-title, historically) — a permitted board's
+# sighting of the same job always overrides a restricted board's stored
+# version, never the other way round. IAP specifically: the referral sheet
+# is fine to use for discovery/dedup, just not as the board of record for a
+# job's own description once a permitted board also carries it.
+_RESTRICTED_SOURCE_BOARDS = frozenset({"iap"})
+
 
 @dataclass
 class IngestCounts:
@@ -77,17 +107,20 @@ class IngestCounts:
     updated: int = 0       # content changed (same source board) -> re-enrich
     unchanged: int = 0     # same content -> last_seen touch only
     aliased: int = 0
-    cross_board: int = 0   # same canonical_url, different source board -> last_seen touch only, no re-enrich
+    cross_board: int = 0   # same canonical_url, different source board, neither/both restricted -> last_seen
+                           # touch only, no re-enrich
     minor_update: int = 0  # content_hash changed but normalized-text similarity is above threshold -> text
                            # refreshed, no re-enrich (see RE_ENRICH_SIMILARITY_THRESHOLD)
     reopened: int = 0      # status='closed' seen again -> 'enriched' or 'pending_enrich' (see src/closure.py)
+    board_upgraded: int = 0  # a permitted board's sighting overrode a restricted board's stored version
+                             # (same URL or, via org/title match, a different one) -> re-enrich queued
 
     def as_dict(self) -> dict:
         return {
             "ingested": self.ingested, "new": self.new, "updated": self.updated,
             "unchanged": self.unchanged, "aliased": self.aliased,
             "cross_board": self.cross_board, "minor_update": self.minor_update,
-            "reopened": self.reopened,
+            "reopened": self.reopened, "board_upgraded": self.board_upgraded,
         }
 
 
@@ -156,6 +189,14 @@ def ingest(
                                               # (never 'closed') — kept separate from changed_updates so this
                                               # module's counts distinguish a genuine content edit from a revival.
     new_aliases: dict[str, dict] = {}        # alias_url -> {alias_url, job_id, source_board}
+    board_upgrade_by_id: dict[str, dict] = {}  # job_id -> {id, canonical_url, source_board, raw_description,
+                                                # location_field, content_hash, last_seen, status,
+                                                # reenrich_requested_at?} — a permitted board's org/title match
+                                                # against a restricted-board-sourced job re-points that job's
+                                                # OWN canonical_url, unlike every other bucket here which is
+                                                # keyed by canonical_url and upserted on_conflict="canonical_url"
+                                                # (this one is upserted on_conflict="id" instead, since the url
+                                                # itself is what's changing).
     alias_matched_job_ids: set[str] = set()  # job_ids the alias branch below resolved to this run — see
                                               # the post-loop last_seen bump: without it, a job only ever
                                               # seen via alias match (re-posted under a new URL every time)
@@ -205,14 +246,55 @@ def ingest(
                 }
                 continue
             if existing["source_board"] != posting.source_board:
+                existing_restricted = existing["source_board"] in _RESTRICTED_SOURCE_BOARDS
+                incoming_restricted = posting.source_board in _RESTRICTED_SOURCE_BOARDS
+                if existing_restricted and not incoming_restricted:
+                    # A permitted board's sighting of a URL currently
+                    # attributed to a restricted board — permitted always
+                    # wins (see module docstring and src/ingest.py's
+                    # _RESTRICTED_SOURCE_BOARDS). Same URL, so this is really
+                    # just "whose description do we trust", not a URL
+                    # change — treated exactly like a same-board real
+                    # content change below, using the incoming posting's
+                    # data, just across a board boundary.
+                    has_enrichment = existing.get("enrichment") is not None
+                    board_upgrade_payload = {
+                        "canonical_url": canonical,
+                        "source_board": posting.source_board,
+                        "raw_description": posting.description,
+                        "location_field": posting.location_field,
+                        "content_hash": this_hash,
+                        "last_seen": now,
+                    }
+                    if has_enrichment:
+                        board_upgrade_payload["status"] = "enriched"
+                        board_upgrade_payload["reenrich_requested_at"] = existing.get("reenrich_requested_at") or now
+                    else:
+                        board_upgrade_payload["status"] = "pending_enrich"
+                    changed_updates[canonical] = board_upgrade_payload
+                    unchanged_updates.pop(canonical, None)
+                    minor_updates.pop(canonical, None)
+                    counts.board_upgraded += 1
+                    board_counts.board_upgraded += 1
+                    by_url[canonical] = {
+                        "content_hash": this_hash, "source_board": posting.source_board,
+                        "raw_description": posting.description,
+                        "enrichment": existing.get("enrichment"),
+                        "reenrich_requested_at": board_upgrade_payload.get("reenrich_requested_at"),
+                        "status": board_upgrade_payload["status"],
+                    }
+                    continue
                 # Cross-board rediscovery of an already-known job (see module
-                # docstring) — NOT a content update. Leave raw_description/
-                # content_hash/source_board as whichever board's version is
-                # already stored; only touch last_seen. Deliberately does NOT
-                # update the in-memory by_url cache below (this row's stored
-                # state didn't change), so a later occurrence of this same URL
-                # from yet another board in this same batch still compares
-                # against the original stored owner, not this posting.
+                # docstring) — NOT a content update: neither board is
+                # restricted, or both are (vacuously, with today's single
+                # restricted board, this is just "neither"). Leave
+                # raw_description/content_hash/source_board as whichever
+                # board's version is already stored; only touch last_seen.
+                # Deliberately does NOT update the in-memory by_url cache
+                # below (this row's stored state didn't change), so a later
+                # occurrence of this same URL from yet another board in this
+                # same batch still compares against the original stored
+                # owner, not this posting.
                 unchanged_updates[canonical] = {
                     "canonical_url": canonical,
                     "source_board": existing["source_board"],
@@ -324,6 +406,59 @@ def ingest(
         key = org_title_key(posting.org, posting.title)
         matched_job_id = by_org_title.get(key)
         if matched_job_id is not None:
+            matched_row = by_id.get(matched_job_id)
+            matched_restricted = matched_row is not None and matched_row.get("source_board") in _RESTRICTED_SOURCE_BOARDS
+            incoming_restricted = posting.source_board in _RESTRICTED_SOURCE_BOARDS
+            if matched_restricted and not incoming_restricted:
+                # Permitted board's org/title match against a job whose
+                # CANONICAL row is currently attributed to a restricted
+                # board — same "permitted always wins" precedence as the
+                # direct-URL case above, but the URL itself ALSO changes
+                # here: re-point canonical_url to the incoming (permitted)
+                # URL and demote the OLD (restricted-board) URL to a
+                # job_aliases row instead of the reverse. The job keeps its
+                # id, so matches_v2/batch_results references stay valid.
+                has_enrichment = matched_row.get("enrichment") is not None
+                old_canonical_url = matched_row["canonical_url"]
+                board_upgrade_payload = {
+                    "id": matched_job_id,
+                    "canonical_url": canonical,
+                    "source_board": posting.source_board,
+                    "raw_description": posting.description,
+                    "location_field": posting.location_field,
+                    "content_hash": this_hash,
+                    "last_seen": now,
+                }
+                if has_enrichment:
+                    board_upgrade_payload["status"] = "enriched"
+                    board_upgrade_payload["reenrich_requested_at"] = matched_row.get("reenrich_requested_at") or now
+                else:
+                    board_upgrade_payload["status"] = "pending_enrich"
+                board_upgrade_by_id[matched_job_id] = board_upgrade_payload
+                new_aliases[old_canonical_url] = {
+                    "alias_url": old_canonical_url, "job_id": matched_job_id,
+                    "source_board": matched_row["source_board"],
+                }
+                log.info(
+                    "Board-upgrading job %s: %r @ %r now sourced from %s (was %s)",
+                    matched_job_id, posting.title, posting.org, posting.source_board, matched_row["source_board"],
+                )
+                counts.board_upgraded += 1
+                board_counts.board_upgraded += 1
+                # Keep by_id/by_url consistent for a possible THIRD+
+                # occurrence of this org/title key later in this same run —
+                # the job is no longer on a restricted board.
+                by_id[matched_job_id] = {
+                    **matched_row, "canonical_url": canonical, "source_board": posting.source_board,
+                    "content_hash": this_hash,
+                }
+                by_url[canonical] = {
+                    "content_hash": this_hash, "source_board": posting.source_board,
+                    "raw_description": posting.description, "enrichment": matched_row.get("enrichment"),
+                    "reenrich_requested_at": board_upgrade_payload.get("reenrich_requested_at"),
+                    "status": board_upgrade_payload["status"],
+                }
+                continue
             new_aliases[canonical] = {
                 "alias_url": canonical, "job_id": matched_job_id, "source_board": posting.source_board,
             }
@@ -404,9 +539,9 @@ def ingest(
         log.info(
             "DRY RUN — ingest would write: %d new job(s), %d updated (content changed), %d minor "
             "(cosmetic, no re-enrich), %d cross-board (no re-enrich), %d unchanged (last_seen touch), "
-            "%d aliased, %d reopened",
+            "%d aliased, %d reopened, %d board-upgraded",
             counts.new, counts.updated, counts.minor_update, counts.cross_board, counts.unchanged,
-            counts.aliased, counts.reopened,
+            counts.aliased, counts.reopened, counts.board_upgraded,
         )
         return counts
 
@@ -418,6 +553,12 @@ def ingest(
         chunked_insert(client.table("jobs"), new_jobs)
     if changed_updates:
         chunked_upsert(client.table("jobs"), list(changed_updates.values()), on_conflict="canonical_url")
+    if board_upgrade_by_id:
+        # on_conflict="id", not "canonical_url" — this bucket changes a
+        # job's canonical_url itself, so the conflict target has to be the
+        # column that ISN'T changing (see board_upgrade_by_id's own comment
+        # at declaration).
+        chunked_upsert(client.table("jobs"), list(board_upgrade_by_id.values()), on_conflict="id")
     if minor_updates:
         chunked_upsert(client.table("jobs"), list(minor_updates.values()), on_conflict="canonical_url")
     if reopened_updates:
@@ -439,9 +580,9 @@ def ingest(
 
     log.info(
         "Ingest complete: %d posting(s) -> %d new, %d updated, %d minor, %d cross-board, %d unchanged, "
-        "%d aliased, %d reopened",
+        "%d aliased, %d reopened, %d board-upgraded",
         counts.ingested, counts.new, counts.updated, counts.minor_update, counts.cross_board,
-        counts.unchanged, counts.aliased, counts.reopened,
+        counts.unchanged, counts.aliased, counts.reopened, counts.board_upgraded,
     )
     return counts
 

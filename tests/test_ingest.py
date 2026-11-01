@@ -460,6 +460,131 @@ def test_ingest_third_board_in_same_batch_still_compares_against_original_owner(
 
 
 # ---------------------------------------------------------------------------
+# Same URL, different board, STORED board is restricted (iap) — permitted
+# board always wins (src/ingest.py's _RESTRICTED_SOURCE_BOARDS).
+# ---------------------------------------------------------------------------
+
+def test_ingest_permitted_board_overrides_restricted_board_same_url_no_enrichment(fake_client):
+    p = _posting(source_board="80000_hours", description="80k's fuller prose description.")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "iap",
+        "org": p.org, "title": p.title, "content_hash": content_hash("Org | Title | Location"),
+        "raw_description": "Org | Title | Location", "status": "pending_enrich", "enrichment": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, board_upgraded=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "80k's fuller prose description."
+    assert row["status"] == "pending_enrich"
+
+
+def test_ingest_permitted_board_overrides_restricted_board_same_url_preserves_enrichment(fake_client):
+    p = _posting(source_board="80000_hours", description="80k's fuller prose description.")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "iap",
+        "org": p.org, "title": p.title, "content_hash": content_hash("Org | Title | Location"),
+        "raw_description": "Org | Title | Location", "status": "enriched",
+        "enrichment": {"summary": "stale, from IAP's terse text"}, "reenrich_requested_at": None,
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, board_upgraded=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "80k's fuller prose description."
+    assert row["status"] == "enriched"
+    assert row["reenrich_requested_at"] is not None
+
+
+def test_ingest_restricted_board_never_overrides_permitted_board_same_url(fake_client):
+    """The reverse of the above must never happen — iap seeing a URL already
+    attributed to 80k/ProbablyGood is a normal (unchanged) cross-board hit,
+    not a downgrade."""
+    p = _posting(source_board="iap", description="Org | Title | Location")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
+        "org": p.org, "title": p.title, "content_hash": content_hash("80k's fuller prose description."),
+        "raw_description": "80k's fuller prose description.", "status": "enriched",
+        "enrichment": {"summary": "good enrichment"},
+    }])
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, cross_board=1)
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "80k's fuller prose description."
+
+
+# ---------------------------------------------------------------------------
+# Org/title match, matched job's CANONICAL row is restricted-board-sourced —
+# permitted board wins here too, but the URL itself also changes.
+# ---------------------------------------------------------------------------
+
+def test_ingest_permitted_board_org_title_match_upgrades_restricted_canonical_job(fake_client):
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": "https://airtable.com/iap-eoi-form",
+        "source_board": "iap", "org": "GiveDirectly", "title": "Head of Data",
+        "content_hash": content_hash("Org | Title | Location"),
+        "raw_description": "Org | Title | Location", "status": "enriched",
+        "enrichment": {"summary": "stale, from IAP's terse text"}, "reenrich_requested_at": None,
+    }])
+    p = _posting(
+        url="https://jobs.80000hours.org/head-of-data", org="GiveDirectly", title="Head of Data",
+        source_board="80000_hours", description="80k's fuller prose description.",
+    )
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, board_upgraded=1)
+    [row] = fake_client.table("jobs").rows
+    assert row["id"] == "job-1"  # same job, re-pointed in place
+    assert row["canonical_url"] == normalize_job_url(p.url)
+    assert row["source_board"] == "80000_hours"
+    assert row["raw_description"] == "80k's fuller prose description."
+    assert row["status"] == "enriched"
+    assert row["reenrich_requested_at"] is not None
+    # Old IAP URL demoted to an alias, not left dangling or deleted.
+    [alias] = fake_client.table("job_aliases").rows
+    assert alias["alias_url"] == "https://airtable.com/iap-eoi-form"
+    assert alias["job_id"] == "job-1"
+    assert alias["source_board"] == "iap"
+
+
+def test_ingest_restricted_board_org_title_match_against_permitted_canonical_stays_a_normal_alias(fake_client):
+    """The reverse must never swap a permitted board's canonical job out for
+    an iap-sourced URL — iap stays a plain alias, same as before this fix."""
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": "https://jobs.80000hours.org/head-of-data",
+        "source_board": "80000_hours", "org": "GiveDirectly", "title": "Head of Data",
+        "content_hash": content_hash("80k's fuller prose description."),
+        "raw_description": "80k's fuller prose description.", "status": "enriched",
+        "enrichment": {"summary": "good enrichment"},
+    }])
+    p = _posting(
+        url="https://airtable.com/iap-eoi-form", org="GiveDirectly", title="Head of Data",
+        source_board="iap", description="Org | Title | Location",
+    )
+
+    counts = ingest([p], client=fake_client)
+
+    assert counts == IngestCounts(ingested=1, aliased=1)
+    [row] = fake_client.table("jobs").rows
+    assert row["canonical_url"] == "https://jobs.80000hours.org/head-of-data"
+    assert row["source_board"] == "80000_hours"
+    [alias] = fake_client.table("job_aliases").rows
+    assert alias["alias_url"] == normalize_job_url(p.url)
+    assert alias["job_id"] == "job-1"
+
+
+# ---------------------------------------------------------------------------
 # Same URL, same board, hash differs but text is near-identical — cosmetic,
 # no re-enrich spend (RE_ENRICH_SIMILARITY_THRESHOLD guardrail).
 # ---------------------------------------------------------------------------
