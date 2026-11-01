@@ -259,6 +259,9 @@ def fetch_candidates(
     has no way to tell a "scored this run" verdict from a "drained from
     yesterday's stuck batch" one, by design, since both are equally valid.
 
+    A verdict (or the caller's *profile_content_hash*) with a null hash is
+    always treated as stale/invalid, never as a match — see the loop below.
+
     Returns [{"user_id", "profile", "job", "tier1_score", "tier1_reason"}, ...]
     — tier2_enrich()'s own expected candidate shape.
     """
@@ -285,7 +288,21 @@ def fetch_candidates(
             continue  # job deleted since scoring
         if job.get("enriched_at") != v.get("job_enriched_at"):
             continue  # stale verdict — job re-enriched since scoring
-        if v.get("profile_content_hash") != profile_content_hash:
+        verdict_hash = v.get("profile_content_hash")
+        # profile_content_hash is nullable on both sides (profiles.
+        # profile_content_hash and tier1_verdicts.profile_content_hash) — a
+        # null must never compare equal to a null (None != None is False in
+        # Python), or "we don't know this user's hash" would incorrectly
+        # validate against "the verdict's hash is also unknown". See
+        # src.tier1_rerank.fetch_valid_verdict_job_ids's identical check.
+        if profile_content_hash is None or verdict_hash is None:
+            log.warning(
+                "fetch_candidates: null profile_content_hash for user %s / job %s "
+                "(current=%r, verdict=%r) — treating as stale, not a match",
+                user_id, v["job_id"], profile_content_hash, verdict_hash,
+            )
+            continue
+        if verdict_hash != profile_content_hash:
             continue  # stale verdict — profile changed since scoring
         candidates.append({
             "user_id": user_id, "profile": profile, "job": job,

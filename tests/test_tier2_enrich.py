@@ -16,6 +16,7 @@ from src.tier2_enrich import (
     _parse_tier2,
     build_prompt,
     build_retry_prompt,
+    fetch_candidates,
     tier2_enrich as run_tier2_enrich,
 )
 
@@ -555,3 +556,84 @@ def test_reprocess_staged_missing_context_logged_and_skipped(fake_client):
     assert result["enriched"] == 0
     assert result["failed"] == 1
     assert fake_client.table("batch_results").rows[0]["processed"] is True
+
+
+# ---------------------------------------------------------------------------
+# fetch_candidates() — reads tier1_verdicts directly (Phase 2); valid,
+# >= threshold, not already matched. Null profile_content_hash on either
+# side must always be treated as stale, never a match.
+# ---------------------------------------------------------------------------
+
+def _verdict(job_id="job-1", user_id="u1", score=80, job_enriched_at="t1",
+             profile_content_hash="hash-abc", reason="good fit") -> dict:
+    return {
+        "user_id": user_id, "job_id": job_id, "score": score,
+        "rationale": {"reason": reason},
+        "job_enriched_at": job_enriched_at, "profile_content_hash": profile_content_hash,
+    }
+
+
+def test_fetch_candidates_returns_valid_above_threshold_verdict(fake_client):
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=80)])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+
+    candidates = fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65)
+
+    assert len(candidates) == 1
+    assert candidates[0]["tier1_score"] == 80
+    assert candidates[0]["tier1_reason"] == "good fit"
+    assert candidates[0]["job"]["id"] == "job-1"
+
+
+def test_fetch_candidates_excludes_below_threshold(fake_client):
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=40)])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+
+    assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65) == []
+
+
+def test_fetch_candidates_excludes_already_matched_job(fake_client):
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=80)])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1"}])
+
+    assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65) == []
+
+
+def test_fetch_candidates_excludes_stale_job_enriched_at(fake_client):
+    """Job re-enriched since this verdict was scored — the verdict no longer
+    means anything, must not surface as a Tier 2 candidate."""
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=80, job_enriched_at="t1")])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t2"}])  # re-enriched since
+
+    assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65) == []
+
+
+def test_fetch_candidates_excludes_profile_hash_mismatch(fake_client):
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=80, profile_content_hash="hash-OLD")])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+
+    assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-NEW", threshold=65) == []
+
+
+def test_fetch_candidates_excludes_deleted_job(fake_client):
+    fake_client.seed("tier1_verdicts", [_verdict("job-deleted", score=80)])
+
+    assert fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash="hash-abc", threshold=65) == []
+
+
+@pytest.mark.parametrize("verdict_hash,current_hash", [
+    (None, "hash-abc"),  # verdict's own hash unknown
+    ("hash-abc", None),  # caller's current hash unknown (profile not yet hashed)
+    (None, None),        # both unknown — None != None would otherwise look like "matches"
+])
+def test_fetch_candidates_null_profile_hash_is_always_invalid(fake_client, caplog, verdict_hash, current_hash):
+    fake_client.seed("tier1_verdicts", [_verdict("job-1", score=80, profile_content_hash=verdict_hash)])
+    fake_client.seed("jobs", [{**_job("job-1"), "enriched_at": "t1"}])
+
+    with caplog.at_level("WARNING"):
+        candidates = fetch_candidates(fake_client, user_id="u1", profile=_profile(), profile_content_hash=current_hash, threshold=65)
+
+    assert candidates == []
+    assert any("null profile_content_hash" in r.message for r in caplog.records)
+    assert any(r.levelname == "WARNING" for r in caplog.records)

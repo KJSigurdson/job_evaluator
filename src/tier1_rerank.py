@@ -365,6 +365,20 @@ def fetch_valid_verdict_job_ids(client, user_id: str, profile_content_hash: str 
     since changed, is INVALID — excluded from the returned set, so that job
     becomes eligible for Tier 1 again (same spirit as before: content or
     profile changed, so the old score no longer means anything).
+
+    profile_content_hash is nullable (mirrors profiles.profile_content_hash
+    itself — see 20260731130000_profiles_content_hash.sql), and a verdict's
+    stored profile_content_hash can likewise be null (tier1_verdicts.
+    profile_content_hash is nullable too — see 20261101190000_tier1_verdicts.
+    sql). A null on EITHER side must never compare equal to a null on the
+    other: `None != None` is False in Python, which would otherwise treat
+    "we don't know this user's profile hash" as "matches the verdict's
+    unknown hash" and incorrectly validate it. Null on either side is
+    unconditionally INVALID, logged at WARNING (this should be rare —
+    profile_content_hash is set as soon as profile_embed.py runs, and
+    _prepare_tier1_request already requires a profile_embedding to exist
+    before calling this — so a null here usually means the embed/hash step
+    hasn't caught up yet for this user).
     """
     verdicts = fetch_all(
         client.table("tier1_verdicts").select("job_id,job_enriched_at,profile_content_hash").eq("user_id", user_id)
@@ -378,7 +392,15 @@ def fetch_valid_verdict_job_ids(client, user_id: str, profile_content_hash: str 
 
     valid: set[str] = set()
     for v in verdicts:
-        if v.get("profile_content_hash") != profile_content_hash:
+        verdict_hash = v.get("profile_content_hash")
+        if profile_content_hash is None or verdict_hash is None:
+            log.warning(
+                "fetch_valid_verdict_job_ids: null profile_content_hash for user %s / job %s "
+                "(current=%r, verdict=%r) — treating as INVALID, not a match",
+                user_id, v["job_id"], profile_content_hash, verdict_hash,
+            )
+            continue
+        if verdict_hash != profile_content_hash:
             continue
         if current_enriched_at.get(v["job_id"]) != v.get("job_enriched_at"):
             continue

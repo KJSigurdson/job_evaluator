@@ -341,6 +341,26 @@ def test_fetch_valid_verdict_job_ids_empty_when_no_verdicts(fake_client):
     assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-abc") == set()
 
 
+@pytest.mark.parametrize("verdict_hash,current_hash", [
+    (None, "hash-abc"),  # verdict's own stored hash is unknown
+    ("hash-abc", None),  # caller's current hash is unknown (profile not yet hashed)
+    (None, None),        # both unknown — None != None would otherwise look like "matches"
+])
+def test_fetch_valid_verdict_job_ids_null_hash_is_always_invalid(fake_client, caplog, verdict_hash, current_hash):
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-1", "job_enriched_at": "2026-10-01T00:00:00+00:00",
+        "profile_content_hash": verdict_hash,
+    }])
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-01T00:00:00+00:00"}])
+
+    with caplog.at_level("WARNING"):
+        result = fetch_valid_verdict_job_ids(fake_client, "u1", current_hash)
+
+    assert result == set()
+    assert any("null profile_content_hash" in r.message for r in caplog.records)
+    assert any(r.levelname == "WARNING" for r in caplog.records)
+
+
 # ---------------------------------------------------------------------------
 # rerank_tier1_batch() orchestration — fake Anthropic Batches client (same
 # "always ended immediately" fake as test_enrich_jobs.py, compatible with
