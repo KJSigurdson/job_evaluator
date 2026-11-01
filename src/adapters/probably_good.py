@@ -1,12 +1,16 @@
 """Probably Good adapter for the True North v2 ingest pipeline.
 
-Reuses src/sources/probablygood.py's fetch_raw_hits() — the exact same network
-fetch (secured Algolia key + query) src/pipeline.py's v1 run already calls —
-completely unmodified. Only the PARSE step is new: this module's parse_hits()
-builds JobPosting (the v2 adapter shape) from the same raw Algolia hits
-probablygood.parse_hits() builds RawPosting (the v1 shape) from. v1's own
-parse_hits()/RawPosting path is untouched; this is a second, independent parse
-of the same raw data, not a replacement.
+Reuses src/sources/probablygood.py's fetch_raw_hits_bucketed() — same
+AlgoliaSearchKey GraphQL call + secured-key Algolia query src/pipeline.py's
+v1 run already makes (via that module's fetch_raw_hits(), which stays
+unmodified), but split across facet-value queries to get past Algolia's
+paginationLimitedTo cliff the same way the 80k adapter already does — see
+that source module's fetch_raw_hits_bucketed() for the full rationale. Only
+the PARSE step is new: this module's parse_hits() builds JobPosting (the v2
+adapter shape) from the same raw Algolia hits probablygood.parse_hits()
+builds RawPosting (the v1 shape) from. v1's own parse_hits()/RawPosting path
+is untouched; this is a second, independent parse of the same raw data, not
+a replacement.
 
 description uses the `description` field directly (unlike 80k's adapter, this
 board's Algolia index actually populates it — matching v1's own choice).
@@ -16,7 +20,7 @@ from __future__ import annotations
 import re
 
 from src.adapters.base import FetchResult, JobPosting, SourceAdapter
-from src.sources.probablygood import fetch_raw_hits
+from src.sources.probablygood import fetch_raw_hits_bucketed
 
 SOURCE_BOARD = "probably_good"
 
@@ -25,11 +29,11 @@ class ProbablyGoodAdapter(SourceAdapter):
     source_board = SOURCE_BOARD
 
     def fetch(self) -> FetchResult:
-        # No known pagination cap on this source's own Algolia index today
-        # (unaudited — out of scope for the 80k fetch-cap fix) — complete=True
-        # reflects "nothing known to be missing", not a confirmed guarantee.
-        hits = fetch_raw_hits()
-        return FetchResult(postings=parse_hits(hits), fetched=len(hits), nb_hits=None, complete=True)
+        result = fetch_raw_hits_bucketed()
+        return FetchResult(
+            postings=parse_hits(result.hits), fetched=result.fetched,
+            nb_hits=result.nb_hits, complete=result.complete,
+        )
 
 
 def parse_hits(hits: list[dict]) -> list[JobPosting]:

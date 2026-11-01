@@ -9,14 +9,28 @@ Run as a script for a live smoke-test:
 """
 from __future__ import annotations
 
+import logging
 import re
+from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import httpx
 
 from src.schemas import RawPosting
 
+log = logging.getLogger(__name__)
+
 _GRAPHQL_URL = "https://backend.jobs.probablygood.org/api/graphql/AlgoliaSearchKey"
+# query includes jobs_object_id_field — confirmed live (2026-11) that its ABSENCE
+# is exactly what broke this integration starting mid-September: the backend
+# started returning {"data": null, "errors": [{"message": "An unknown error
+# occurred."}]} for the old query (no other difference — same operationName,
+# same variables={}, no persistedQuery extensions either side, minimal headers
+# with no cookies/sec-ch-ua needed) and 200s with real data the moment this one
+# field is added back. Whatever changed on their platform (a persisted-document/
+# allow-list update is the likely shape, per their vendor's error message) means
+# the query sent here must match their currently-registered document exactly —
+# if they add/remove fields again, this will need updating again the same way.
 _GRAPHQL_BODY = {
     "operationName": "AlgoliaSearchKey",
     "variables": {},
@@ -30,6 +44,7 @@ _GRAPHQL_BODY = {
         "    index_name_profiles\n"
         "    index_name_jobs\n"
         "    index_name_jobs_sorted_by_closes_at\n"
+        "    jobs_object_id_field\n"
         "    __typename\n"
         "  }\n"
         "}"
@@ -80,13 +95,18 @@ def fetch_raw_hits() -> list[dict]:
       - jobs_prod                      sorts by posted_at_unix DESC (newest-first)
       - jobs_by_closes_at              sorts by closes_at (deadline) — not useful here
 
-    jobs_prod is correct: with hitsPerPage=1000 the response covers ~5 weeks of
-    recent postings (verified: first hit posted 2026-06-19, 1000th posted 2026-05-14).
-    The 1477-hit total means ~477 older postings are beyond the cap, but since the
-    pipeline runs daily and dedup skips seen URLs, nothing recent is lost.
+    jobs_prod is correct — newest-first, so the postings closest to the
+    pagination cap are the oldest ones, not the newest.
 
-    The secured key lacks the 'browse' ACL so the cursor-based /browse endpoint
-    returns 403 — the 1000-result cap is a backend permission constraint.
+    NOTE (corrected 2026-11, was previously misattributed to a backend ACL
+    restriction): the 1000-hit cap below is Algolia's own paginationLimitedTo,
+    the SAME mechanism src/sources/eightyk.py's fetch_raw_hits() hits — nbHits
+    is reported correctly (confirmed live: 1812) but nbPages is reported as 1
+    regardless, and page>=1 returns 0 hits even though more exist. True North
+    v2's adapter uses fetch_raw_hits_bucketed() below instead, for exactly the
+    same reason the 80k adapter moved off this function's equivalent. This
+    function is kept as-is for v1 (src/pipeline.py), which still has the
+    original 1000-hit-cap limitation — unaffected by this change.
     """
     app_id, api_key, index = fetch_search_key()
 
@@ -108,6 +128,117 @@ def fetch_raw_hits() -> list[dict]:
                 break
 
     return hits
+
+
+# ---------------------------------------------------------------------------
+# Facet-bucketed fetch — True North v2's adapter uses this instead of
+# fetch_raw_hits() above (v1's own fetch() still calls that, unchanged). Same
+# fix, same rationale, as src/sources/eightyk.py's fetch_raw_hits_bucketed() —
+# see that function's module comment for the full explanation of WHY a single
+# query can't retrieve more than 1000 hits here regardless of nbPages.
+#
+# tags_area.name was chosen over the other candidate facets on this index
+# (tags_experience.name, tags_workload.name, has_salary, org.organization_type.name,
+# tags_skill.name) by querying each live: tags_area.name's largest bucket is
+# ~35% of the total (headroom as the pool grows), and several of the other
+# candidates have a SINGLE bucket already over 1000 hits today (tags_workload.name
+# 's "Full-Time" bucket is 1396; org.organization_type.name's "Nonprofit" is
+# 1103) — which would immediately hit the SAME pagination cliff one level
+# down. A direct union-of-per-bucket-objectIDs check against the live index
+# matched nbHits exactly (full coverage — no hit lacks a tags_area entry).
+# ---------------------------------------------------------------------------
+
+_BUCKET_FACET = "tags_area.name"
+_BUCKET_PAGE_SIZE = 1000
+
+
+@dataclass
+class BucketedFetchResult:
+    hits: list[dict]
+    nb_hits: int
+    fetched: int
+    complete: bool
+    bucket_sizes: dict[str, int] = field(default_factory=dict)
+
+
+def fetch_raw_hits_bucketed() -> BucketedFetchResult:
+    """Fetch every hit via per-facet-value queries (see module comment above),
+    union-deduped by objectID. complete=True iff the deduped union's size
+    equals the index's own reported nbHits AND no individual bucket itself
+    returned a full 1000-hit page (same two-part check as eightyk.py's
+    equivalent) — either failing is logged as a WARNING, not raised; callers
+    treat complete=False as "this run's fetch may be missing postings", not
+    an error.
+    """
+    app_id, api_key, index = fetch_search_key()
+    url = f"https://{app_id.lower()}-dsn.algolia.net/1/indexes/{index}/query"
+    headers = {
+        "X-Algolia-API-Key": api_key,
+        "X-Algolia-Application-Id": app_id,
+        "Content-Type": "application/json",
+    }
+
+    resp = httpx.post(url, headers=headers, json={"hitsPerPage": 0, "page": 0, "facets": [_BUCKET_FACET]}, timeout=30)
+    resp.raise_for_status()
+    discovery = resp.json()
+    nb_hits = discovery.get("nbHits", 0)
+    facet_values = list((discovery.get("facets") or {}).get(_BUCKET_FACET, {}).keys())
+
+    if not facet_values:
+        log.warning(
+            "fetch_raw_hits_bucketed: facet %r returned no values — falling back to "
+            "a single unbucketed page (same pagination cap as before)", _BUCKET_FACET,
+        )
+        resp = httpx.post(url, headers=headers, json={"hitsPerPage": _BUCKET_PAGE_SIZE, "page": 0}, timeout=30)
+        resp.raise_for_status()
+        hits = resp.json().get("hits", [])
+        fetched = len(hits)
+        complete = fetched >= nb_hits
+        if not complete:
+            log.warning(
+                "fetch_raw_hits_bucketed: fallback fetch got %d hit(s) but nbHits=%d — incomplete",
+                fetched, nb_hits,
+            )
+        return BucketedFetchResult(hits=hits, nb_hits=nb_hits, fetched=fetched, complete=complete)
+
+    by_object_id: dict[str, dict] = {}
+    bucket_sizes: dict[str, int] = {}
+    any_bucket_capped = False
+
+    for value in facet_values:
+        bucket_count = 0
+        for page in range(1000):  # safety ceiling; broken by nbPages check, same as fetch_raw_hits()
+            resp = httpx.post(url, headers=headers, json={
+                "hitsPerPage": _BUCKET_PAGE_SIZE, "page": page,
+                "facetFilters": [[f"{_BUCKET_FACET}:{value}"]],
+            }, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+            page_hits = data.get("hits", [])
+            for h in page_hits:
+                by_object_id[h["objectID"]] = h
+            bucket_count += len(page_hits)
+            if len(page_hits) >= _BUCKET_PAGE_SIZE:
+                any_bucket_capped = True
+                log.warning(
+                    "fetch_raw_hits_bucketed: bucket %s=%r itself returned a full %d-hit "
+                    "page — may be hitting the same pagination cap one level down",
+                    _BUCKET_FACET, value, _BUCKET_PAGE_SIZE,
+                )
+            if page >= data.get("nbPages", 1) - 1:
+                break
+        bucket_sizes[value] = bucket_count
+
+    hits = list(by_object_id.values())
+    fetched = len(hits)
+    complete = (fetched == nb_hits) and not any_bucket_capped
+    if not complete:
+        log.warning(
+            "fetch_raw_hits_bucketed: deduped union has %d hit(s), index reports nbHits=%d "
+            "(any_bucket_capped=%s) — some postings may be missing this run. bucket_sizes=%s",
+            fetched, nb_hits, any_bucket_capped, bucket_sizes,
+        )
+    return BucketedFetchResult(hits=hits, nb_hits=nb_hits, fetched=fetched, complete=complete, bucket_sizes=bucket_sizes)
 
 
 # ---------------------------------------------------------------------------

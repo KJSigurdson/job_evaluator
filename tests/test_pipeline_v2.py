@@ -619,6 +619,111 @@ def test_run_dry_run_writes_no_source_fetch_log(fake_client, monkeypatch):
     assert fake_client.table("source_fetch_log").rows == []
 
 
+# ---------------------------------------------------------------------------
+# _check_source_fetch_health — identifies (does not raise for) sources with 2
+# consecutive complete=False source_fetch_log rows. _raise_if_source_unhealthy
+# is the separate, deferred step that actually fails the run — see run()'s
+# call sites, all placed at the END of each return path so a broken source
+# never blocks ingest/enrich/matching for a healthy one or an active user
+# (the ProbablyGood AlgoliaSearchKey outage went unnoticed for 7 weeks
+# precisely because nothing failed the step loud enough before).
+# ---------------------------------------------------------------------------
+
+def test_check_source_fetch_health_flags_two_consecutive_incomplete(fake_client):
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "probably_good", "complete": False, "fetched_at": "2026-11-01T06:00:00+00:00"},
+        {"source_board": "probably_good", "complete": False, "fetched_at": "2026-11-02T06:00:00+00:00"},
+    ])
+
+    assert pipeline_v2._check_source_fetch_health(fake_client, ["probably_good"]) == ["probably_good"]
+
+
+def test_check_source_fetch_health_tolerates_one_off_incomplete(fake_client):
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "probably_good", "complete": True, "fetched_at": "2026-11-01T06:00:00+00:00"},
+        {"source_board": "probably_good", "complete": False, "fetched_at": "2026-11-02T06:00:00+00:00"},
+    ])
+
+    assert pipeline_v2._check_source_fetch_health(fake_client, ["probably_good"]) == []
+
+
+def test_check_source_fetch_health_ignores_fewer_than_two_rows(fake_client):
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "probably_good", "complete": False, "fetched_at": "2026-11-02T06:00:00+00:00"},
+    ])
+
+    assert pipeline_v2._check_source_fetch_health(fake_client, ["probably_good"]) == []
+
+
+def test_raise_if_source_unhealthy_raises_when_nonempty():
+    with pytest.raises(RuntimeError, match="probably_good"):
+        pipeline_v2._raise_if_source_unhealthy(["probably_good"])
+
+
+def test_raise_if_source_unhealthy_noop_when_empty():
+    pipeline_v2._raise_if_source_unhealthy([])  # must not raise
+
+
+def test_check_source_fetch_health_ignores_disabled_source_not_passed_in(fake_client):
+    """Only checks the source_boards actually passed — a disabled adapter's
+    old history must not fail a run that no longer includes it."""
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "complete": False, "fetched_at": "2026-11-01T06:00:00+00:00"},
+        {"source_board": "iap", "complete": False, "fetched_at": "2026-11-02T06:00:00+00:00"},
+    ])
+
+    assert pipeline_v2._check_source_fetch_health(fake_client, ["80000_hours", "probably_good"]) == []
+
+
+def test_run_fails_when_enabled_source_incomplete_two_runs_straight(fake_client, monkeypatch):
+    from src.adapters.base import FetchResult
+
+    class _FailingAdapter:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=0, nb_hits=100, complete=False)
+
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "80000_hours", "complete": False, "fetched_at": "2026-10-31T06:00:00+00:00"},
+    ])
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_FailingAdapter])
+
+    with pytest.raises(RuntimeError, match="80000_hours"):
+        run(_client=fake_client, _anthropic_client=object())
+
+
+def test_run_still_matches_healthy_users_before_failing_on_unhealthy_source(fake_client, monkeypatch):
+    """The actual bug this placement fixes: a broken source must fail the
+    step, but must NOT prevent matching from running for active users first
+    — raising eagerly (right after the fetch loop) would have skipped this
+    entirely."""
+    from src.adapters.base import FetchResult
+
+    class _FailingAdapter:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=0, nb_hits=100, complete=False)
+
+    matched_users = []
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "80000_hours", "complete": False, "fetched_at": "2026-10-31T06:00:00+00:00"},
+    ])
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_FailingAdapter])
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: (
+        matched_users.append(a[2].user_id), {"user_id": "u1", "skipped": "test"})[1])
+
+    with pytest.raises(RuntimeError, match="80000_hours"):
+        run(_client=fake_client, _anthropic_client=object())
+
+    assert matched_users == ["u1"]
+
+
 def test_run_manual_mode_skips_adapters_ingest_enrich(fake_client, monkeypatch):
     _seed_active_user(fake_client)
 

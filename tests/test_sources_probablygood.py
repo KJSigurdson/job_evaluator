@@ -5,11 +5,14 @@ from datetime import date
 
 import pytest
 
+from src.sources import probablygood
 from src.sources.probablygood import (
     _extract_comp,
     _extract_deadline,
     _strip_html,
     _tag_names,
+    fetch_raw_hits_bucketed,
+    fetch_search_key,
     parse_hits,
 )
 
@@ -303,3 +306,166 @@ def test_strip_html_preserves_text():
 
 def test_strip_html_empty_string():
     assert _strip_html("") == ""
+
+
+# ---------------------------------------------------------------------------
+# fetch_search_key() — GraphQL key fetch, no real network (httpx.Client
+# monkeypatched as a context manager).
+# ---------------------------------------------------------------------------
+
+class _FakeResponse:
+    def __init__(self, payload: dict, text: str | None = None):
+        self._payload = payload
+        self.text = text if text is not None else str(payload)
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+class _FakeHttpxClient:
+    def __init__(self, post_fn):
+        self._post_fn = post_fn
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def post(self, url, *, headers, json):
+        return self._post_fn(url, headers=headers, json=json)
+
+
+def test_fetch_search_key_query_includes_jobs_object_id_field():
+    """The exact bug this fixes: the backend started returning data:null for
+    the old query (missing this field) starting mid-September — confirmed
+    live that adding it back (and nothing else — no header/cookie changes
+    were needed) restores a 200 with real data."""
+    assert "jobs_object_id_field" in probablygood._GRAPHQL_BODY["query"]
+
+
+def test_fetch_search_key_raises_on_data_null(monkeypatch):
+    def fake_post(url, *, headers, json):
+        return _FakeResponse({"data": None, "errors": [{"message": "An unknown error occurred."}]})
+
+    monkeypatch.setattr(probablygood.httpx, "Client", lambda timeout=None: _FakeHttpxClient(fake_post))
+
+    with pytest.raises(RuntimeError, match="data:null"):
+        fetch_search_key()
+
+
+def test_fetch_search_key_returns_app_id_api_key_index(monkeypatch):
+    def fake_post(url, *, headers, json):
+        return _FakeResponse({"data": {"algolia_search_key": {
+            "app_id": "APPID", "api_key": "KEY", "index_name_jobs": "jobs_prod",
+        }}})
+
+    monkeypatch.setattr(probablygood.httpx, "Client", lambda timeout=None: _FakeHttpxClient(fake_post))
+
+    app_id, api_key, index = fetch_search_key()
+
+    assert (app_id, api_key, index) == ("APPID", "KEY", "jobs_prod")
+
+
+# ---------------------------------------------------------------------------
+# fetch_raw_hits_bucketed() — facet-bucketed fetch, no network. Key fetch via
+# httpx.Client (above); the bucketed Algolia queries via module-level
+# httpx.post, same convention as src/sources/eightyk.py's equivalent tests.
+# ---------------------------------------------------------------------------
+
+def _bucket_hit(object_id: str) -> dict:
+    return {"objectID": object_id, "title": f"Job {object_id}"}
+
+
+def _patch_key_fetch(monkeypatch):
+    def fake_post(url, *, headers, json):
+        return _FakeResponse({"data": {"algolia_search_key": {
+            "app_id": "APPID", "api_key": "KEY", "index_name_jobs": "jobs_prod",
+        }}})
+    monkeypatch.setattr(probablygood.httpx, "Client", lambda timeout=None: _FakeHttpxClient(fake_post))
+
+
+class _FakeHttpResponse:
+    def __init__(self, payload: dict):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def test_fetch_raw_hits_bucketed_unions_and_dedupes_across_buckets(monkeypatch):
+    _patch_key_fetch(monkeypatch)
+
+    def fake_algolia_post(url, *, headers, json, timeout=30):
+        if "facets" in json:
+            return _FakeHttpResponse({"nbHits": 3, "facets": {"tags_area.name": {"A": 2, "B": 2}}})
+        value = json["facetFilters"][0][0].split(":", 1)[1]
+        if value == "A":
+            return _FakeHttpResponse({"hits": [_bucket_hit("job-1"), _bucket_hit("job-2")], "nbPages": 1})
+        return _FakeHttpResponse({"hits": [_bucket_hit("job-1"), _bucket_hit("job-3")], "nbPages": 1})
+
+    monkeypatch.setattr(probablygood.httpx, "post", fake_algolia_post)
+
+    result = fetch_raw_hits_bucketed()
+
+    assert result.nb_hits == 3
+    assert result.fetched == 3
+    assert result.complete is True
+    assert {h["objectID"] for h in result.hits} == {"job-1", "job-2", "job-3"}
+
+
+def test_fetch_raw_hits_bucketed_incomplete_when_union_undercounts_nb_hits(monkeypatch):
+    _patch_key_fetch(monkeypatch)
+
+    def fake_algolia_post(url, *, headers, json, timeout=30):
+        if "facets" in json:
+            return _FakeHttpResponse({"nbHits": 5, "facets": {"tags_area.name": {"A": 2}}})
+        return _FakeHttpResponse({"hits": [_bucket_hit("job-1"), _bucket_hit("job-2")], "nbPages": 1})
+
+    monkeypatch.setattr(probablygood.httpx, "post", fake_algolia_post)
+
+    result = fetch_raw_hits_bucketed()
+
+    assert result.fetched == 2
+    assert result.nb_hits == 5
+    assert result.complete is False
+
+
+def test_fetch_raw_hits_bucketed_marks_incomplete_when_a_bucket_itself_hits_the_page_cap(monkeypatch):
+    _patch_key_fetch(monkeypatch)
+
+    def fake_algolia_post(url, *, headers, json, timeout=30):
+        if "facets" in json:
+            return _FakeHttpResponse({"nbHits": 1000, "facets": {"tags_area.name": {"A": 1000}}})
+        return _FakeHttpResponse({"hits": [_bucket_hit(f"job-{i}") for i in range(1000)], "nbPages": 1})
+
+    monkeypatch.setattr(probablygood.httpx, "post", fake_algolia_post)
+
+    result = fetch_raw_hits_bucketed()
+
+    assert result.fetched == 1000
+    assert result.complete is False
+
+
+def test_fetch_raw_hits_bucketed_falls_back_when_facet_has_no_values(monkeypatch):
+    _patch_key_fetch(monkeypatch)
+
+    def fake_algolia_post(url, *, headers, json, timeout=30):
+        if "facets" in json:
+            return _FakeHttpResponse({"nbHits": 2, "facets": {"tags_area.name": {}}})
+        return _FakeHttpResponse({"hits": [_bucket_hit("job-1"), _bucket_hit("job-2")], "nbPages": 1})
+
+    monkeypatch.setattr(probablygood.httpx, "post", fake_algolia_post)
+
+    result = fetch_raw_hits_bucketed()
+
+    assert result.fetched == 2
+    assert result.nb_hits == 2
+    assert result.complete is True
+    assert result.bucket_sizes == {}

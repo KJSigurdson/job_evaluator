@@ -120,6 +120,52 @@ def _fetch_enriched_jobs_pool(client) -> list[dict]:
     return fetch_all(client.table("jobs").select(_JOBS_POOL_COLUMNS).eq("status", "enriched"))
 
 
+def _check_source_fetch_health(client, source_boards: list[str]) -> list[str]:
+    """Return the subset of *source_boards* that have logged complete=False
+    on their last TWO source_fetch_log rows (including the one this run just
+    wrote) — two consecutive incomplete fetches means something is actually
+    broken, not a one-off Algolia hiccup. Checks only the sources passed in
+    (the currently-enabled ones) — a disabled source's old rows are
+    irrelevant and must not fail a run.
+
+    Deliberately does NOT raise itself — see _raise_if_source_unhealthy()
+    and run()'s call sites for why the actual raise is deferred to the end
+    of the run, after ingest/enrich/matching/digest have already run for
+    every healthy source and active user. A broken source's failure must
+    fail the step (so it's impossible to miss, unlike an email that can
+    bounce/get filtered — which is exactly how the ProbablyGood adapter's
+    AlgoliaSearchKey outage went unnoticed for 7 weeks), but must NOT block
+    everything else this run could still legitimately accomplish.
+    """
+    broken: list[str] = []
+    for board in source_boards:
+        rows = fetch_all(
+            client.table("source_fetch_log").select("complete,fetched_at").eq("source_board", board)
+        )
+        rows.sort(key=lambda r: r["fetched_at"], reverse=True)
+        last_two = rows[:2]
+        if len(last_two) == 2 and all(r["complete"] is False for r in last_two):
+            broken.append(board)
+    return broken
+
+
+def _raise_if_source_unhealthy(broken_sources: list[str]) -> None:
+    """Raises (see _check_source_fetch_health's docstring for why this is a
+    separate, deferred step) iff *broken_sources* is non-empty. Call sites in
+    run() place this at the END of each path — after whatever
+    ingest/enrich/matching/digest work that path does has already completed
+    — never before it, so one broken source can't starve a healthy source's
+    jobs or an active user's matches of a run they'd otherwise have gotten.
+    """
+    if broken_sources:
+        raise RuntimeError(
+            f"Source(s) {broken_sources} logged complete=False for 2 consecutive runs "
+            f"(source_fetch_log) — likely broken, not a transient hiccup. Failing this "
+            f"run's step now that every healthy source/active user has already been "
+            f"processed."
+        )
+
+
 def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool) -> None:
     """Insert the `pipeline_runs` parent row for *run_id* — MUST happen before
     any run_metrics write this run makes (ingest/enrich/tier1/tier2/match all
@@ -339,6 +385,11 @@ def run(
 
         ingest_counts = None
         enrich_result = None
+        # Populated below (scheduled mode only) and checked via
+        # _raise_if_source_unhealthy() at the END of every return path this
+        # function has — never checked eagerly, so a broken source never
+        # blocks ingest/enrich/matching for a healthy one or an active user.
+        source_health_broken: list[str] = []
         if only_user_id is None:
             active_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if enabled]
             skipped_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if not enabled]
@@ -375,6 +426,13 @@ def run(
             # every other write in this module.
             if fetch_log_rows and not dry_run:
                 client.table("source_fetch_log").insert(fetch_log_rows).execute()
+                # Computed here (so "2 consecutive" includes the row just
+                # inserted above) but NOT acted on yet — see
+                # _raise_if_source_unhealthy()'s call sites below, all of
+                # which come after ingest/enrich/matching/digest. Skipped
+                # entirely in dry_run (no row was written this run to check
+                # against).
+                source_health_broken = _check_source_fetch_health(client, [cls.source_board for cls in _ADAPTERS])
 
             ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
             ingest_counts = ingest_counts_obj.as_dict()
@@ -397,8 +455,13 @@ def run(
                 # the next scheduled run (or src/drain_batches.py's hourly
                 # check) resume it — the batch itself, and the jobs still at
                 # status='pending_enrich', are untouched and safe to resume.
-                run_outcome = "incomplete"
                 log.info("Enrichment pending — stopping this run before matching (run_id=%s)", run_id)
+                # Matching was already going to be skipped this run
+                # regardless of source health (enrichment isn't done) — so
+                # raising here blocks nothing an unhealthy source wouldn't
+                # already be blocking, and still fails the step.
+                _raise_if_source_unhealthy(source_health_broken)
+                run_outcome = "incomplete"
                 return {"ingest": ingest_counts, "enrich": enrich_result, "users": [], "status": run_outcome}
 
             profile_embed_result = backfill_profile_embeddings(client) if not dry_run else {
@@ -416,6 +479,9 @@ def run(
             if track_quota:
                 raise RuntimeError(f"only_user_id={only_user_id}: no profile+scoring_weights row found")
             log.warning("No users with both a profile and scoring_weights row — nothing to do")
+            # No matching happens in this branch either way (no users) — same
+            # reasoning as the pending-enrichment return above.
+            _raise_if_source_unhealthy(source_health_broken)
             run_outcome = "complete"
             return {"ingest": ingest_counts, "enrich": enrich_result, "users": []}
 
@@ -449,6 +515,10 @@ def run(
                 "gate_rejections": gate_rejections,
             }).execute()
 
+        # Only now — after ingest/enrich/profile-embed/matching/digest have
+        # ALL already run for every healthy source and active user — does a
+        # broken source actually fail the step.
+        _raise_if_source_unhealthy(source_health_broken)
         run_outcome = "complete"
         return {"ingest": ingest_counts, "enrich": enrich_result, "users": user_results}
 
