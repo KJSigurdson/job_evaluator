@@ -9,10 +9,16 @@ No --only-user-id (scheduled/cron mode) — the full pipeline:
     1. Active adapters (see _ADAPTER_REGISTRY — currently 80k, ProbablyGood;
        IAP disabled) -> ingest.ingest() (dedup/alias into `jobs`). Each
        adapter's fetch-completeness is logged to `source_fetch_log`
-       (src.adapters.base.FetchResult) regardless of success/failure —
-       src.closure.close_jobs() reads this, but is NOT called from here yet
-       (Phase 1 shipped it report-only; wire-in is pending a review of a few
-       days' worth of source_fetch_log + refreshed last_seen history).
+       (src.adapters.base.FetchResult) regardless of success/failure.
+    1b. closure.close_jobs() — status='enriched'/'pending_enrich' jobs not
+       seen in a while are marked 'closed' (see that module for the two
+       rules); rule (a) only applies to a source whose fetch THIS RUN (step
+       1, just above) was complete=true — derived from fetch_log_rows
+       directly, not a historical source_fetch_log query, so "this run"
+       means exactly that. ingest.ingest() (step 1) already reopens a closed
+       job the moment it's seen again, so running closure right after
+       ingest, before enrich, never races a job that's actually still live
+       and was just re-ingested this same run.
     2. enrich_jobs.enrich_jobs() — status='pending_enrich' rows (new or
        content-changed with no enrichment yet) PLUS status='enriched' rows
        with reenrich_requested_at set (content changed again after a prior
@@ -79,6 +85,7 @@ import anthropic
 from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter
 from src.adapters.iap import IAPAdapter
 from src.adapters.probably_good import ProbablyGoodAdapter
+from src.closure import close_jobs
 from src.enrich_jobs import enrich_jobs as run_enrich_jobs
 from src.ingest import ingest as run_ingest
 from src.match_v2 import TOP_N, fetch_matched_job_ids, match_user
@@ -437,6 +444,17 @@ def run(
             ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
             ingest_counts = ingest_counts_obj.as_dict()
             log.info("Ingest: %s", ingest_counts)
+
+            if not dry_run:
+                # complete_sources: derived from fetch_log_rows directly —
+                # "this run's fetch was complete", not a historical
+                # source_fetch_log query (see src.closure.plan_closures's
+                # docstring on why that distinction matters for rule (a)).
+                complete_sources = frozenset(r["source_board"] for r in fetch_log_rows if r["complete"])
+                closure_result = close_jobs(
+                    client, complete_sources=complete_sources, run_id=run_id, trigger=trigger,
+                )
+                log.info("Closure: %s", closure_result)
 
             enrich_result = run_enrich_jobs(
                 client=client, anthropic_client=anthropic_client, dry_run=dry_run,

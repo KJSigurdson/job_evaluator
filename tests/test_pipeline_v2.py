@@ -420,13 +420,16 @@ class _NoopAdapter:
         return FetchResult(postings=[], fetched=0, nb_hits=None, complete=True)
 
 
-def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None):
+def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None, closure_result=None):
     from src.ingest import IngestCounts
     # Two, not three — matches the real active-adapter count now that IAP is
     # disabled (see _ADAPTER_REGISTRY); these are dummy classes either way, so
     # the exact count has no bearing on what this helper actually verifies.
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_NoopAdapter, _NoopAdapter])
     monkeypatch.setattr(pipeline_v2, "run_ingest", lambda postings, client, dry_run, **k: ingest_result or IngestCounts())
+    monkeypatch.setattr(pipeline_v2, "close_jobs", lambda *a, **k: closure_result or {
+        "closed": 0, "by_source": {}, "by_rule": {"complete_source_stale": 0, "safety_ceiling": 0},
+    })
     monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: enrich_result or {
         "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
     })
@@ -617,6 +620,71 @@ def test_run_dry_run_writes_no_source_fetch_log(fake_client, monkeypatch):
     run(dry_run=True, _client=fake_client, _anthropic_client=object())
 
     assert fake_client.table("source_fetch_log").rows == []
+
+
+# ---------------------------------------------------------------------------
+# close_jobs() wiring — called after ingest, before enrich, in scheduled
+# mode only; complete_sources derived from fetch_log_rows (this run's actual
+# results), not a historical query.
+# ---------------------------------------------------------------------------
+
+def test_run_calls_close_jobs_after_ingest_before_enrich(fake_client, monkeypatch):
+    from src.ingest import IngestCounts
+
+    calls = []
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "run_ingest", lambda *a, **k: (calls.append("ingest"), IngestCounts())[1])
+    monkeypatch.setattr(pipeline_v2, "close_jobs", lambda *a, **k: (calls.append("closure"), {"closed": 0, "by_source": {}, "by_rule": {}})[1])
+    monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: (calls.append("enrich"), {
+        "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
+    })[1])
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    assert calls == ["ingest", "closure", "enrich"]
+
+
+def test_run_passes_this_runs_complete_sources_to_close_jobs(fake_client, monkeypatch):
+    from src.adapters.base import FetchResult
+
+    class _CompleteAdapter:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=5, nb_hits=5, complete=True)
+
+    class _IncompleteAdapter:
+        source_board = "probably_good"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=3, nb_hits=10, complete=False)
+
+    captured = {}
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_CompleteAdapter, _IncompleteAdapter])
+    monkeypatch.setattr(pipeline_v2, "close_jobs", lambda client, *, complete_sources, **k: (
+        captured.update(complete_sources=complete_sources), {"closed": 0, "by_source": {}, "by_rule": {}})[1])
+    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    assert captured["complete_sources"] == frozenset({"80000_hours"})
+
+
+def test_run_dry_run_never_calls_close_jobs(fake_client, monkeypatch):
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 0, "top": []})
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("dry_run must not call close_jobs")
+
+    monkeypatch.setattr(pipeline_v2, "close_jobs", _should_not_run)
+
+    run(dry_run=True, _client=fake_client, _anthropic_client=object())
 
 
 # ---------------------------------------------------------------------------
