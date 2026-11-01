@@ -1,17 +1,29 @@
 """Hourly batch-drain worker — mops up Anthropic Batches API work left
 mid-flight by src/pipeline_v2.py's daily run (its own poll budget exhausted,
 batch not 'ended' yet) or by a crashed process. Does NOT scrape, match, or
-send digest email — its only job is: if an enrich_jobs (or enrich_jobs_retry)
-batch has finished server-side since the daily run gave up on it, retrieve
-and apply it now instead of waiting for tomorrow's run.
+send digest email — its only job is: if an enrich_jobs/enrich_jobs_retry or
+tier1_rerank/tier1_rerank_retry batch has finished server-side since the
+daily run gave up on it, retrieve and apply it now instead of waiting for
+tomorrow's run.
+
+tier1_rerank's drained batches write ONLY to tier1_verdicts (see
+src.tier1_rerank.apply_drained_batch) — never matches_v2, never a digest.
+That's deliberate, not an oversight: this module's whole contract is "finish
+applying work someone else already decided to submit", and Tier 2/digest are
+exactly the kind of NEW decision draining must never make on its own. A user
+whose Tier 1 verdicts land via the drainer gets picked up by Tier 2 on the
+NEXT scheduled run (src.tier2_enrich.fetch_candidates reads tier1_verdicts
+directly, so it has no way to tell a drained verdict from a live one, by
+design).
 
 Deliberately narrow in scope, matching this module's own concurrency
 contract (see src.batch_poll's module docstring): it never decides what NEW
 work to submit (requests=None on every resume_or_submit call — submitting is
-src.enrich_jobs.enrich_jobs()'s job, next time the daily pipeline runs), and
-a parse/validation failure encountered while draining goes straight to
-'stale' with no retry batch of its own — see
-src.enrich_jobs.apply_drained_batch's docstring for why.
+src.enrich_jobs.enrich_jobs()'s/src.tier1_rerank.rerank_tier1_batch()'s job,
+next time the daily pipeline runs), and a parse/validation failure
+encountered while draining goes straight to a terminal/dropped outcome with
+no retry batch of its own — see each module's own apply_drained_batch
+docstring for why.
 
 Concurrency-safe with a simultaneously-running daily pipeline: both go
 through src.batch_poll.resume_or_submit's atomic claim (compare-and-swap on
@@ -31,16 +43,45 @@ import anthropic
 
 from src.batch_poll import DRAIN_POLL_BUDGET_SECONDS, resume_or_submit
 from src.enrich_jobs import _MODULE as _ENRICH_MODULE
-from src.enrich_jobs import apply_drained_batch
+from src.enrich_jobs import apply_drained_batch as _apply_enrich_jobs_batch
 from src.supabase_client import get_client
+from src.tier1_rerank import _MODULE as _TIER1_MODULE
+from src.tier1_rerank import apply_drained_batch as _apply_tier1_batch
 
 log = logging.getLogger(__name__)
 
-# enrich_jobs's round-1 module name, plus its round-2 retry module — both are
-# drained the same way (an ended batch from either is applied identically;
-# see apply_drained_batch). Kept as a tuple, not hardcoded strings, so a
-# rename of enrich_jobs.py's own _MODULE constant can't silently desync this.
-_DRAIN_MODULES = (_ENRICH_MODULE, f"{_ENRICH_MODULE}_retry")
+
+def _apply_enrich_jobs(client, results: dict, *, batch_id: str, run_id: str) -> dict:
+    return _apply_enrich_jobs_batch(client, results, batch_id=batch_id, run_id=run_id, trigger="drain")
+
+
+def _apply_tier1(client, results: dict, *, batch_id: str, run_id: str) -> dict:
+    # tier1_rerank.apply_drained_batch takes no run_id/trigger — it writes
+    # only to tier1_verdicts, which has no run_id column of its own (unlike
+    # run_metrics/jobs — see that table's migration).
+    return _apply_tier1_batch(client, results, batch_id=batch_id)
+
+
+# enrich_jobs's round-1 module name plus its round-2 retry module, same for
+# tier1_rerank — kept as a tuple built from each module's own _MODULE
+# constant, not hardcoded strings, so a rename there can't silently desync
+# this.
+_DRAIN_MODULES = (_ENRICH_MODULE, f"{_ENRICH_MODULE}_retry", _TIER1_MODULE, f"{_TIER1_MODULE}_retry")
+
+
+def _apply_for_module(module: str, client, results: dict, *, batch_id: str, run_id: str) -> dict:
+    """Dispatch to the apply function that knows how to handle a batch from
+    *module*. References _apply_enrich_jobs/_apply_tier1 by bare name (not
+    via a dict built at import time) specifically so tests monkeypatching
+    drain_batches._apply_enrich_jobs/_apply_tier1 are actually honored — a
+    dict of function OBJECTS captured at module-load time would freeze in
+    the original (real) functions regardless of any later monkeypatch.
+    """
+    if module in (_ENRICH_MODULE, f"{_ENRICH_MODULE}_retry"):
+        return _apply_enrich_jobs(client, results, batch_id=batch_id, run_id=run_id)
+    if module in (_TIER1_MODULE, f"{_TIER1_MODULE}_retry"):
+        return _apply_tier1(client, results, batch_id=batch_id, run_id=run_id)
+    raise ValueError(f"no apply function registered for drain module {module!r}")
 
 
 def _open_drain_run(client, run_id: str) -> None:
@@ -100,7 +141,7 @@ def drain(*, client=None, anthropic_client=None) -> dict:
                 )
                 continue
             # outcome.status == "ended"
-            summary = apply_drained_batch(client, outcome.results, batch_id=outcome.batch_id, run_id=run_id, trigger="drain")
+            summary = _apply_for_module(module, client, outcome.results, batch_id=outcome.batch_id, run_id=run_id)
             applied[module] = summary
             log.info("drain: applied module %r batch %s -> %s", module, outcome.batch_id, summary)
         return {"run_id": run_id, "applied": applied}

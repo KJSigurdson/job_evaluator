@@ -167,6 +167,7 @@ def _release_claim(client, batch_id: str, *, new_status: str) -> None:
 
 def _poll_claimed_batch(
     anthropic_client, client, batch_id: str, *, budget_seconds: int, sleep_fn, monotonic_fn,
+    persist_transform=None,
 ) -> BatchOutcome:
     start = monotonic_fn()
     deadline = start + budget_seconds
@@ -182,7 +183,15 @@ def _poll_claimed_batch(
             results = {}
             for item in anthropic_client.messages.batches.results(batch_id):
                 results[item.custom_id] = item.result.model_dump(mode="json")
-            persist_batch_results(client, batch_id, results)
+            # persist_transform, if given, wraps each raw result before
+            # staging (e.g. tier2_enrich.py's {"llm_result":..., "context":...}
+            # wrapper, needed because its custom_id is an anonymous index, not
+            # a user_id/job_id a recovery path could otherwise derive
+            # anything from). The BARE results dict below (returned to the
+            # caller, see BatchOutcome.results) is never transformed — only
+            # what gets staged into batch_results.raw is.
+            to_persist = persist_transform(results) if persist_transform else results
+            persist_batch_results(client, batch_id, to_persist)
             _release_claim(client, batch_id, new_status="retrieved")
             log.info(
                 "batch_poll: batch %s ended after %.0fs — %d result(s) retrieved and persisted",
@@ -228,6 +237,7 @@ def resume_or_submit(
     anthropic_client, client, *, module: str, requests: list[dict] | None,
     budget_seconds: int = DEFAULT_POLL_BUDGET_SECONDS,
     sleep_fn=time.sleep, monotonic_fn=time.monotonic,
+    persist_transform=None, manifest=None,
 ) -> BatchOutcome:
     """Submit *requests* as a new batch for *module* — or, if an outstanding
     submission already exists for *module*, resume/claim/poll THAT one
@@ -238,6 +248,17 @@ def resume_or_submit(
     outstanding" — used by src/drain_batches.py, which only ever drains
     what's already in flight and must never decide what new work to submit
     (that stays src/enrich_jobs.py's job).
+
+    persist_transform: optional dict -> dict applied to the retrieved
+    results ONLY for what gets staged into batch_results.raw, not to
+    BatchOutcome.results (the caller always sees the bare results) — see
+    src/tier2_enrich.py, whose custom_id is an anonymous index and needs
+    each staged row wrapped with recovery context.
+
+    manifest: optional request-time snapshot, persisted alongside a FRESH
+    submission only (see src.supabase_client.record_batch_submitted) — not
+    applicable when resuming an already-outstanding batch, since that
+    submission already carries whatever manifest it was created with.
 
     NEVER raises on a slow batch — exhausting *budget_seconds* is a normal
     "pending" outcome. sleep_fn/monotonic_fn are injectable (default
@@ -289,7 +310,7 @@ def resume_or_submit(
     elif requests:
         batch = anthropic_client.messages.batches.create(requests=requests)
         batch_id = batch.id
-        record_batch_submitted(client, batch_id, module)
+        record_batch_submitted(client, batch_id, module, manifest=manifest)
         if not _try_claim(client, batch_id, "submitted"):
             # Vanishingly unlikely (nobody else can know this batch_id until
             # the INSERT above commits) but handled uniformly rather than
@@ -307,4 +328,5 @@ def resume_or_submit(
     return _poll_claimed_batch(
         anthropic_client, client, batch_id,
         budget_seconds=budget_seconds, sleep_fn=sleep_fn, monotonic_fn=monotonic_fn,
+        persist_transform=persist_transform,
     )

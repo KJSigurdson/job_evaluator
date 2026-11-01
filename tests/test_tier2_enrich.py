@@ -436,7 +436,12 @@ def test_tier2_enrich_marks_batch_results_processed_after_matches_v2_write(fake_
 
 
 def test_tier2_enrich_resumes_outstanding_batch_instead_of_resubmitting(fake_client):
-    fake_client.seed("batch_submissions", [{"batch_id": "orphaned_batch", "module": "tier2_enrich", "status": "submitted"}])
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    fake_client.seed("batch_submissions", [{
+        "batch_id": "orphaned_batch", "module": "tier2_enrich", "status": "submitted",
+        "created_at": now, "updated_at": now,
+    }])
     anthropic_client = _FakeAnthropicClient(rounds=[])
 
     class _ResumableBatchesAPI(_FakeBatchesAPI):

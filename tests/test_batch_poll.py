@@ -167,6 +167,27 @@ def test_resume_persists_results_to_batch_results(fake_client):
     assert stored["custom_id"] == "job-1"
 
 
+def test_persist_transform_wraps_staged_results_but_not_the_returned_outcome(fake_client):
+    """src/tier2_enrich.py's use case: custom_id is an anonymous index, so the
+    staged copy needs extra recovery context wrapped around each raw result
+    — but the caller (tier2_enrich's own live-path parsing) must still see
+    the bare result, not the wrapper."""
+    fake_client.seed("batch_submissions", [_row("existing_batch")])
+    anthropic_client = _FakeAnthropicClient(
+        statuses=["ended"],
+        results=[_FakeResultItem("0", _FakeResult({"type": "succeeded"}))],
+    )
+
+    outcome = resume_or_submit(
+        anthropic_client, fake_client, module="enrich_jobs", requests=None,
+        persist_transform=lambda results: {cid: {"llm_result": raw, "context": {"job_id": "j1"}} for cid, raw in results.items()},
+    )
+
+    assert outcome.results == {"0": {"type": "succeeded"}}
+    [stored] = fake_client.table("batch_results").rows
+    assert stored["raw"] == {"llm_result": {"type": "succeeded"}, "context": {"job_id": "j1"}}
+
+
 # ---------------------------------------------------------------------------
 # Budget exhaustion returns pending, exits cleanly (no exception), leaves
 # the row open (resumable)

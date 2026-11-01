@@ -11,6 +11,7 @@ from src.supabase_client import (
     chunked_insert,
     chunked_upsert,
     fetch_all,
+    fetch_batch_manifest,
     find_outstanding_batch,
     persist_batch_results,
     record_batch_retrieved,
@@ -113,6 +114,32 @@ def test_record_batch_submitted_writes_submitted_row(fake_client):
     assert row["batch_id"] == "batch_1"
     assert row["module"] == "enrich_jobs"
     assert row["status"] == "submitted"
+    assert row["manifest"] is None
+
+
+def test_record_batch_submitted_persists_manifest(fake_client):
+    manifest = {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
+    record_batch_submitted(fake_client, "batch_1", "tier1_rerank", manifest=manifest)
+
+    [row] = fake_client.table("batch_submissions").rows
+    assert row["manifest"] == manifest
+
+
+def test_fetch_batch_manifest_returns_persisted_manifest(fake_client):
+    manifest = {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
+    record_batch_submitted(fake_client, "batch_1", "tier1_rerank", manifest=manifest)
+
+    assert fetch_batch_manifest(fake_client, "batch_1") == manifest
+
+
+def test_fetch_batch_manifest_none_when_batch_unknown(fake_client):
+    assert fetch_batch_manifest(fake_client, "batch_unknown") is None
+
+
+def test_fetch_batch_manifest_none_when_submitted_without_one(fake_client):
+    record_batch_submitted(fake_client, "batch_1", "enrich_jobs")
+
+    assert fetch_batch_manifest(fake_client, "batch_1") is None
 
 
 def test_find_outstanding_batch_returns_none_when_no_submissions(fake_client):

@@ -1,8 +1,10 @@
-"""Tests for src/tier1_rerank.py: prompt content, response parsing, the
-orchestration flow (batch submit -> parse/validate -> one retry -> give up),
-and crash-safety (batch_submissions/batch_results lifecycle, reprocess_staged())
-against a fake Anthropic Batches client and the existing FakeSupabaseClient."""
+"""Tests for src/tier1_rerank.py: prompt content, response parsing, chunking,
+verdict writing/validity, and the single-batch-per-run orchestration (batch
+submit -> parse/validate -> one retry -> drop) against a fake Anthropic
+Batches client and the existing FakeSupabaseClient."""
 from __future__ import annotations
+
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -10,11 +12,18 @@ from pydantic import ValidationError
 from src import tier1_rerank
 from src.models.tier1_rerank import Tier1RerankOutput
 from src.tier1_rerank import (
+    TIER1_MAX_PER_USER,
+    _build_manifest,
+    _chunk_user_requests,
     _merge_tool_use_blocks,
     _parse_scores,
+    _write_verdicts,
+    apply_drained_batch,
     build_prompt,
     build_retry_prompt,
-    rerank_tier1,
+    fetch_valid_verdict_job_ids,
+    reprocess_staged,
+    rerank_tier1_batch,
 )
 
 
@@ -31,9 +40,26 @@ def _job_card(job_id="job-1", **overrides) -> dict:
         id=job_id, title="Head of Data", org="GiveDirectly",
         enrichment={"summary": "Lead the data team.", "seniority": ["senior"],
                     "cause_area": ["global health"], "skill_tags": ["SQL", "Python"]},
+        enriched_at="2026-10-01T00:00:00+00:00",
     )
     defaults.update(overrides)
     return defaults
+
+
+def _seed_manifest(fake_client, batch_id, *, entries=None, jobs=None, user_id="u1",
+                    profile_content_hash="hash-abc", custom_id="u1:0", module="tier1_rerank"):
+    """Seed a batch_submissions row carrying the request-time manifest
+    _write_verdicts/apply_drained_batch/reprocess_staged read via
+    fetch_batch_manifest — i.e. simulate "this is what was persisted
+    alongside the batch at submission time", independent of whatever `jobs`/
+    `profiles` currently say. entries, if given, overrides the single
+    custom_id/user_id/jobs shortcut with an arbitrary {custom_id: {...}} dict."""
+    manifest = entries if entries is not None else {
+        custom_id: {"user_id": user_id, "profile_content_hash": profile_content_hash, "jobs": jobs or {}},
+    }
+    fake_client.seed("batch_submissions", [{
+        "batch_id": batch_id, "module": module, "status": "retrieved", "manifest": manifest,
+    }])
 
 
 def _valid_output_dict(job_ids=("job-1",)) -> dict:
@@ -89,7 +115,7 @@ def test_build_retry_prompt_appends_validation_error():
 
 
 # ---------------------------------------------------------------------------
-# Response parsing — operates on plain dicts (see module docstring)
+# Response parsing — operates on plain dicts
 # ---------------------------------------------------------------------------
 
 def _block(input_data, *, type="tool_use", name="score_jobs") -> dict:  # noqa: A002
@@ -128,7 +154,197 @@ def test_parse_scores_invalid_raises_validation_error():
 
 
 # ---------------------------------------------------------------------------
-# rerank_tier1() orchestration — fake Anthropic Batches client + FakeSupabaseClient
+# _chunk_user_requests — custom_id = f"{user_id}:{chunk_index}", at most
+# _CHUNK_SIZE (40) job cards per chunk
+# ---------------------------------------------------------------------------
+
+def test_chunk_user_requests_single_chunk_under_cap():
+    user_requests = {"u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": [_job_card("job-1")]}}
+    chunks = _chunk_user_requests(user_requests)
+    assert list(chunks.keys()) == ["u1:0"]
+    assert chunks["u1:0"][0] == "u1"
+    assert len(chunks["u1:0"][1]) == 1
+
+
+def test_chunk_user_requests_splits_at_40():
+    cards = [_job_card(f"job-{i}") for i in range(85)]
+    user_requests = {"u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": cards}}
+    chunks = _chunk_user_requests(user_requests)
+    assert set(chunks.keys()) == {"u1:0", "u1:1", "u1:2"}
+    assert len(chunks["u1:0"][1]) == 40
+    assert len(chunks["u1:1"][1]) == 40
+    assert len(chunks["u1:2"][1]) == 5
+
+
+def test_chunk_user_requests_multiple_users_namespaced_independently():
+    user_requests = {
+        "u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": [_job_card("job-1")]},
+        "u2": {"profile": _profile(), "gate_constraints": {}, "job_cards": [_job_card("job-2")]},
+    }
+    chunks = _chunk_user_requests(user_requests)
+    assert set(chunks.keys()) == {"u1:0", "u2:0"}
+    assert chunks["u1:0"][0] == "u1"
+    assert chunks["u2:0"][0] == "u2"
+
+
+def test_tier1_max_per_user_is_200():
+    assert TIER1_MAX_PER_USER == 200
+
+
+# ---------------------------------------------------------------------------
+# _build_manifest — the request-time snapshot persisted alongside a batch
+# submission (see src.batch_poll.resume_or_submit's manifest param)
+# ---------------------------------------------------------------------------
+
+def test_build_manifest_captures_job_enriched_at_and_profile_hash():
+    user_requests = {
+        "u1": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-abc",
+               "job_cards": [_job_card("job-1", enriched_at="t1"), _job_card("job-2", enriched_at="t2")]},
+    }
+    chunks = _chunk_user_requests(user_requests)
+
+    manifest = _build_manifest(chunks, user_requests)
+
+    assert manifest == {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1", "job-2": "t2"}}}
+
+
+def test_build_manifest_namespaces_each_chunk_independently():
+    user_requests = {
+        "u1": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-u1",
+               "job_cards": [_job_card("job-1", enriched_at="t1")]},
+        "u2": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-u2",
+               "job_cards": [_job_card("job-2", enriched_at="t2")]},
+    }
+    chunks = _chunk_user_requests(user_requests)
+
+    manifest = _build_manifest(chunks, user_requests)
+
+    assert manifest["u1:0"]["profile_content_hash"] == "hash-u1"
+    assert manifest["u2:0"]["profile_content_hash"] == "hash-u2"
+
+
+# ---------------------------------------------------------------------------
+# _write_verdicts — job_enriched_at/profile_content_hash come from the
+# batch's own REQUEST-TIME manifest (fetch_batch_manifest), never a fresh
+# `jobs`/`profiles` read at write time.
+# ---------------------------------------------------------------------------
+
+def _score(job_id="job-1", score=80, reason="good fit"):
+    from src.models.tier1_rerank import JobScore
+    return JobScore(job_id=job_id, score=score, reason=reason)
+
+
+def test_write_verdicts_upserts_using_batch_manifest(fake_client):
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+
+    written = _write_verdicts(fake_client, {"u1": [_score("job-1", 80, "good fit")]}, "batch_1")
+
+    assert written == 1
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["user_id"] == "u1"
+    assert row["job_id"] == "job-1"
+    assert row["score"] == 80
+    assert row["rationale"] == {"reason": "good fit"}
+    assert row["job_enriched_at"] == "2026-10-01T00:00:00+00:00"
+    assert row["profile_content_hash"] == "hash-abc"
+    assert row["batch_id"] == "batch_1"
+
+
+def test_write_verdicts_ignores_current_jobs_table_entirely(fake_client):
+    """The defining behavior change: even if `jobs` has a DIFFERENT (newer)
+    enriched_at for this job right now, the verdict must record what the
+    manifest says was sent, not current state. See also
+    test_apply_drained_batch_uses_request_time_manifest_not_current_job_state
+    for the end-to-end drainer version of this same guarantee."""
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-20T00:00:00+00:00"}])
+
+    _write_verdicts(fake_client, {"u1": [_score("job-1", 80, "good fit")]}, "batch_1")
+
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["job_enriched_at"] == "2026-10-01T00:00:00+00:00"
+
+
+def test_write_verdicts_writes_below_threshold_scores_too(fake_client):
+    """Every score is upserted, not just ones clearing a threshold — Tier 2
+    threshold filtering reads this table later, it doesn't gate writes here."""
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+
+    _write_verdicts(fake_client, {"u1": [_score("job-1", 12, "poor fit")]}, "batch_1")
+
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["score"] == 12
+
+
+def test_write_verdicts_skips_score_missing_from_manifest(fake_client):
+    """A score whose job_id isn't in this batch's manifest at all (shouldn't
+    happen — the manifest is built from the same job_cards the request was
+    built from) is skipped rather than guessed at from current `jobs` state."""
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+
+    written = _write_verdicts(fake_client, {"u1": [_score("some-other-job")]}, "batch_1")
+
+    assert written == 0
+    assert fake_client.table("tier1_verdicts").rows == []
+
+
+def test_write_verdicts_no_manifest_for_batch_skips_everything(fake_client):
+    """A batch_id with no batch_submissions row at all (or no manifest
+    column set) yields no verdicts — never falls back to current `jobs`/
+    `profiles` state."""
+    written = _write_verdicts(fake_client, {"u1": [_score("job-1")]}, "batch_unknown")
+
+    assert written == 0
+    assert fake_client.table("tier1_verdicts").rows == []
+
+
+def test_write_verdicts_noop_on_empty_input(fake_client):
+    assert _write_verdicts(fake_client, {}, "batch_1") == 0
+
+
+# ---------------------------------------------------------------------------
+# fetch_valid_verdict_job_ids — valid iff job_enriched_at AND
+# profile_content_hash both still match current state
+# ---------------------------------------------------------------------------
+
+def test_fetch_valid_verdict_job_ids_valid_when_both_match(fake_client):
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-1", "job_enriched_at": "2026-10-01T00:00:00+00:00",
+        "profile_content_hash": "hash-abc",
+    }])
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-01T00:00:00+00:00"}])
+
+    assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-abc") == {"job-1"}
+
+
+def test_fetch_valid_verdict_job_ids_invalid_when_job_reenriched(fake_client):
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-1", "job_enriched_at": "2026-10-01T00:00:00+00:00",
+        "profile_content_hash": "hash-abc",
+    }])
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-15T00:00:00+00:00"}])  # re-enriched since
+
+    assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-abc") == set()
+
+
+def test_fetch_valid_verdict_job_ids_invalid_when_profile_changed(fake_client):
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-1", "job_enriched_at": "2026-10-01T00:00:00+00:00",
+        "profile_content_hash": "hash-abc",
+    }])
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-01T00:00:00+00:00"}])
+
+    assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-NEW") == set()
+
+
+def test_fetch_valid_verdict_job_ids_empty_when_no_verdicts(fake_client):
+    assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-abc") == set()
+
+
+# ---------------------------------------------------------------------------
+# rerank_tier1_batch() orchestration — fake Anthropic Batches client (same
+# "always ended immediately" fake as test_enrich_jobs.py, compatible with
+# src.batch_poll.resume_or_submit) + FakeSupabaseClient
 # ---------------------------------------------------------------------------
 
 class _FakeSucceededResult:
@@ -141,14 +357,6 @@ class _FakeSucceededResult:
                 "usage": usage or {"input_tokens": 1000, "output_tokens": 200},
             },
         }
-
-    def model_dump(self, mode="json"):
-        return self._dump
-
-
-class _FakeErroredResult:
-    def __init__(self, kind="errored"):
-        self._dump = {"type": kind}
 
     def model_dump(self, mode="json"):
         return self._dump
@@ -167,6 +375,11 @@ class _FakeBatch:
 
 
 class _FakeBatchesAPI:
+    """*rounds* is a list of "result item lists" — one per expected .create()
+    call, in order. Each .create() call reports processing_status='ended'
+    immediately, matching src.batch_poll's "ended on first retrieve" happy
+    path (no real polling loop exercised here)."""
+
     def __init__(self, rounds: list[list]):
         self._rounds = list(rounds)
         self._counter = 0
@@ -197,218 +410,289 @@ class _FakeAnthropicClient:
         self.messages = _FakeMessagesAPI(_FakeBatchesAPI(rounds))
 
 
-def _users_input(user_ids=("u1",)) -> dict:
+def _user_requests(user_ids=("u1",), job_cards=None) -> dict:
     return {
-        uid: {"profile": _profile(), "gate_constraints": _profile()["hard_constraints"], "job_cards": [_job_card()]}
+        uid: {"profile": _profile(), "gate_constraints": _profile()["hard_constraints"],
+              "profile_content_hash": "hash-abc", "job_cards": job_cards or [_job_card()]}
         for uid in user_ids
     }
 
 
-def test_rerank_tier1_happy_path_all_succeed_round_one(fake_client):
+def test_rerank_tier1_batch_happy_path_single_user_single_chunk(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
-    result = rerank_tier1(fake_client, anthropic_client, users=_users_input())
+    result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
-    assert "u1" in result
-    assert result["u1"]["scores"][0].job_id == "job-1"
-    assert len(anthropic_client.messages.batches.created_batches) == 1
-
-
-def test_rerank_tier1_failure_then_successful_retry(fake_client):
-    # Round 1's payload is missing required fields (score/reason) to force a retry.
-    anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block({"scores": [{"job_id": "job-1"}]})))],  # missing score/reason
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
-    ])
-
-    result = rerank_tier1(fake_client, anthropic_client, users=_users_input())
-
-    assert "u1" in result
-    assert len(anthropic_client.messages.batches.created_batches) == 2
-    retry_request = anthropic_client.messages.batches.created_batches[1][0]
-    retry_prompt = retry_request["params"]["messages"][0]["content"]
-    assert "previous attempt" in retry_prompt.lower()
+    assert result == {"status": "complete", "scored": 1, "failed": 0}
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["user_id"] == "u1"
+    assert row["job_id"] == "job-1"
+    # From the request-time manifest built off _job_card()'s/_user_requests()'s
+    # own defaults — NOT a DB read (there's no `jobs`/`profiles` seeded at all
+    # in this test).
+    assert row["job_enriched_at"] == "2026-10-01T00:00:00+00:00"
+    assert row["profile_content_hash"] == "hash-abc"
+    assert len(anthropic_client.messages.batches.created_batches) == 1  # ONE batch for everyone
 
 
-def test_rerank_tier1_fails_both_rounds_excluded_from_result(fake_client):
-    anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeErroredResult())],
-        [_FakeResultItem("u1", _FakeErroredResult())],
-    ])
-
-    result = rerank_tier1(fake_client, anthropic_client, users=_users_input())
-
-    assert result == {}
-
-
-def test_rerank_tier1_mixed_users_one_succeeds_one_fails(fake_client):
+def test_rerank_tier1_batch_covers_multiple_users_in_one_batch(fake_client):
+    user_requests = {
+        "u1": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-u1",
+               "job_cards": [_job_card("job-1")]},
+        "u2": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-u2",
+               "job_cards": [_job_card("job-2")]},
+    }
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
-            _FakeResultItem("u-good", _FakeSucceededResult(_block(_valid_output_dict()))),
-            _FakeResultItem("u-bad", _FakeErroredResult()),
+            _FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
+            _FakeResultItem("u2:0", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
         ],
-        [_FakeResultItem("u-bad", _FakeErroredResult())],
     ])
 
-    result = rerank_tier1(fake_client, anthropic_client, users=_users_input(["u-good", "u-bad"]))
+    result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=user_requests)
 
-    assert "u-good" in result
-    assert "u-bad" not in result
+    assert result["scored"] == 2
+    [single_batch] = anthropic_client.messages.batches.created_batches
+    assert len(single_batch) == 2  # both users' chunks in the SAME batch
+    user_ids = {row["user_id"] for row in fake_client.table("tier1_verdicts").rows}
+    assert user_ids == {"u1", "u2"}
 
 
-def test_rerank_tier1_empty_users_returns_empty_no_batch_call(fake_client):
+def test_rerank_tier1_batch_multiple_chunks_for_one_user_in_one_batch(fake_client):
+    cards = [_job_card("job-1", enriched_at="t1"), _job_card("job-2", enriched_at="t1")]
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [
+            _FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
+            _FakeResultItem("u1:1", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
+        ],
+    ])
+
+    result = rerank_tier1_batch(
+        fake_client, anthropic_client,
+        user_requests={"u1": {"profile": _profile(), "gate_constraints": {}, "profile_content_hash": "hash-abc", "job_cards": cards}},
+    )
+    # Force two chunks by monkeypatching _CHUNK_SIZE would be cleaner, but the
+    # test above (test_chunk_user_requests_splits_at_40) already covers the
+    # actual chunk-size boundary; here we just confirm two results merge into
+    # one user's verdict set correctly within a single batch.
+    assert result["scored"] == 2
+
+
+def test_rerank_tier1_batch_empty_user_requests_still_checks_for_outstanding(fake_client):
+    """Spec F: a user with zero unscored candidates contributes nothing to
+    user_requests — but the batch call must still happen (not short-circuit)
+    so an outstanding batch from a prior crashed run can still be resumed."""
     anthropic_client = _FakeAnthropicClient(rounds=[])
 
-    result = rerank_tier1(fake_client, anthropic_client, users={})
+    result = rerank_tier1_batch(fake_client, anthropic_client, user_requests={})
 
-    assert result == {}
+    assert result == {"status": "complete", "scored": 0, "failed": 0}
     assert anthropic_client.messages.batches.created_batches == []
-    assert fake_client.table("run_metrics").rows == []
 
 
-def test_rerank_tier1_writes_run_metrics_with_cost_from_actual_usage(fake_client):
+def test_rerank_tier1_batch_failure_then_successful_retry(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(
-            _block(_valid_output_dict()), usage={"input_tokens": 2000, "output_tokens": 300},
-        ))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
-    rerank_tier1(fake_client, anthropic_client, users=_users_input())
+    result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
-    [metrics] = fake_client.table("run_metrics").rows
-    assert metrics["tier1_calls"] == 1
-    assert metrics["estimated_cost_usd"] > 0
+    assert result == {"status": "complete", "scored": 1, "failed": 0}
+    assert len(anthropic_client.messages.batches.created_batches) == 2
+    # The retried chunk's verdict must carry the RETRY batch's own batch_id
+    # (and therefore its own manifest) — not round 1's, whose chunk for this
+    # custom_id is the one that failed to parse.
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["batch_id"] == "batch_2"
+    assert row["job_enriched_at"] == "2026-10-01T00:00:00+00:00"
 
 
-def test_rerank_tier1_run_metrics_stamped_with_run_id_stage_trigger(fake_client):
+def test_rerank_tier1_batch_fails_both_rounds_dropped_not_partial(fake_client):
+    bad_block = _block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(bad_block))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(bad_block))],
     ])
 
-    rerank_tier1(fake_client, anthropic_client, users=_users_input(), run_id="run-abc", trigger="scheduled")
+    result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
-    [metrics] = fake_client.table("run_metrics").rows
-    assert metrics["run_id"] == "run-abc"
-    assert metrics["stage"] == "tier1"
-    assert metrics["trigger"] == "scheduled"
+    assert result == {"status": "complete", "scored": 0, "failed": 1}
+    assert fake_client.table("tier1_verdicts").rows == []
 
 
-# ---------------------------------------------------------------------------
-# Crash-safety: batch_submissions / batch_results lifecycle
-# ---------------------------------------------------------------------------
-
-def test_rerank_tier1_records_batch_submission_and_retrieval(fake_client):
+def test_rerank_tier1_batch_records_batch_submission_and_retrieval(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
-    rerank_tier1(fake_client, anthropic_client, users=_users_input())
+    rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
     [submission] = fake_client.table("batch_submissions").rows
     assert submission["module"] == "tier1_rerank"
     assert submission["status"] == "retrieved"
+    # The request-time manifest is persisted alongside the submission, not
+    # derived at write time — see _build_manifest/record_batch_submitted.
+    assert submission["manifest"] == {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "2026-10-01T00:00:00+00:00"}}}
 
 
-def test_rerank_tier1_persists_raw_results_before_parsing(fake_client):
+def test_rerank_tier1_batch_persists_raw_results_and_marks_processed(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
-    rerank_tier1(fake_client, anthropic_client, users=_users_input())
+    rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
     [staged] = fake_client.table("batch_results").rows
-    assert staged["custom_id"] == "u1"
+    assert staged["custom_id"] == "u1:0"
     assert staged["raw"]["type"] == "succeeded"
-
-
-def test_rerank_tier1_marks_batch_results_processed_after_parsing(fake_client):
-    anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))],
-    ])
-
-    rerank_tier1(fake_client, anthropic_client, users=_users_input())
-
-    [staged] = fake_client.table("batch_results").rows
     assert staged["processed"] is True
 
 
-def test_rerank_tier1_resumes_outstanding_batch_instead_of_resubmitting(fake_client):
-    fake_client.seed("batch_submissions", [{"batch_id": "orphaned_batch", "module": "tier1_rerank", "status": "submitted"}])
-    anthropic_client = _FakeAnthropicClient(rounds=[])
+def test_rerank_tier1_batch_writes_run_metrics(fake_client):
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
 
-    class _ResumableBatchesAPI(_FakeBatchesAPI):
-        def retrieve(self, batch_id):
-            assert batch_id == "orphaned_batch"
-            return _FakeBatch(batch_id)
+    rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests(), run_id="run-abc", trigger="scheduled")
 
-        def results(self, batch_id):
-            assert batch_id == "orphaned_batch"
-            return [_FakeResultItem("u1", _FakeSucceededResult(_block(_valid_output_dict())))]
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["stage"] == "tier1"
+    assert metrics["run_id"] == "run-abc"
+    assert metrics["trigger"] == "scheduled"
+    assert metrics["tier1_calls"] == 1
+    assert metrics["estimated_cost_usd"] > 0
 
-    anthropic_client.messages.batches = _ResumableBatchesAPI(rounds=[])
 
-    result = rerank_tier1(fake_client, anthropic_client, users=_users_input())
+def test_rerank_tier1_batch_pending_writes_zero_count_run_metrics_and_stops(fake_client, monkeypatch):
+    from src.batch_poll import BatchOutcome
 
-    assert "u1" in result
-    assert anthropic_client.messages.batches.created_batches == []
+    monkeypatch.setattr(
+        tier1_rerank, "resume_or_submit",
+        lambda *a, **k: BatchOutcome(status="pending", batch_id="batch_x", request_counts={"processing": 1}),
+    )
+
+    result = rerank_tier1_batch(fake_client, anthropic_client=object(), user_requests=_user_requests())
+
+    assert result["status"] == "pending"
+    assert result["batch_id"] == "batch_x"
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["stage"] == "tier1"
+    assert metrics["tier1_calls"] == 0
+    assert fake_client.table("tier1_verdicts").rows == []
 
 
 # ---------------------------------------------------------------------------
-# reprocess_staged — recovery path, no API call
+# apply_drained_batch() — drainer-only, verdicts ONLY, no retry
 # ---------------------------------------------------------------------------
 
-def test_reprocess_staged_no_unprocessed_rows_is_noop(fake_client):
-    assert tier1_rerank.reprocess_staged(fake_client, "batch_1") == {}
+def test_apply_drained_batch_writes_verdicts(fake_client):
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+
+    result = apply_drained_batch(fake_client, results, batch_id="batch_1")
+
+    assert result == {"scored": 1, "failed": 0}
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["user_id"] == "u1"
+    assert row["batch_id"] == "batch_1"
 
 
-def test_reprocess_staged_parses_without_api_call(fake_client):
-    fake_client.seed("batch_results", [{
-        "batch_id": "batch_1", "custom_id": "u1",
-        "raw": _FakeSucceededResult(_block(_valid_output_dict())).model_dump(),
-        "processed": False,
-    }])
+def test_apply_drained_batch_uses_request_time_manifest_not_current_job_state(fake_client):
+    """The core correctness fix this change exists for: the drainer applies
+    results in a SEPARATE process, potentially hours after submission (the
+    daily pipeline submitted the batch; its own poll budget ran out; the
+    hourly drainer picks it up later). If job-1 gets re-enriched in that
+    window, the verdict must still record what the LLM actually scored
+    against (the OLD, request-time enriched_at from the manifest) — not
+    whatever `jobs` says right now. And because job_enriched_at then no
+    longer matches jobs.enriched_at, fetch_valid_verdict_job_ids must treat
+    the resulting verdict as INVALID, not accidentally valid."""
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})  # request-time (OLD)
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-20T00:00:00+00:00"}])  # re-enriched since (current)
+    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
 
-    result = tier1_rerank.reprocess_staged(fake_client, "batch_1")
+    result = apply_drained_batch(fake_client, results, batch_id="batch_1")
 
-    assert "u1" in result
-    assert result["u1"]["scores"][0].job_id == "job-1"
+    assert result == {"scored": 1, "failed": 0}
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["job_enriched_at"] == "2026-10-01T00:00:00+00:00"  # from the manifest, not current jobs.enriched_at
+
+    assert fetch_valid_verdict_job_ids(fake_client, "u1", "hash-abc") == set()
 
 
-def test_reprocess_staged_marks_rows_processed(fake_client):
-    fake_client.seed("batch_results", [{
-        "batch_id": "batch_1", "custom_id": "u1",
-        "raw": _FakeSucceededResult(_block(_valid_output_dict())).model_dump(),
-        "processed": False,
-    }])
+def test_apply_drained_batch_parse_failure_dropped_no_retry(fake_client):
+    bad = _FakeSucceededResult(_block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})).model_dump()
 
-    tier1_rerank.reprocess_staged(fake_client, "batch_1")
+    result = apply_drained_batch(fake_client, {"u1:0": bad}, batch_id="batch_1")
+
+    assert result == {"scored": 0, "failed": 1}
+
+
+def test_apply_drained_batch_marks_processed(fake_client):
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": {}, "processed": False}])
+    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+
+    apply_drained_batch(fake_client, results, batch_id="batch_1")
 
     [row] = fake_client.table("batch_results").rows
     assert row["processed"] is True
-    assert row["raw"] is not None
+
+
+def test_apply_drained_batch_no_manifest_skips_verdicts_instead_of_guessing(fake_client):
+    """A batch with no manifest persisted (shouldn't happen for tier1_rerank
+    going forward, but possible for one submitted before the manifest column
+    existed) must never fall back to reading current `jobs`/`profiles` —
+    that's exactly the write-time-state bug this change fixes."""
+    fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-01T00:00:00+00:00"}])
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_content_hash": "hash-abc"}])
+    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+
+    result = apply_drained_batch(fake_client, results, batch_id="batch_no_manifest")
+
+    assert result == {"scored": 0, "failed": 0}
+    assert fake_client.table("tier1_verdicts").rows == []
+
+
+# ---------------------------------------------------------------------------
+# reprocess_staged() — same-process recovery, no new API call, no retry
+# ---------------------------------------------------------------------------
+
+def test_reprocess_staged_no_unprocessed_rows_is_noop(fake_client):
+    assert reprocess_staged(fake_client, "batch_1") == {"selected": 0, "scored": 0, "failed": 0}
+
+
+def test_reprocess_staged_writes_verdicts_without_api_call(fake_client):
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
+
+    result = reprocess_staged(fake_client, "batch_1")
+
+    assert result == {"selected": 1, "scored": 1, "failed": 0}
+    [row] = fake_client.table("tier1_verdicts").rows
+    assert row["user_id"] == "u1"
 
 
 def test_reprocess_staged_does_not_write_run_metrics(fake_client):
-    fake_client.seed("batch_results", [{
-        "batch_id": "batch_1", "custom_id": "u1",
-        "raw": _FakeSucceededResult(_block(_valid_output_dict())).model_dump(),
-        "processed": False,
-    }])
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
 
-    tier1_rerank.reprocess_staged(fake_client, "batch_1")
+    reprocess_staged(fake_client, "batch_1")
 
     assert fake_client.table("run_metrics").rows == []
 
 
-def test_reprocess_staged_failure_excluded_from_result(fake_client):
-    fake_client.seed("batch_results", [{
-        "batch_id": "batch_1", "custom_id": "u1",
-        "raw": _FakeErroredResult().model_dump(),
-        "processed": False,
-    }])
+def test_reprocess_staged_marks_rows_processed(fake_client):
+    _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
+    raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
 
-    result = tier1_rerank.reprocess_staged(fake_client, "batch_1")
+    reprocess_staged(fake_client, "batch_1")
 
-    assert result == {}
+    [row] = fake_client.table("batch_results").rows
+    assert row["processed"] is True

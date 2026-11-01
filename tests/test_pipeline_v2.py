@@ -1,7 +1,13 @@
 """Tests for src/pipeline_v2.py: orchestration/wiring for both the scheduled
 full pipeline and the manual DB-only path, skip logic for incomplete
-profiles, already-matched exclusion, digest payload mapping, and
-search_quota bookkeeping.
+profiles, already-matched/valid-verdict exclusion, digest payload mapping,
+and search_quota bookkeeping.
+
+Phase 2: the old single _match_and_notify_user() per-user function is split
+into _prepare_tier1_request() (Phase A: gate -> exclude matched/valid-verdict
+-> vector top-N, no LLM calls) and _finish_user_matching() (Phase C: Tier 2
+candidates from tier1_verdicts, Tier 2, digest) — Phase B (ONE Tier 1 Batches
+submission across every user) sits between them in run().
 
 Submodules (ingest/enrich_jobs/match_v2/tier1_rerank/tier2_enrich/
 profile_embed) each have their own dedicated test suite already — these
@@ -16,8 +22,7 @@ import json
 import pytest
 
 from src import pipeline_v2
-from src.models.tier1_rerank import JobScore
-from src.pipeline_v2 import _build_digest_payload, _match_and_notify_user, run
+from src.pipeline_v2 import _build_digest_payload, _finish_user_matching, _prepare_tier1_request, run
 
 
 def _profile_row(**kwargs) -> dict:
@@ -47,9 +52,20 @@ def _job(job_id="job-1", **overrides) -> dict:
     defaults = dict(
         id=job_id, title="Head of Data", org="GiveDirectly",
         canonical_url=f"https://example.org/{job_id}", location_field="Remote, Global",
-        raw_description="text", source_board="80000_hours",
-        enrichment={"summary": "Lead data.", "seniority": ["senior"], "cause_area": ["global health"],
-                    "skill_tags": ["SQL"]},
+        raw_description="text", source_board="80000_hours", enriched_at="2026-10-01T00:00:00+00:00",
+        enrichment={
+            "summary": "Lead data.", "seniority": ["senior"], "cause_area": ["global health"],
+            "skill_tags": ["SQL"],
+            # gate_v2 decides "fully remote" from this structured field, NOT a
+            # location_field text match (see src/gate_v2.py's module
+            # docstring) — without it, a job with no stated work_arrangement
+            # never passes accept_fully_remote=True, regardless of
+            # location_field's text.
+            "work_arrangement": {
+                "mode": "remote", "remote_scope": "global", "eligible_regions": [],
+                "timezone_constraint": None, "restriction_type": None,
+            },
+        },
     )
     defaults.update(overrides)
     return defaults
@@ -62,6 +78,31 @@ def _seed_active_user(fake_client, *, profile_embedding=None, **profile_override
     fake_client.seed("scoring_weights", [_weights_row()])
 
 
+def _user_context(profile: dict, rubric: dict | None = None):
+    from src.schemas import UserContext
+    # threshold: 0.65 mirrors _weights_row()'s old-style default — 0.65*100==65,
+    # so score=40/score=80 fixtures elsewhere mean what their comments say
+    # without every one needing its own rubric override.
+    return UserContext(user_id="u1", profile=profile, rubric=rubric or {"threshold": 0.65})
+
+
+def _prep(user_id="u1", *, skipped=None, gate_survivor_count=1, profile_content_hash=None, job_cards=None) -> dict:
+    return {
+        "user_id": user_id, "skipped": skipped, "gate_survivor_count": gate_survivor_count,
+        "profile_content_hash": profile_content_hash,
+        "job_cards": job_cards if job_cards is not None else [
+            {"id": "job-1", "title": "Head of Data", "org": "GiveDirectly", "enrichment": {}},
+        ],
+    }
+
+
+def _candidate(job_id="job-1", tier1_score=80, tier1_reason="Great fit", job=None) -> dict:
+    return {
+        "user_id": "u1", "profile": {}, "job": job or _job(job_id),
+        "tier1_score": tier1_score, "tier1_reason": tier1_reason,
+    }
+
+
 # ---------------------------------------------------------------------------
 # _build_digest_payload — v2 matches_v2 rows -> v1's exact digest shape
 # ---------------------------------------------------------------------------
@@ -69,9 +110,7 @@ def _seed_active_user(fake_client, *, profile_embedding=None, **profile_override
 def test_build_digest_payload_maps_v2_fields_to_v1_shape():
     matches_v2_rows = [{"job_id": "job-1", "tier1_score": 82, "tier2": {"why_fits": "- Strong fit"}}]
     jobs_by_id = {"job-1": _job()}
-
     payload = _build_digest_payload(matches_v2_rows, jobs_by_id)
-
     assert payload == [{
         "title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
         "fit_score": 82, "why_fits": "- Strong fit", "url": "https://example.org/job-1",
@@ -84,205 +123,236 @@ def test_build_digest_payload_skips_row_with_no_matching_job():
 
 
 # ---------------------------------------------------------------------------
-# _match_and_notify_user — skip logic
+# _prepare_tier1_request — Phase A: skip logic, exclusion, gate rejections
 # ---------------------------------------------------------------------------
 
-def _user_context(profile: dict, rubric: dict | None = None):
-    from src.schemas import UserContext
-    # threshold: 0.65 mirrors _weights_row()'s old-style default and the "below 65"
-    # comments on tests further down that pre-date per-user threshold wiring —
-    # 0.65 * 100 == 65, so those tests' score=40/score=80 fixtures still mean what
-    # their comments say without every one of them needing its own rubric override.
-    return UserContext(user_id="u1", profile=profile, rubric=rubric or {"threshold": 0.65})
-
-
-def test_match_and_notify_user_skips_empty_profile(fake_client):
+def test_prepare_tier1_request_skips_empty_profile(fake_client):
     user = _user_context({"career_goals": None, "cause_priorities": None, "experience_inventory": None,
                            "skills": None, "values_notes": None, "hard_constraints": {}})
 
-    result = _match_and_notify_user(fake_client, object(), user, [], dry_run=False)
+    result = _prepare_tier1_request(fake_client, user, [])
 
-    assert result == {"user_id": "u1", "skipped": "empty_profile"}
+    assert result["skipped"] == "empty_profile"
+    assert result["job_cards"] == []
 
 
-def test_match_and_notify_user_skips_no_profile_embedding(fake_client):
+def test_prepare_tier1_request_skips_no_profile_embedding(fake_client):
     user = _user_context({"career_goals": "x", "hard_constraints": {}})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": None}])
 
-    result = _match_and_notify_user(fake_client, object(), user, [], dry_run=False)
+    result = _prepare_tier1_request(fake_client, user, [])
 
-    assert result == {"user_id": "u1", "skipped": "no_profile_embedding"}
+    assert result["skipped"] == "no_profile_embedding"
 
 
-def test_match_and_notify_user_excludes_already_matched_jobs(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {}})
+def test_prepare_tier1_request_excludes_already_matched_jobs(fake_client):
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {"accept_fully_remote": True}, "seniority": {}}})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
     fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-already-matched"}])
-
-    seen_jobs_arg = {}
-
-    def fake_match_user(client, *, user_id, profile, profile_embedding, jobs, top_n):
-        seen_jobs_arg["jobs"] = jobs
-        return {"gate_survivor_count": 0, "top": []}
-
-    monkeypatch.setattr(pipeline_v2, "match_user", fake_match_user)
+    fake_client.rpc_responses["match_v2_top_jobs"] = lambda params: [
+        {"id": jid, "similarity": 0.9} for jid in params["candidate_job_ids"]
+    ]
 
     jobs_pool = [_job("job-already-matched"), _job("job-new")]
-    _match_and_notify_user(fake_client, object(), user, jobs_pool, dry_run=False)
+    result = _prepare_tier1_request(fake_client, user, jobs_pool)
 
-    job_ids_passed = [j["id"] for j in seen_jobs_arg["jobs"]]
-    assert "job-already-matched" not in job_ids_passed
-    assert "job-new" in job_ids_passed
+    job_ids = [c["id"] for c in result["job_cards"]]
+    assert "job-already-matched" not in job_ids
+    assert "job-new" in job_ids
 
 
-def test_match_and_notify_user_no_top_returns_zero_counts(fake_client, monkeypatch):
+def test_prepare_tier1_request_excludes_valid_verdict_jobs(fake_client):
+    """A job this user already has a VALID tier1_verdicts row for must not
+    be sent to Tier 1 again — the whole point of Phase 2's verdict cache."""
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {"accept_fully_remote": True}, "seniority": {}}})
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]", "profile_content_hash": "hash-abc"}])
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-already-scored",
+        "job_enriched_at": "2026-10-01T00:00:00+00:00", "profile_content_hash": "hash-abc",
+    }])
+    fake_client.rpc_responses["match_v2_top_jobs"] = lambda params: [
+        {"id": jid, "similarity": 0.9} for jid in params["candidate_job_ids"]
+    ]
+
+    jobs_pool = [_job("job-already-scored"), _job("job-new")]
+    # fetch_valid_verdict_job_ids() checks the verdict's job_enriched_at
+    # against the job's CURRENT jobs.enriched_at — needs the `jobs` table
+    # itself seeded (not just jobs_pool, which is a separate in-memory arg).
+    fake_client.seed("jobs", jobs_pool)
+    result = _prepare_tier1_request(fake_client, user, jobs_pool)
+
+    job_ids = [c["id"] for c in result["job_cards"]]
+    assert "job-already-scored" not in job_ids
+    assert "job-new" in job_ids
+
+
+def test_prepare_tier1_request_resends_job_whose_verdict_is_stale(fake_client):
+    """A job re-enriched since it was scored has an INVALID verdict (stale
+    job_enriched_at) — it must be resent to Tier 1, not skipped forever."""
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {"accept_fully_remote": True}, "seniority": {}}})
+    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]", "profile_content_hash": "hash-abc"}])
+    fake_client.seed("tier1_verdicts", [{
+        "user_id": "u1", "job_id": "job-1",
+        "job_enriched_at": "2026-09-01T00:00:00+00:00",  # stale — job's real enriched_at is 2026-10-01
+        "profile_content_hash": "hash-abc",
+    }])
+    fake_client.rpc_responses["match_v2_top_jobs"] = lambda params: [
+        {"id": jid, "similarity": 0.9} for jid in params["candidate_job_ids"]
+    ]
+
+    result = _prepare_tier1_request(fake_client, user, [_job("job-1")])
+
+    assert [c["id"] for c in result["job_cards"]] == ["job-1"]
+
+
+def test_prepare_tier1_request_no_gate_survivors_returns_empty_job_cards(fake_client, monkeypatch):
     user = _user_context({"career_goals": "x", "hard_constraints": {}})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 5, "top": []})
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
 
-    result = _match_and_notify_user(fake_client, object(), user, [], dry_run=False)
+    result = _prepare_tier1_request(fake_client, user, [])
 
-    assert result == {"user_id": "u1", "gate_survivors": 5, "tier1_scored": 0, "tier2_enriched": 0, "notified": False}
+    assert result == {
+        "user_id": "u1", "skipped": None, "gate_survivor_count": 0,
+        "profile_content_hash": None, "job_cards": [],
+    }
 
 
-def test_match_and_notify_user_dry_run_skips_tier1_tier2_entirely(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {}})
+def test_prepare_tier1_request_records_gate_rejections_into_out_param(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {"accept_fully_remote": True}, "seniority": {}}})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-
-    def _should_not_run(*args, **kwargs):
-        raise AssertionError("dry_run must not call Tier 1/Tier 2")
-
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", _should_not_run)
-    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", _should_not_run)
-
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=True)
-
-    assert result["tier1_scored"] == 0
-    assert result["notified"] is False
-
-
-# ---------------------------------------------------------------------------
-# Per-user insert_threshold — scoring_weights.insert_threshold (0-1 in storage)
-# scaled to tier1_score's 0-100 range, read fresh per user, no near-miss tier.
-# ---------------------------------------------------------------------------
-
-def test_match_and_notify_user_scales_threshold_from_0_1_to_0_100(fake_client, monkeypatch):
-    user = _user_context(
-        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": False},
-        rubric={"threshold": 0.8},
+    monkeypatch.setattr(
+        pipeline_v2, "gate_survivors_with_rejections",
+        lambda jobs, profile: ([], {"location": 3, "seniority": 1}),
     )
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=80, reason="x")]},
-    })
-
-    captured = {}
-    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: (
-        captured.update(k), {"considered": 1, "enriched": 0, "skipped_below_threshold": 1, "failed": 0},
-    )[1])
-
-    _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
-
-    assert captured["threshold"] == 80.0  # 0.8 * 100, not the raw 0.8
-
-
-def test_match_and_notify_user_uses_this_users_own_threshold_not_a_global_constant(fake_client, monkeypatch):
-    """Same tier1_score (70) against two different per-user thresholds must
-    qualify for one user and not the other — proves the threshold is read from
-    this user's own rubric, not a shared/global constant."""
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=70, reason="x")]},
-    })
-    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
-        "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
-    })
-    digest_calls = []
-    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: digest_calls.append(user_id))
-    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 70, "tier2": {}}])
-
-    lenient_user = _user_context(
-        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True},
-        rubric={"threshold": 0.6},  # 60 -> 70 qualifies
-    )
-    result_lenient = _match_and_notify_user(fake_client, object(), lenient_user, [_job()], dry_run=False)
-    assert result_lenient["notified"] is True
-
-    digest_calls.clear()
-    strict_user = _user_context(
-        {"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True},
-        rubric={"threshold": 0.85},  # 85 -> 70 does not qualify
-    )
-    result_strict = _match_and_notify_user(fake_client, object(), strict_user, [_job()], dry_run=False)
-    assert result_strict["notified"] is False
-    assert digest_calls == []
-
-
-def test_match_and_notify_user_calls_tier1_then_tier2(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": False})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-
-    calls = []
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: (
-        calls.append("tier1"),
-        {"u1": {"scores": [JobScore(job_id="job-1", score=80, reason="Great fit")]}},
-    )[1])
-    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: (
-        calls.append("tier2"), {"considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0},
-    )[1])
-
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
-
-    assert calls == ["tier1", "tier2"]
-    assert result["tier1_scored"] == 1
-    assert result["tier2_enriched"] == 1
-
-
-def test_match_and_notify_user_records_gate_rejections_into_out_param(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
-        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 3, "seniority": 1},
-    })
 
     gate_rejections: dict = {}
-    _match_and_notify_user(fake_client, object(), user, [], dry_run=False, gate_rejections_out=gate_rejections)
+    _prepare_tier1_request(fake_client, user, [], gate_rejections_out=gate_rejections)
 
     assert gate_rejections == {"u1": {"location": 3, "seniority": 1}}
 
 
-def test_match_and_notify_user_no_rejections_not_recorded(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}})
+def test_prepare_tier1_request_no_rejections_not_recorded(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {"accept_fully_remote": True}, "seniority": {}}})
     fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 5, "top": []})
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
 
     gate_rejections: dict = {}
-    _match_and_notify_user(fake_client, object(), user, [], dry_run=False, gate_rejections_out=gate_rejections)
+    _prepare_tier1_request(fake_client, user, [], gate_rejections_out=gate_rejections)
 
     assert gate_rejections == {}
 
 
-def test_match_and_notify_user_sends_digest_when_email_on_match_and_new_matches(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+# ---------------------------------------------------------------------------
+# _finish_user_matching — Phase C: Tier 2 candidates (fetch_tier2_candidates),
+# Tier 2, digest
+# ---------------------------------------------------------------------------
+
+def test_finish_user_matching_skipped_prep_returns_skip_result(fake_client):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}})
+    prep = _prep(skipped="empty_profile")
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert result == {"user_id": "u1", "skipped": "empty_profile"}
+
+
+def test_finish_user_matching_dry_run_skips_tier2_entirely(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}})
+    prep = _prep(gate_survivor_count=3)
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("dry_run must not call fetch_tier2_candidates/Tier 2")
+
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", _should_not_run)
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=True)
+
+    assert result == {"user_id": "u1", "gate_survivors": 3, "tier1_scored": 0, "tier2_enriched": 0, "notified": False}
+
+
+def test_finish_user_matching_no_candidates_returns_zero_counts(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}})
+    prep = _prep(gate_survivor_count=5, job_cards=[])
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [])
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert result == {"user_id": "u1", "gate_survivors": 5, "tier1_scored": 0, "tier2_enriched": 0, "notified": False}
+
+
+def test_finish_user_matching_scales_threshold_from_0_1_to_0_100(fake_client, monkeypatch):
+    user = _user_context(
+        {"career_goals": "x", "hard_constraints": {}, "email_on_match": False},
+        rubric={"threshold": 0.8},
+    )
+    prep = _prep()
+    captured = {}
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda client, *, user_id, profile, profile_content_hash, threshold: (
+        captured.update(threshold=threshold), [_candidate()])[1])
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
+        "considered": 1, "enriched": 0, "skipped_below_threshold": 1, "failed": 0,
+    })
+
+    _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert captured["threshold"] == 80.0  # 0.8 * 100, not the raw 0.8
+
+
+@pytest.mark.parametrize("stored_threshold,expected_scaled", [(0.65, 65.0), (0.7, 70.0), (0.75, 75.0)])
+def test_finish_user_matching_scales_real_production_threshold_values(fake_client, monkeypatch, stored_threshold, expected_scaled):
+    """Pins the *100 scaling against the ACTUAL values confirmed live against
+    production's scoring_weights.insert_threshold (0.65/0.7/0.75 — fractional
+    0-1 storage, not pre-scaled 0-100): a log line showing "threshold 65.0"
+    is this scaling's correct OUTPUT, not evidence the column is stored as
+    65. If insert_threshold were ever actually stored as 65 instead of 0.65,
+    this *100 would produce 6500 — unreachable against a 0-100 tier1_score
+    — so this test is the regression guard for that scenario, not proof it's
+    currently happening (it isn't, per the live query)."""
+    user = _user_context(
+        {"career_goals": "x", "hard_constraints": {}, "email_on_match": False},
+        rubric={"threshold": stored_threshold},
+    )
+    prep = _prep()
+    captured = {}
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda client, *, user_id, profile, profile_content_hash, threshold: (
+        captured.update(threshold=threshold), [])[1])
+
+    _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert captured["threshold"] == expected_scaled
+
+
+def test_finish_user_matching_calls_fetch_candidates_then_tier2(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": False})
+    prep = _prep()
+    calls = []
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: (
+        calls.append("fetch_candidates"), [_candidate()])[1])
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: (
+        calls.append("tier2"), {"considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0})[1])
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert calls == ["fetch_candidates", "tier2"]
+    assert result["tier1_scored"] == len(prep["job_cards"])
+    assert result["tier2_enriched"] == 1
+
+
+def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
+    prep = _prep()
     fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80,
                                       "tier2": {"why_fits": "- Great fit"}}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=80, reason="Great fit")]},
-    })
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
     })
-
     digest_calls = []
     monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: digest_calls.append((user_id, matches)))
 
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
 
     assert result["notified"] is True
     [(user_id, matches)] = digest_calls
@@ -291,14 +361,11 @@ def test_match_and_notify_user_sends_digest_when_email_on_match_and_new_matches(
                          "fit_score": 80, "why_fits": "- Great fit", "url": "https://example.org/job-1"}]
 
 
-def test_match_and_notify_user_no_digest_when_email_on_match_false(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": False})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+def test_finish_user_matching_no_digest_when_email_on_match_false(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": False})
+    prep = _prep()
     fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=80, reason="x")]},
-    })
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
     })
@@ -308,38 +375,15 @@ def test_match_and_notify_user_no_digest_when_email_on_match_false(fake_client, 
 
     monkeypatch.setattr(pipeline_v2, "send_match_digest", _should_not_run)
 
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
     assert result["notified"] is False
 
 
-def test_match_and_notify_user_no_digest_when_no_qualifying_matches(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=40, reason="Below threshold")]},  # below 65
-    })
-    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
-        "considered": 1, "enriched": 0, "skipped_below_threshold": 1, "failed": 0,
-    })
-
-    def _should_not_run(*a, **k):
-        raise AssertionError("must not send digest")
-
-    monkeypatch.setattr(pipeline_v2, "send_match_digest", _should_not_run)
-
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
-    assert result["notified"] is False
-
-
-def test_match_and_notify_user_digest_failure_does_not_raise(fake_client, monkeypatch):
-    user = _user_context({"career_goals": "x", "hard_constraints": {"location": {}, "seniority": {}}, "email_on_match": True})
-    fake_client.seed("profiles", [{"user_id": "u1", "profile_embedding": "[0.1]"}])
+def test_finish_user_matching_digest_failure_does_not_raise(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
+    prep = _prep()
     fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 1, "top": [_job()]})
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", lambda *a, **k: {
-        "u1": {"scores": [JobScore(job_id="job-1", score=80, reason="x")]},
-    })
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
     })
@@ -349,8 +393,26 @@ def test_match_and_notify_user_digest_failure_does_not_raise(fake_client, monkey
 
     monkeypatch.setattr(pipeline_v2, "send_match_digest", _raise)
 
-    result = _match_and_notify_user(fake_client, object(), user, [_job()], dry_run=False)
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
     assert result["notified"] is False  # swallowed, not raised
+
+
+def test_finish_user_matching_tier2_pending_defers_digest(fake_client, monkeypatch):
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
+    prep = _prep()
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
+        "status": "pending", "batch_id": "batch_x", "considered": 1, "enriched": 0,
+        "skipped_below_threshold": 0, "failed": 0,
+    })
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("must not send digest while tier 2 is pending")
+
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", _should_not_run)
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+    assert result["notified"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -381,7 +443,6 @@ def test_adapters_derived_list_excludes_disabled_iap():
 def test_run_scheduled_mode_logs_active_and_skipped_adapters(fake_client, monkeypatch, caplog):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     with caplog.at_level("INFO"):
         run(_client=fake_client, _anthropic_client=object())
@@ -400,7 +461,8 @@ def test_run_manual_mode_does_not_log_adapter_line(fake_client, monkeypatch, cap
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
         "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
     })
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     with caplog.at_level("INFO"):
         run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
@@ -420,7 +482,10 @@ class _NoopAdapter:
         return FetchResult(postings=[], fetched=0, nb_hits=None, complete=True)
 
 
-def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None, closure_result=None):
+def _patch_full_pipeline_noops(
+    monkeypatch, *, ingest_result=None, enrich_result=None, embed_result=None,
+    closure_result=None, tier1_result=None,
+):
     from src.ingest import IngestCounts
     # Two, not three — matches the real active-adapter count now that IAP is
     # disabled (see _ADAPTER_REGISTRY); these are dummy classes either way, so
@@ -436,6 +501,12 @@ def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: embed_result or {
         "selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0,
     })
+    # Phase A/B defaults: every user is a clean no-op unless a test overrides
+    # _prepare_tier1_request/_finish_user_matching/rerank_tier1_batch itself —
+    # mirrors the old single _match_and_notify_user override's simplicity.
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda client, user, jobs_pool, **k: _prep(user.user_id, skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: tier1_result or {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda client, anthropic_client, user, prep, **k: {"user_id": user.user_id, "skipped": "test"})
 
 
 # ---------------------------------------------------------------------------
@@ -447,7 +518,6 @@ def _patch_full_pipeline_noops(monkeypatch, *, ingest_result=None, enrich_result
 def test_run_opens_pipeline_runs_row_before_any_stage_runs(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -464,9 +534,9 @@ def test_run_opens_pipeline_runs_row_with_same_run_id_as_run_metrics(fake_client
     exists for (run_metrics.run_id -> pipeline_runs.run_id FK)."""
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
-        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 1},
-    })
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda client, user, jobs_pool, gate_rejections_out=None, **k: (
+        gate_rejections_out.update({user.user_id: {"location": 1}}) if gate_rejections_out is not None else None,
+        _prep(user.user_id, gate_survivor_count=0, job_cards=[]))[1])
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -480,7 +550,8 @@ def test_run_manual_mode_opens_pipeline_runs_row_with_trigger_manual(fake_client
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
         "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
     })
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
 
@@ -498,7 +569,9 @@ def test_run_closes_pipeline_runs_row_as_failed_on_exception(fake_client, monkey
     def _boom(*a, **k):
         raise RuntimeError("unexpected failure")
 
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", _boom)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep())
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _boom)
 
     with pytest.raises(RuntimeError):
         run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
@@ -519,7 +592,6 @@ def test_run_no_users_manual_mode_still_opens_and_closes_pipeline_runs_row_faile
 def test_run_dry_run_never_writes_pipeline_runs_row(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 3, "top": [_job()]})
 
     run(dry_run=True, _client=fake_client, _anthropic_client=object())
 
@@ -546,7 +618,8 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
         calls.append("enrich"), {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True})[1])
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: (
         calls.append("embed"), {"selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0})[1])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -555,8 +628,8 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
 
 # ---------------------------------------------------------------------------
 # source_fetch_log — one row per adapter per scheduled run, including on a
-# failed fetch (complete=False), so closure (Phase 1B) has a fetch-
-# completeness signal to key off per source board.
+# failed fetch (complete=False), so closure has a fetch-completeness signal
+# to key off per source board.
 # ---------------------------------------------------------------------------
 
 def test_run_writes_source_fetch_log_row_per_adapter(fake_client, monkeypatch):
@@ -571,7 +644,6 @@ def test_run_writes_source_fetch_log_row_per_adapter(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_Adapter80k])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -593,7 +665,6 @@ def test_run_writes_source_fetch_log_row_with_complete_false_on_adapter_failure(
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_FailingAdapter])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -615,7 +686,6 @@ def test_run_dry_run_writes_no_source_fetch_log(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_Adapter80k])
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 0, "top": []})
 
     run(dry_run=True, _client=fake_client, _anthropic_client=object())
 
@@ -639,7 +709,6 @@ def test_run_calls_close_jobs_after_ingest_before_enrich(fake_client, monkeypatc
     monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: (calls.append("enrich"), {
         "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
     })[1])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -667,7 +736,6 @@ def test_run_passes_this_runs_complete_sources_to_close_jobs(fake_client, monkey
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_CompleteAdapter, _IncompleteAdapter])
     monkeypatch.setattr(pipeline_v2, "close_jobs", lambda client, *, complete_sources, **k: (
         captured.update(complete_sources=complete_sources), {"closed": 0, "by_source": {}, "by_rule": {}})[1])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -677,7 +745,6 @@ def test_run_passes_this_runs_complete_sources_to_close_jobs(fake_client, monkey
 def test_run_dry_run_never_calls_close_jobs(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 0, "top": []})
 
     def _should_not_run(*a, **k):
         raise AssertionError("dry_run must not call close_jobs")
@@ -783,8 +850,8 @@ def test_run_still_matches_healthy_users_before_failing_on_unhealthy_source(fake
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
     monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_FailingAdapter])
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: (
-        matched_users.append(a[2].user_id), {"user_id": "u1", "skipped": "test"})[1])
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda client, anthropic_client, user, prep, **k: (
+        matched_users.append(user.user_id), {"user_id": user.user_id, "skipped": "test"})[1])
 
     with pytest.raises(RuntimeError, match="80000_hours"):
         run(_client=fake_client, _anthropic_client=object())
@@ -803,7 +870,8 @@ def test_run_manual_mode_skips_adapters_ingest_enrich(fake_client, monkeypatch):
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
         "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
     })
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     result = run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
 
@@ -811,12 +879,33 @@ def test_run_manual_mode_skips_adapters_ingest_enrich(fake_client, monkeypatch):
     assert result["enrich"] is None
 
 
+def test_run_manual_mode_never_submits_tier1_batch(fake_client, monkeypatch):
+    """Manual mode still runs Phase A/B/C for its one user (Tier 1/Tier 2 ARE
+    part of the manual path's cost), but never touches adapters/ingest/enrich
+    — covered by the sibling test above. This test just confirms Phase B
+    still runs for the single user in manual mode."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
+    calls = []
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: (
+        calls.append("tier1_batch"), {"status": "complete", "scored": 0, "failed": 0})[1])
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [])
+
+    run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    assert calls == ["tier1_batch"]
+
+
 def test_run_manual_mode_sets_quota_running_then_complete(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
         "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
     })
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
 
@@ -833,7 +922,9 @@ def test_run_manual_mode_sets_quota_failed_on_exception(fake_client, monkeypatch
     def _boom(*a, **k):
         raise RuntimeError("unexpected failure")
 
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", _boom)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep())
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _boom)
 
     with pytest.raises(RuntimeError):
         run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
@@ -845,7 +936,6 @@ def test_run_manual_mode_sets_quota_failed_on_exception(fake_client, monkeypatch
 def test_run_scheduled_mode_never_touches_quota(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -871,9 +961,9 @@ def test_run_no_users_manual_mode_raises_and_sets_quota_failed(fake_client):
 def test_run_writes_aggregate_gate_rejections_run_metrics_row(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {
-        "gate_survivor_count": 0, "top": [], "gate_rejection_counts": {"location": 2},
-    })
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda client, user, jobs_pool, gate_rejections_out=None, **k: (
+        gate_rejections_out.update({user.user_id: {"location": 2}}) if gate_rejections_out is not None else None,
+        _prep(user.user_id, gate_survivor_count=0, job_cards=[]))[1])
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -886,7 +976,6 @@ def test_run_writes_aggregate_gate_rejections_run_metrics_row(fake_client, monke
 def test_run_skips_gate_rejections_row_when_nothing_rejected(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 5, "top": []})
 
     run(_client=fake_client, _anthropic_client=object())
 
@@ -908,7 +997,7 @@ def test_run_stops_before_per_user_loop_when_enrichment_pending(fake_client, mon
     def _should_not_run(*a, **k):
         raise AssertionError("must not reach per-user matching when enrichment is pending")
 
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", _should_not_run)
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", _should_not_run)
 
     result = run(_client=fake_client, _anthropic_client=object())
@@ -921,7 +1010,7 @@ def test_run_stops_before_per_user_loop_when_enrichment_pending(fake_client, mon
 def test_run_pending_closes_pipeline_runs_as_incomplete_not_failed(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch, enrich_result={"status": "pending", "batch_id": "batch_x"})
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
     monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
 
     run(_client=fake_client, _anthropic_client=object())
@@ -952,7 +1041,6 @@ def test_run_complete_enrichment_proceeds_normally_to_matching(fake_client, monk
         "status": "complete", "selected": 0, "enriched": 0, "stale": 0, "requeued": 0,
         "embeddings_skipped": True, "deferred": 0,
     })
-    monkeypatch.setattr(pipeline_v2, "_match_and_notify_user", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
 
     result = run(_client=fake_client, _anthropic_client=object())
 
@@ -965,16 +1053,67 @@ def test_run_dry_run_skips_tier1_and_tier2_but_still_gates(fake_client, monkeypa
     never reaches Tier 1/Tier 2 (the only steps with real $ cost here)."""
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)
-    monkeypatch.setattr(pipeline_v2, "match_user", lambda *a, **k: {"gate_survivor_count": 3, "top": [_job()]})
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(gate_survivor_count=3))
+    # _patch_full_pipeline_noops defaults _finish_user_matching to a no-op —
+    # restore the real one so this test can see its actual dry_run behavior.
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _finish_user_matching)
 
     def _should_not_run(*a, **k):
         raise AssertionError("dry_run must not call Tier 1/Tier 2")
 
-    monkeypatch.setattr(pipeline_v2, "rerank_tier1", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", _should_not_run)
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", _should_not_run)
 
     result = run(dry_run=True, _client=fake_client, _anthropic_client=object())
 
     assert len(result["users"]) == 1
     assert result["users"][0]["gate_survivors"] == 3
-    assert result["users"][0]["tier1_scored"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Tier 1 'pending' gate (Phase 2) — mirrors the enrichment pending gate: ONE
+# Batches submission covers every user, so if it doesn't finish within
+# budget, run() must stop before Tier 2/digest for EVERYONE, not just the
+# user(s) whose chunks were in that batch.
+# ---------------------------------------------------------------------------
+
+def test_run_stops_before_tier2_when_tier1_pending(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch, tier1_result={
+        "status": "pending", "batch_id": "batch_x", "request_counts": {"processing": 5},
+    })
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("must not reach Tier 2/digest when Tier 1 is pending")
+
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _should_not_run)
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert result["users"] == []
+    assert result["status"] == "incomplete"
+
+
+def test_run_tier1_pending_closes_pipeline_runs_as_incomplete(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch, tier1_result={"status": "pending", "batch_id": "batch_x"})
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: (_ for _ in ()).throw(AssertionError()))
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "incomplete"
+
+
+def test_run_tier1_not_submitted_in_dry_run(fake_client, monkeypatch):
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep())
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("dry_run must never submit a Tier 1 batch")
+
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", _should_not_run)
+
+    run(dry_run=True, _client=fake_client, _anthropic_client=object())

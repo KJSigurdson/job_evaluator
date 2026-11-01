@@ -83,14 +83,25 @@ def chunked_insert(table, rows: list[dict], *, chunk_size: int = _WRITE_CHUNK_SI
 # re-calling the (already-paid-for) API.
 # ---------------------------------------------------------------------------
 
-def record_batch_submitted(client, batch_id: str, module: str) -> None:
+def record_batch_submitted(client, batch_id: str, module: str, *, manifest: dict | None = None) -> None:
     """Call immediately after anthropic_client.messages.batches.create()
     returns — before any polling begins. Without this, a runner that dies
     mid-poll (batches can legitimately take up to 24h) leaves no durable
     trace that an already-paid-for batch exists, and the next run would
-    blindly submit duplicate work."""
+    blindly submit duplicate work.
+
+    manifest: optional request-time snapshot (currently only
+    src.tier1_rerank.rerank_tier1_batch uses this) of exactly what was sent
+    in THIS batch — e.g. {custom_id: {"user_id", "profile_content_hash",
+    "jobs": {job_id: job_enriched_at}}}. Persisted here, alongside the
+    submission, specifically so a verdict's validity can be judged against
+    what the LLM actually saw at request time, not whatever `jobs`/`profiles`
+    happen to say by the time results are applied — which can be hours
+    later (the external hourly drainer) and after a job's since been
+    re-enriched or a profile's since changed. See fetch_batch_manifest.
+    """
     client.table("batch_submissions").insert({
-        "batch_id": batch_id, "module": module, "status": "submitted",
+        "batch_id": batch_id, "module": module, "status": "submitted", "manifest": manifest,
     }).execute()
 
 
@@ -127,6 +138,15 @@ def find_outstanding_batch(client, module: str) -> str | None:
         )
         return None
     return rows[0]["batch_id"]
+
+
+def fetch_batch_manifest(client, batch_id: str) -> dict | None:
+    """The request-time manifest persisted by record_batch_submitted() for
+    *batch_id*, if any — see that function's docstring. None for a batch
+    submitted without one (every module except tier1_rerank, or a
+    tier1_rerank batch submitted before this existed)."""
+    rows = client.table("batch_submissions").select("manifest").eq("batch_id", batch_id).execute().data or []
+    return rows[0]["manifest"] if rows else None
 
 
 def mark_batch_results_processed(client, batch_id: str, custom_ids: list[str], *, chunk_size: int = _WRITE_CHUNK_SIZE) -> None:

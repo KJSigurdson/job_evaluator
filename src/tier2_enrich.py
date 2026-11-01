@@ -6,40 +6,47 @@ v1's src/enrich.py prompt structure/format instructions closely, since the
 frontend already renders that exact bullet/phrase format; this is a new call
 site producing the same shape, not a new format.
 
+Phase 2: candidates now come from fetch_candidates() reading tier1_verdicts
+directly (score >= threshold, valid, no existing matches_v2 row) — not from
+an in-memory dict a same-run Tier 1 call handed down. This makes Tier 2
+resumable from whatever Tier 1 has written so far, INCLUDING verdicts the
+external hourly drainer applied between runs (src.tier1_rerank.
+apply_drained_batch writes to the exact same tier1_verdicts table) — Tier 2
+has no way to tell a "live this-run" verdict from a "drained from
+yesterday" one, by design, since both are equally valid.
+
 Shadow mode: writes to the new `matches_v2` table only (user_id, job_id,
 tier1_score, tier2 jsonb, created_at) — NOT v1's `matches` table. Also writes
 run_metrics (tier2_calls, estimated_cost_usd). No v1 table touched.
+
+Non-blocking via src.batch_poll.resume_or_submit, same as src/enrich_jobs.py/
+src/tier1_rerank.py — exhausting the poll budget returns status='pending',
+NEVER raises.
 
 Crash-safety note specific to this module: custom_id is an anonymous
 enumeration index (see tier2_enrich()'s by_key), not user_id/job_id — the
 Batches API caps custom_id at 64 characters and two joined UUIDs is 73. That
 means, unlike enrich_jobs.py (custom_id=job_id) and tier1_rerank.py
-(custom_id=user_id), custom_id alone isn't enough to recover which (user, job)
-pair a staged raw result belongs to. So _run_batch() here optionally wraps
-each staged row as {"llm_result": ..., "context": {...}} — the context needed
-to rebuild the matches_v2 row and re-run Tier 2's own parser without any
+(custom_id=f"{user_id}:{chunk_index}"), custom_id alone isn't enough to
+recover which (user, job) pair a staged raw result belongs to. So each
+result is staged wrapped as {"llm_result": ..., "context": {...}} via
+batch_poll.resume_or_submit's persist_transform hook — the context needed to
+rebuild the matches_v2 row and re-run Tier 2's own parser without any
 re-fetch. See reprocess_staged().
 """
 from __future__ import annotations
 
 import json
 import logging
-import time
 from datetime import datetime, timezone
 
 import yaml
 from pydantic import ValidationError
 
+from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
+from src.match_v2 import fetch_matched_job_ids
 from src.schemas import Tier2EnrichmentOutput
-from src.supabase_client import (
-    chunked_upsert,
-    fetch_all,
-    find_outstanding_batch,
-    mark_batch_results_processed,
-    persist_batch_results,
-    record_batch_retrieved,
-    record_batch_submitted,
-)
+from src.supabase_client import chunked_upsert, fetch_all, mark_batch_results_processed
 
 log = logging.getLogger(__name__)
 
@@ -47,11 +54,10 @@ _MODULE = "tier2_enrich"
 _MODEL = "claude-sonnet-4-6"
 _TOOL_NAME = "enrich_posting"
 _MAX_TOKENS = 2048
-_POLL_INTERVAL_SECONDS = 10
-_POLL_TIMEOUT_SECONDS = 3600
 _DEFAULT_THRESHOLD = 65  # fallback only — pipeline_v2.py always passes each user's own
                          # scoring_weights.insert_threshold (scaled to 0-100) explicitly
 _LIST_FIELDS = ("emphasize_in_cv", "deemphasize")
+_JOB_SELECT_COLUMNS = "id,title,org,raw_description,enrichment,enriched_at"
 
 # Sonnet is priced well above Haiku — VERIFY AGAINST https://www.anthropic.com/pricing
 # BEFORE TRUSTING estimated_cost_usd, same caveat as enrich_jobs.py/tier1_rerank.py.
@@ -206,56 +212,86 @@ def _batch_request(custom_id: str, prompt: str) -> dict:
 def _run_batch(
     anthropic_client, requests: list[dict], *, client, module: str = _MODULE,
     context_by_custom_id: dict[str, dict] | None = None,
-) -> tuple[dict, str]:
-    """Submit *requests*, or resume an outstanding batch for *module* if a prior
-    run left one — see enrich_jobs.py's identical helper's docstring for the
-    full rationale. Persists every raw result to `batch_results` immediately on
-    retrieval, before any parsing risk, and returns {custom_id: raw_dict}
-    (always the bare LLM result — callers never see the context wrapper below).
+):
+    """Submit *requests*, or resume an outstanding batch for *module* if a
+    prior run left one, via src.batch_poll.resume_or_submit — non-blocking:
+    exhausting the poll budget returns a BatchOutcome with status='pending',
+    NEVER raises. Callers must check outcome.status themselves (same
+    pattern as src/enrich_jobs.py).
 
     context_by_custom_id, if given, is staged ALONGSIDE each raw result as
-    {"llm_result": ..., "context": ...} instead of the bare result — this
-    module's custom_id is an anonymous index (see module docstring), so
-    recovery needs this context to know which (user, job) pair a staged
-    result belongs to; enrich_jobs.py/tier1_rerank.py don't need this since
-    their custom_id already IS the job_id/user_id.
+    {"llm_result": ..., "context": ...} instead of the bare result (via
+    resume_or_submit's persist_transform hook) — this module's custom_id is
+    an anonymous index (see module docstring), so recovery needs this
+    context to know which (user, job) pair a staged result belongs to;
+    enrich_jobs.py/tier1_rerank.py don't need this since their custom_id
+    already IS the job_id/f"{user_id}:{chunk}".
     """
-    batch_id = find_outstanding_batch(client, module)
-    if batch_id is not None:
-        log.warning(
-            "Resuming outstanding batch %s for module %r instead of submitting new work "
-            "(a prior run likely didn't finish polling it)", batch_id, module,
-        )
-    else:
-        batch = anthropic_client.messages.batches.create(requests=requests)
-        batch_id = batch.id
-        record_batch_submitted(client, batch_id, module)
-        log.info("Submitted batch %s with %d request(s)", batch_id, len(requests))
-
-    deadline = time.monotonic() + _POLL_TIMEOUT_SECONDS
-    while True:
-        batch = anthropic_client.messages.batches.retrieve(batch_id)
-        if batch.processing_status == "ended":
-            break
-        if time.monotonic() > deadline:
-            raise TimeoutError(f"Batch {batch_id} did not finish within {_POLL_TIMEOUT_SECONDS}s")
-        log.info("Batch %s still %s — polling again in %ds", batch_id, batch.processing_status, _POLL_INTERVAL_SECONDS)
-        time.sleep(_POLL_INTERVAL_SECONDS)
-
-    results = {}
-    for item in anthropic_client.messages.batches.results(batch_id):
-        results[item.custom_id] = item.result.model_dump(mode="json")
-
+    persist_transform = None
     if context_by_custom_id is not None:
-        to_persist = {
-            cid: {"llm_result": raw, "context": context_by_custom_id.get(cid)}
-            for cid, raw in results.items()
-        }
-    else:
-        to_persist = results
-    persist_batch_results(client, batch_id, to_persist)
-    record_batch_retrieved(client, batch_id)
-    return results, batch_id
+        def persist_transform(results):
+            return {
+                cid: {"llm_result": raw, "context": context_by_custom_id.get(cid)}
+                for cid, raw in results.items()
+            }
+
+    return resume_or_submit(
+        anthropic_client, client, module=module, requests=requests,
+        budget_seconds=DEFAULT_POLL_BUDGET_SECONDS, persist_transform=persist_transform,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Candidate derivation — reads tier1_verdicts directly (Phase 2), not an
+# in-memory dict a same-run Tier 1 call handed down.
+# ---------------------------------------------------------------------------
+
+def fetch_candidates(
+    client, *, user_id: str, profile: dict, profile_content_hash: str | None, threshold: float,
+) -> list[dict]:
+    """Tier 2 candidates for *user_id*: tier1_verdicts rows scoring >=
+    *threshold*, VALID (job_enriched_at/profile_content_hash still match the
+    job's/this user's CURRENT state — same validity check as
+    src.tier1_rerank.fetch_valid_verdict_job_ids), with no existing
+    matches_v2 row. This is what makes Tier 2 resumable from whatever Tier 1
+    has written so far, INCLUDING verdicts src.tier1_rerank.
+    apply_drained_batch applied from a drained batch between runs — Tier 2
+    has no way to tell a "scored this run" verdict from a "drained from
+    yesterday's stuck batch" one, by design, since both are equally valid.
+
+    Returns [{"user_id", "profile", "job", "tier1_score", "tier1_reason"}, ...]
+    — tier2_enrich()'s own expected candidate shape.
+    """
+    verdicts = fetch_all(
+        client.table("tier1_verdicts").select("*").eq("user_id", user_id).gte("score", threshold)
+    )
+    if not verdicts:
+        return []
+
+    matched_ids = fetch_matched_job_ids(client, user_id)
+    verdicts = [v for v in verdicts if v["job_id"] not in matched_ids]
+    if not verdicts:
+        return []
+
+    jobs_rows = fetch_all(
+        client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("id", [v["job_id"] for v in verdicts])
+    )
+    jobs_by_id = {j["id"]: j for j in jobs_rows}
+
+    candidates = []
+    for v in verdicts:
+        job = jobs_by_id.get(v["job_id"])
+        if job is None:
+            continue  # job deleted since scoring
+        if job.get("enriched_at") != v.get("job_enriched_at"):
+            continue  # stale verdict — job re-enriched since scoring
+        if v.get("profile_content_hash") != profile_content_hash:
+            continue  # stale verdict — profile changed since scoring
+        candidates.append({
+            "user_id": user_id, "profile": profile, "job": job,
+            "tier1_score": v["score"], "tier1_reason": (v.get("rationale") or {}).get("reason", ""),
+        })
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -314,7 +350,26 @@ def tier2_enrich(
         ))
         for key, c in by_key.items()
     ]
-    results, batch_id = _run_batch(anthropic_client, requests, client=client, context_by_custom_id=context_by_key)
+    outcome = _run_batch(anthropic_client, requests, client=client, context_by_custom_id=context_by_key)
+    if outcome.status == "pending":
+        # Nothing was retrieved — mirrors src.enrich_jobs.enrich_jobs()'s
+        # identical reasoning: still write a run_metrics row for the tier2
+        # stage so this run_id has SOME record, rather than a silent gap.
+        client.table("run_metrics").insert({
+            "run_at": datetime.now(timezone.utc).isoformat(),
+            "run_id": run_id, "stage": "tier2", "trigger": trigger, "tier2_calls": 0,
+        }).execute()
+        log.info(
+            "tier2_enrich pending — batch %s not finished within budget (elapsed %.0fs, "
+            "counts=%s) — resuming next run.",
+            outcome.batch_id, outcome.elapsed_seconds, outcome.request_counts,
+        )
+        return {
+            "status": "pending", "batch_id": outcome.batch_id, "request_counts": outcome.request_counts,
+            "considered": len(candidates), "enriched": 0, "skipped_below_threshold": skipped, "failed": 0,
+        }
+
+    results, batch_id = outcome.results, outcome.batch_id
     total_api_calls = len(requests)
     # Maps each key to whichever batch's raw result it came from — marked
     # processed=True only AFTER the matches_v2 write below commits (this
@@ -325,6 +380,7 @@ def tier2_enrich(
     failures: dict[str, str] = {}
     total_input_tokens = 0
     total_output_tokens = 0
+    retry_pending = None
 
     for key, result in results.items():
         output, usage, error = _parse_one_result(result)
@@ -347,25 +403,31 @@ def tier2_enrich(
             for key, error in failures.items()
         ]
         retry_context = {key: context_by_key[key] for key in failures}
-        retry_results, retry_batch_id = _run_batch(
+        retry_outcome = _run_batch(
             anthropic_client, retry_requests, client=client, module=f"{_MODULE}_retry",
             context_by_custom_id=retry_context,
         )
         total_api_calls += len(retry_requests)
-        batch_id_by_key.update({key: retry_batch_id for key in retry_results})
 
-        still_failing: dict[str, str] = {}
-        for key, result in retry_results.items():
-            output, usage, error = _parse_one_result(result)
-            if usage is not None:
-                total_input_tokens += usage["input_tokens"]
-                total_output_tokens += usage["output_tokens"]
-            if output is not None:
-                enriched[key] = output
-            else:
-                still_failing[key] = f"{error} (retry)"
+        if retry_outcome.status == "pending":
+            retry_pending = retry_outcome
+            failures = {}  # not yet known — round 2 hasn't resolved
+        else:
+            retry_results, retry_batch_id = retry_outcome.results, retry_outcome.batch_id
+            batch_id_by_key.update({key: retry_batch_id for key in retry_results})
 
-        failures = still_failing
+            still_failing: dict[str, str] = {}
+            for key, result in retry_results.items():
+                output, usage, error = _parse_one_result(result)
+                if usage is not None:
+                    total_input_tokens += usage["input_tokens"]
+                    total_output_tokens += usage["output_tokens"]
+                if output is not None:
+                    enriched[key] = output
+                else:
+                    still_failing[key] = f"{error} (retry)"
+
+            failures = still_failing
 
     for key, reason in failures.items():
         log.error("Pair %s permanently failed Tier 2 enrichment: %s", key, reason)
@@ -373,6 +435,8 @@ def tier2_enrich(
     # run_metrics written NOW — right after usage is tallied, BEFORE the final
     # `matches_v2` write below — so a crash in that write no longer loses the
     # cost record (same fix as enrich_jobs.py, same real incident class).
+    # Round 1's results are committed here even if round 2 itself went
+    # pending — never lose already-resolved output waiting on a slower part.
     now = datetime.now(timezone.utc).isoformat()
     client.table("run_metrics").insert({
         "run_at": now,
@@ -412,6 +476,19 @@ def tier2_enrich(
             by_batch.setdefault(bid, []).append(key)
     for bid, keys in by_batch.items():
         mark_batch_results_processed(client, bid, keys)
+
+    if retry_pending is not None:
+        log.info(
+            "tier2_enrich: round 1 committed (%d enriched) — retry batch %s not finished "
+            "within budget (elapsed %.0fs, counts=%s) — resuming next run.",
+            len(enriched), retry_pending.batch_id, retry_pending.elapsed_seconds, retry_pending.request_counts,
+        )
+        return {
+            "status": "pending", "batch_id": retry_pending.batch_id,
+            "request_counts": retry_pending.request_counts,
+            "considered": len(candidates), "enriched": len(enriched),
+            "skipped_below_threshold": skipped, "failed": 0,
+        }
 
     log.info(
         "tier2_enrich complete: %d considered, %d skipped (below threshold), %d enriched, %d failed",
