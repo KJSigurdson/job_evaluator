@@ -213,7 +213,7 @@ def test_record_batch_submitted_writes_submitted_row(fake_client):
 
 
 def test_record_batch_submitted_persists_manifest(fake_client):
-    manifest = {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
+    manifest = {"u1_0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
     record_batch_submitted(fake_client, "batch_1", "tier1_rerank", manifest=manifest)
 
     [row] = fake_client.table("batch_submissions").rows
@@ -221,7 +221,7 @@ def test_record_batch_submitted_persists_manifest(fake_client):
 
 
 def test_fetch_batch_manifest_returns_persisted_manifest(fake_client):
-    manifest = {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
+    manifest = {"u1_0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1"}}}
     record_batch_submitted(fake_client, "batch_1", "tier1_rerank", manifest=manifest)
 
     assert fetch_batch_manifest(fake_client, "batch_1") == manifest

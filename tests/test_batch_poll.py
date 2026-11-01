@@ -17,7 +17,40 @@ from src.batch_poll import (
     SUBMISSION_EXPIRY_HOURS,
     BatchOutcome,
     resume_or_submit,
+    validate_custom_id,
 )
+
+# ---------------------------------------------------------------------------
+# validate_custom_id — the Anthropic Batches API's own custom_id constraint
+# (^[a-zA-Z0-9_-]{1,64}$). Regression coverage for a real incident:
+# tier1_rerank.py's old f"{user_id}:{chunk_index}" format put a ':' in every
+# custom_id, and the ENTIRE .create() call was rejected with a 400
+# invalid_request_error — not just the offending request.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("custom_id", [
+    "job-1",
+    "a" * 64,  # exactly at the cap
+    "1",  # a single character is still valid
+    "u1_0",
+    "u1_10",
+    "ABC_123-xyz",
+])
+def test_validate_custom_id_accepts_valid_ids(custom_id):
+    validate_custom_id(custom_id)  # must not raise
+
+
+@pytest.mark.parametrize("custom_id", [
+    "u1:0",  # the actual incident — colon isn't in the allowed charset
+    "a" * 65,  # one over the 64-char cap
+    "",  # empty — the pattern requires at least 1 char
+    "has space",
+    "has.dot",
+    "has/slash",
+])
+def test_validate_custom_id_rejects_invalid_ids(custom_id):
+    with pytest.raises(ValueError, match="custom_id"):
+        validate_custom_id(custom_id)
 
 # ---------------------------------------------------------------------------
 # Fake clock — sleep_fn advances the same counter monotonic_fn reads, so the

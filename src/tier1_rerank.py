@@ -16,12 +16,17 @@ what lets TIER1_MAX_PER_USER widen from the old top-40 to 200 without
 rescoring the same already-verdicted jobs every single day: a job only
 needs scoring once per (job content, profile content) pair, ever.
 
-custom_id = f"{user_id}:{chunk_index}" (NOT user_id alone, unlike the old
+custom_id = f"{user_id}_{chunk_index}" (NOT user_id alone, unlike the old
 one-batch-per-user design) — each user's candidate set is split into chunks
 of at most _CHUNK_SIZE job cards (the Tier 1 prompt's own per-call size
 budget), and every chunk across every user goes into the SAME Batches
-submission. "{uuid}:{int}" is well under the Batches API's 64-character
-custom_id cap.
+submission. "{uuid}_{int}" is well under the Batches API's 64-character
+custom_id cap. Separator is '_', NOT ':' — confirmed for real: the Batches
+API rejects the WHOLE .create() call with a 400 invalid_request_error if
+even one custom_id doesn't match ^[a-zA-Z0-9_-]{1,64}$, and ':' isn't in
+that character class. '_' is unambiguous to split back out (see
+_split_custom_id) because a UUID's own hyphens are the only punctuation it
+can contain — never an underscore.
 
 Non-blocking via src.batch_poll.resume_or_submit, same as src/enrich_jobs.py
 — exhausting the poll budget returns status='pending', NEVER raises;
@@ -52,7 +57,7 @@ from datetime import datetime, timezone
 import yaml
 from pydantic import ValidationError
 
-from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
+from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit, validate_custom_id
 from src.models.tier1_rerank import JobScore, Tier1RerankOutput
 from src.supabase_client import (
     chunked_upsert,
@@ -209,6 +214,7 @@ _TOOL_SCHEMA = {
 
 
 def _batch_request(custom_id: str, prompt: str) -> dict:
+    validate_custom_id(custom_id)
     return {
         "custom_id": custom_id,
         "params": {
@@ -234,7 +240,7 @@ def _chunk_user_requests(user_requests: dict[str, dict]) -> dict[str, tuple[str,
         job_cards = u["job_cards"]
         for idx in range(0, len(job_cards), _CHUNK_SIZE):
             chunk_index = idx // _CHUNK_SIZE
-            custom_id = f"{user_id}:{chunk_index}"
+            custom_id = f"{user_id}_{chunk_index}"
             chunks_by_custom_id[custom_id] = (user_id, job_cards[idx:idx + _CHUNK_SIZE])
     return chunks_by_custom_id
 
@@ -262,10 +268,14 @@ def _build_manifest(chunks_by_custom_id: dict[str, tuple[str, list[dict]]], user
 
 
 def _split_custom_id(custom_id: str) -> str:
-    """custom_id = f'{user_id}:{chunk_index}' — user_id is a UUID (no colons
-    in it), so partitioning on the LAST colon is unambiguous and correct
-    even though this reads the same as a plain split here."""
-    user_id, _, _chunk_index = custom_id.rpartition(":")
+    """custom_id = f'{user_id}_{chunk_index}' — a UUID's own punctuation is
+    hyphens only, never an underscore, so partitioning on the LAST '_' is
+    unambiguous: everything before it is the user_id, regardless of how
+    many hyphens that UUID has. Deliberately explicit about this (rpartition
+    on '_', not '-') rather than relying on "a plain split happens to work
+    here" — see this module's docstring on why ':' isn't usable at all
+    (Anthropic's custom_id charset is ^[a-zA-Z0-9_-]{1,64}$, no colon)."""
+    user_id, _, _chunk_index = custom_id.rpartition("_")
     return user_id
 
 

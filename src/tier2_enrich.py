@@ -27,7 +27,7 @@ Crash-safety note specific to this module: custom_id is an anonymous
 enumeration index (see tier2_enrich()'s by_key), not user_id/job_id — the
 Batches API caps custom_id at 64 characters and two joined UUIDs is 73. That
 means, unlike enrich_jobs.py (custom_id=job_id) and tier1_rerank.py
-(custom_id=f"{user_id}:{chunk_index}"), custom_id alone isn't enough to
+(custom_id=f"{user_id}_{chunk_index}"), custom_id alone isn't enough to
 recover which (user, job) pair a staged raw result belongs to. So each
 result is staged wrapped as {"llm_result": ..., "context": {...}} via
 batch_poll.resume_or_submit's persist_transform hook — the context needed to
@@ -43,7 +43,7 @@ from datetime import datetime, timezone
 import yaml
 from pydantic import ValidationError
 
-from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
+from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit, validate_custom_id
 from src.match_v2 import fetch_matched_job_ids
 from src.schemas import Tier2EnrichmentOutput
 from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, insert_run_metrics, mark_batch_results_processed
@@ -196,6 +196,7 @@ _TOOL_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _batch_request(custom_id: str, prompt: str) -> dict:
+    validate_custom_id(custom_id)
     return {
         "custom_id": custom_id,
         "params": {
@@ -225,7 +226,7 @@ def _run_batch(
     an anonymous index (see module docstring), so recovery needs this
     context to know which (user, job) pair a staged result belongs to;
     enrich_jobs.py/tier1_rerank.py don't need this since their custom_id
-    already IS the job_id/f"{user_id}:{chunk}".
+    already IS the job_id/f"{user_id}_{chunk}".
     """
     persist_transform = None
     if context_by_custom_id is not None:

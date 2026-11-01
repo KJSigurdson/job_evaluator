@@ -9,8 +9,10 @@ import pytest
 from pydantic import ValidationError
 
 from src import tier2_enrich
+from src.batch_poll import validate_custom_id
 from src.schemas import Tier2EnrichmentOutput
 from src.tier2_enrich import (
+    _batch_request,
     _coerce_list_field,
     _merge_tool_use_blocks,
     _parse_tier2,
@@ -136,6 +138,24 @@ def test_parse_tier2_invalid_raises_validation_error():
 
 def test_coerce_list_field_parses_json_array_in_string():
     assert _coerce_list_field('["a", "b"]') == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# _batch_request / custom_id — custom_id here is a plain enumeration index
+# (str(i)), always valid under the Batches API's ^[a-zA-Z0-9_-]{1,64}$
+# charset, but validate_custom_id() is still called at request-build time
+# (both the live AND retry paths funnel through this one function) — see
+# src.tier1_rerank's own f"{user_id}:{chunk_index}" incident.
+# ---------------------------------------------------------------------------
+
+def test_batch_request_accepts_an_index_custom_id():
+    request = _batch_request("12", "prompt text")
+    validate_custom_id(request["custom_id"])  # must not raise
+
+
+def test_batch_request_raises_on_invalid_custom_id():
+    with pytest.raises(ValueError, match="custom_id"):
+        _batch_request("has a space", "prompt text")
 
 
 def test_coerce_list_field_passes_through_real_list():

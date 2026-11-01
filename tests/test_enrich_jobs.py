@@ -9,7 +9,9 @@ import pytest
 from pydantic import ValidationError
 
 from src import enrich_jobs
+from src.batch_poll import validate_custom_id
 from src.enrich_jobs import (
+    _batch_request,
     _merge_tool_use_blocks,
     _parse_enrichment,
     build_prompt,
@@ -148,6 +150,25 @@ def test_parse_enrichment_invalid_raises_validation_error():
     msg = _message(_block({"summary": "x"}))  # missing work_arrangement
     with pytest.raises(ValidationError):
         _parse_enrichment(msg)
+
+
+# ---------------------------------------------------------------------------
+# _batch_request / custom_id — custom_id=job_id here (a UUID), which is
+# always valid under the Batches API's ^[a-zA-Z0-9_-]{1,64}$ charset, but
+# validate_custom_id() is still called at request-build time (both the live
+# AND retry paths funnel through this one function) — see
+# src.tier1_rerank's own f"{user_id}:{chunk_index}" incident, the reason
+# this check exists at all.
+# ---------------------------------------------------------------------------
+
+def test_batch_request_accepts_a_uuid_job_id():
+    request = _batch_request("b16fec0d-9259-4c5b-8b9a-ec5c5b58dafd", "prompt text")
+    validate_custom_id(request["custom_id"])  # must not raise
+
+
+def test_batch_request_raises_on_invalid_custom_id():
+    with pytest.raises(ValueError, match="custom_id"):
+        _batch_request("has a space", "prompt text")
 
 
 # ---------------------------------------------------------------------------

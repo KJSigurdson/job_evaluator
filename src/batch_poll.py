@@ -38,6 +38,7 @@ ever making progress on that job again.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,32 @@ from datetime import datetime, timedelta, timezone
 from src.supabase_client import persist_batch_results, record_batch_submitted
 
 log = logging.getLogger(__name__)
+
+# The Anthropic Batches API's own custom_id constraint. Confirmed for real:
+# tier1_rerank.py's old f"{user_id}:{chunk_index}" format put a ':' in every
+# custom_id, and the ENTIRE .create() call — every request in the batch, not
+# just the offending one — was rejected outright with a 400
+# invalid_request_error ("requests.0.custom_id must match
+# ^[a-zA-Z0-9_-]{1,64}$"). Each Batches module calls validate_custom_id() at
+# request-BUILD time (inside its own _batch_request(), which both the live
+# and retry paths already funnel through) so a bad id fails loudly and
+# locally — before spending a network round trip finding out from the API,
+# and before FakeSupabaseClient's tests, which have no equivalent check and
+# would pass regardless.
+_CUSTOM_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def validate_custom_id(custom_id: str) -> None:
+    """Raise ValueError if *custom_id* doesn't match the Anthropic Batches
+    API's custom_id constraint. See this module's top-of-file comment for
+    why every Batches module (enrich_jobs.py/tier1_rerank.py/tier2_enrich.py,
+    live AND retry paths) must call this when building a request, not just
+    trust its own id-construction logic."""
+    if not _CUSTOM_ID_PATTERN.match(custom_id):
+        raise ValueError(
+            f"invalid Batches API custom_id {custom_id!r} — must match {_CUSTOM_ID_PATTERN.pattern}"
+        )
+
 
 # The daily pipeline's default budget — comfortably covers this project's
 # observed steady-state batch completion times (historically 2-15 minutes for

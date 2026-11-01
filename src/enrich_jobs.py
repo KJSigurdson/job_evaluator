@@ -66,7 +66,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 from pydantic import ValidationError
 
-from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit
+from src.batch_poll import DEFAULT_POLL_BUDGET_SECONDS, resume_or_submit, validate_custom_id
 from src.models.job_enrichment import JobEnrichment
 from src.supabase_client import chunked_upsert, fetch_all, fetch_all_in, insert_run_metrics, mark_batch_results_processed
 
@@ -379,6 +379,7 @@ _TOOL_SCHEMA = {
 # ---------------------------------------------------------------------------
 
 def _batch_request(job_id: str, prompt: str) -> dict:
+    validate_custom_id(job_id)
     return {
         "custom_id": job_id,
         "params": {

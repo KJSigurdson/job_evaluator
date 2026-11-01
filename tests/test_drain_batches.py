@@ -85,7 +85,7 @@ def test_drain_ended_applies_tier1_via_its_own_apply_fn(monkeypatch):
 
     def _fake_resume(anthropic_client, client_, *, module, requests, budget_seconds):
         if module == "tier1_rerank":
-            return BatchOutcome(status="ended", batch_id="batch_2", results={"u1:0": {"type": "succeeded"}})
+            return BatchOutcome(status="ended", batch_id="batch_2", results={"u1_0": {"type": "succeeded"}})
         return BatchOutcome(status="idle", batch_id=None)
 
     applied_calls = []
@@ -100,7 +100,7 @@ def test_drain_ended_applies_tier1_via_its_own_apply_fn(monkeypatch):
 
     assert result["applied"]["tier1_rerank"] == {"scored": 1, "failed": 0}
     [(results, run_id)] = applied_calls
-    assert results == {"u1:0": {"type": "succeeded"}}
+    assert results == {"u1_0": {"type": "succeeded"}}
     assert run_id == result["run_id"]
 
 

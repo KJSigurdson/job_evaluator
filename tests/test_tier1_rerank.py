@@ -10,9 +10,11 @@ import pytest
 from pydantic import ValidationError
 
 from src import tier1_rerank
+from src.batch_poll import validate_custom_id
 from src.models.tier1_rerank import Tier1RerankOutput
 from src.tier1_rerank import (
     TIER1_MAX_PER_USER,
+    _batch_request,
     _build_manifest,
     _chunk_user_requests,
     _merge_tool_use_blocks,
@@ -47,7 +49,7 @@ def _job_card(job_id="job-1", **overrides) -> dict:
 
 
 def _seed_manifest(fake_client, batch_id, *, entries=None, jobs=None, user_id="u1",
-                    profile_content_hash="hash-abc", custom_id="u1:0", module="tier1_rerank"):
+                    profile_content_hash="hash-abc", custom_id="u1_0", module="tier1_rerank"):
     """Seed a batch_submissions row carrying the request-time manifest
     _write_verdicts/apply_drained_batch/reprocess_staged read via
     fetch_batch_manifest — i.e. simulate "this is what was persisted
@@ -154,26 +156,26 @@ def test_parse_scores_invalid_raises_validation_error():
 
 
 # ---------------------------------------------------------------------------
-# _chunk_user_requests — custom_id = f"{user_id}:{chunk_index}", at most
+# _chunk_user_requests — custom_id = f"{user_id}_{chunk_index}", at most
 # _CHUNK_SIZE (40) job cards per chunk
 # ---------------------------------------------------------------------------
 
 def test_chunk_user_requests_single_chunk_under_cap():
     user_requests = {"u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": [_job_card("job-1")]}}
     chunks = _chunk_user_requests(user_requests)
-    assert list(chunks.keys()) == ["u1:0"]
-    assert chunks["u1:0"][0] == "u1"
-    assert len(chunks["u1:0"][1]) == 1
+    assert list(chunks.keys()) == ["u1_0"]
+    assert chunks["u1_0"][0] == "u1"
+    assert len(chunks["u1_0"][1]) == 1
 
 
 def test_chunk_user_requests_splits_at_40():
     cards = [_job_card(f"job-{i}") for i in range(85)]
     user_requests = {"u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": cards}}
     chunks = _chunk_user_requests(user_requests)
-    assert set(chunks.keys()) == {"u1:0", "u1:1", "u1:2"}
-    assert len(chunks["u1:0"][1]) == 40
-    assert len(chunks["u1:1"][1]) == 40
-    assert len(chunks["u1:2"][1]) == 5
+    assert set(chunks.keys()) == {"u1_0", "u1_1", "u1_2"}
+    assert len(chunks["u1_0"][1]) == 40
+    assert len(chunks["u1_1"][1]) == 40
+    assert len(chunks["u1_2"][1]) == 5
 
 
 def test_chunk_user_requests_multiple_users_namespaced_independently():
@@ -182,9 +184,45 @@ def test_chunk_user_requests_multiple_users_namespaced_independently():
         "u2": {"profile": _profile(), "gate_constraints": {}, "job_cards": [_job_card("job-2")]},
     }
     chunks = _chunk_user_requests(user_requests)
-    assert set(chunks.keys()) == {"u1:0", "u2:0"}
-    assert chunks["u1:0"][0] == "u1"
-    assert chunks["u2:0"][0] == "u2"
+    assert set(chunks.keys()) == {"u1_0", "u2_0"}
+    assert chunks["u1_0"][0] == "u1"
+    assert chunks["u2_0"][0] == "u2"
+
+
+def test_chunk_user_requests_double_digit_chunk_index_is_a_valid_custom_id():
+    """Regression for the real incident: a custom_id separator that happens
+    to work for single-digit chunk indices can still break the Batches
+    API's charset — ':' did, in fact. 450 cards -> chunk indices 0..11, so
+    this exercises double digits too, and every single produced custom_id
+    must pass the API's own ^[a-zA-Z0-9_-]{1,64}$ constraint, not just a
+    hand-picked few."""
+    cards = [_job_card(f"job-{i}") for i in range(450)]
+    user_requests = {"u1": {"profile": _profile(), "gate_constraints": {}, "job_cards": cards}}
+
+    chunks = _chunk_user_requests(user_requests)
+
+    assert set(chunks.keys()) == {f"u1_{i}" for i in range(12)}  # ceil(450/40) = 12
+    assert "u1_10" in chunks and "u1_11" in chunks
+    for custom_id in chunks:
+        validate_custom_id(custom_id)  # must not raise for ANY produced id
+
+
+def test_batch_request_uses_underscore_separator_not_colon():
+    """The specific incident: f"{user_id}:{chunk_index}" (colon) made the
+    WHOLE batch .create() call fail with a 400 invalid_request_error, not
+    just the one bad request."""
+    request = _batch_request("u1_0", "prompt text")
+    assert request["custom_id"] == "u1_0"
+    assert ":" not in request["custom_id"]
+
+
+def test_batch_request_raises_on_invalid_custom_id():
+    """_batch_request() is the one chokepoint both the live AND retry paths
+    funnel through (rerank_tier1_batch calls it for round 1 and round 2
+    alike) — validating here, at request-build time, covers both without
+    needing a separate check in the retry code path."""
+    with pytest.raises(ValueError, match="custom_id"):
+        _batch_request("u1:0", "prompt text")
 
 
 def test_tier1_max_per_user_is_200():
@@ -205,7 +243,7 @@ def test_build_manifest_captures_job_enriched_at_and_profile_hash():
 
     manifest = _build_manifest(chunks, user_requests)
 
-    assert manifest == {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1", "job-2": "t2"}}}
+    assert manifest == {"u1_0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "t1", "job-2": "t2"}}}
 
 
 def test_build_manifest_namespaces_each_chunk_independently():
@@ -219,8 +257,8 @@ def test_build_manifest_namespaces_each_chunk_independently():
 
     manifest = _build_manifest(chunks, user_requests)
 
-    assert manifest["u1:0"]["profile_content_hash"] == "hash-u1"
-    assert manifest["u2:0"]["profile_content_hash"] == "hash-u2"
+    assert manifest["u1_0"]["profile_content_hash"] == "hash-u1"
+    assert manifest["u2_0"]["profile_content_hash"] == "hash-u2"
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +478,7 @@ def _user_requests(user_ids=("u1",), job_cards=None) -> dict:
 
 def test_rerank_tier1_batch_happy_path_single_user_single_chunk(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
     result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
@@ -466,8 +504,8 @@ def test_rerank_tier1_batch_covers_multiple_users_in_one_batch(fake_client):
     }
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
-            _FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
-            _FakeResultItem("u2:0", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
+            _FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
+            _FakeResultItem("u2_0", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
         ],
     ])
 
@@ -484,8 +522,8 @@ def test_rerank_tier1_batch_multiple_chunks_for_one_user_in_one_batch(fake_clien
     cards = [_job_card("job-1", enriched_at="t1"), _job_card("job-2", enriched_at="t1")]
     anthropic_client = _FakeAnthropicClient(rounds=[
         [
-            _FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
-            _FakeResultItem("u1:1", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
+            _FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict(["job-1"])))),
+            _FakeResultItem("u1_1", _FakeSucceededResult(_block(_valid_output_dict(["job-2"])))),
         ],
     ])
 
@@ -514,14 +552,21 @@ def test_rerank_tier1_batch_empty_user_requests_still_checks_for_outstanding(fak
 
 def test_rerank_tier1_batch_failure_then_successful_retry(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})))],
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
     result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
     assert result == {"status": "complete", "scored": 1, "failed": 0}
     assert len(anthropic_client.messages.batches.created_batches) == 2
+    # The retry batch's own request must carry a VALID custom_id too — the
+    # retry path funnels through the same _batch_request() as round 1 (see
+    # test_batch_request_raises_on_invalid_custom_id), but this confirms it
+    # end-to-end through the real retry call site.
+    [retry_batch] = anthropic_client.messages.batches.created_batches[1:]
+    for request in retry_batch:
+        validate_custom_id(request["custom_id"])
     # The retried chunk's verdict must carry the RETRY batch's own batch_id
     # (and therefore its own manifest) — not round 1's, whose chunk for this
     # custom_id is the one that failed to parse.
@@ -533,8 +578,8 @@ def test_rerank_tier1_batch_failure_then_successful_retry(fake_client):
 def test_rerank_tier1_batch_fails_both_rounds_dropped_not_partial(fake_client):
     bad_block = _block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(bad_block))],
-        [_FakeResultItem("u1:0", _FakeSucceededResult(bad_block))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(bad_block))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(bad_block))],
     ])
 
     result = rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
@@ -545,7 +590,7 @@ def test_rerank_tier1_batch_fails_both_rounds_dropped_not_partial(fake_client):
 
 def test_rerank_tier1_batch_records_batch_submission_and_retrieval(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
     rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
@@ -555,25 +600,25 @@ def test_rerank_tier1_batch_records_batch_submission_and_retrieval(fake_client):
     assert submission["status"] == "retrieved"
     # The request-time manifest is persisted alongside the submission, not
     # derived at write time — see _build_manifest/record_batch_submitted.
-    assert submission["manifest"] == {"u1:0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "2026-10-01T00:00:00+00:00"}}}
+    assert submission["manifest"] == {"u1_0": {"user_id": "u1", "profile_content_hash": "hash-abc", "jobs": {"job-1": "2026-10-01T00:00:00+00:00"}}}
 
 
 def test_rerank_tier1_batch_persists_raw_results_and_marks_processed(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
     rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests())
 
     [staged] = fake_client.table("batch_results").rows
-    assert staged["custom_id"] == "u1:0"
+    assert staged["custom_id"] == "u1_0"
     assert staged["raw"]["type"] == "succeeded"
     assert staged["processed"] is True
 
 
 def test_rerank_tier1_batch_writes_run_metrics(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
 
     rerank_tier1_batch(fake_client, anthropic_client, user_requests=_user_requests(), run_id="run-abc", trigger="scheduled")
@@ -592,7 +637,7 @@ def test_rerank_tier1_batch_survives_run_metrics_insert_failure(fake_client, cap
     written above it (see src.supabase_client.insert_run_metrics's own
     tests for the real incident this guards)."""
     anthropic_client = _FakeAnthropicClient(rounds=[
-        [_FakeResultItem("u1:0", _FakeSucceededResult(_block(_valid_output_dict())))],
+        [_FakeResultItem("u1_0", _FakeSucceededResult(_block(_valid_output_dict())))],
     ])
     fake_client.table("run_metrics").raise_on_execute["insert"] = Exception("PGRST204: boom")
 
@@ -629,7 +674,7 @@ def test_rerank_tier1_batch_pending_writes_zero_count_run_metrics_and_stops(fake
 
 def test_apply_drained_batch_writes_verdicts(fake_client):
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
-    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+    results = {"u1_0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
 
     result = apply_drained_batch(fake_client, results, batch_id="batch_1")
 
@@ -651,7 +696,7 @@ def test_apply_drained_batch_uses_request_time_manifest_not_current_job_state(fa
     the resulting verdict as INVALID, not accidentally valid."""
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})  # request-time (OLD)
     fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-20T00:00:00+00:00"}])  # re-enriched since (current)
-    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+    results = {"u1_0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
 
     result = apply_drained_batch(fake_client, results, batch_id="batch_1")
 
@@ -665,15 +710,15 @@ def test_apply_drained_batch_uses_request_time_manifest_not_current_job_state(fa
 def test_apply_drained_batch_parse_failure_dropped_no_retry(fake_client):
     bad = _FakeSucceededResult(_block({"scores": [{"job_id": "job-1", "score": 999, "reason": "bad"}]})).model_dump()
 
-    result = apply_drained_batch(fake_client, {"u1:0": bad}, batch_id="batch_1")
+    result = apply_drained_batch(fake_client, {"u1_0": bad}, batch_id="batch_1")
 
     assert result == {"scored": 0, "failed": 1}
 
 
 def test_apply_drained_batch_marks_processed(fake_client):
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
-    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": {}, "processed": False}])
-    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1_0", "raw": {}, "processed": False}])
+    results = {"u1_0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
 
     apply_drained_batch(fake_client, results, batch_id="batch_1")
 
@@ -688,7 +733,7 @@ def test_apply_drained_batch_no_manifest_skips_verdicts_instead_of_guessing(fake
     that's exactly the write-time-state bug this change fixes."""
     fake_client.seed("jobs", [{"id": "job-1", "enriched_at": "2026-10-01T00:00:00+00:00"}])
     fake_client.seed("profiles", [{"user_id": "u1", "profile_content_hash": "hash-abc"}])
-    results = {"u1:0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
+    results = {"u1_0": _FakeSucceededResult(_block(_valid_output_dict())).model_dump()}
 
     result = apply_drained_batch(fake_client, results, batch_id="batch_no_manifest")
 
@@ -707,7 +752,7 @@ def test_reprocess_staged_no_unprocessed_rows_is_noop(fake_client):
 def test_reprocess_staged_writes_verdicts_without_api_call(fake_client):
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
     raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
-    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1_0", "raw": raw, "processed": False}])
 
     result = reprocess_staged(fake_client, "batch_1")
 
@@ -719,7 +764,7 @@ def test_reprocess_staged_writes_verdicts_without_api_call(fake_client):
 def test_reprocess_staged_does_not_write_run_metrics(fake_client):
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
     raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
-    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1_0", "raw": raw, "processed": False}])
 
     reprocess_staged(fake_client, "batch_1")
 
@@ -729,7 +774,7 @@ def test_reprocess_staged_does_not_write_run_metrics(fake_client):
 def test_reprocess_staged_marks_rows_processed(fake_client):
     _seed_manifest(fake_client, "batch_1", jobs={"job-1": "2026-10-01T00:00:00+00:00"})
     raw = _FakeSucceededResult(_block(_valid_output_dict())).model_dump()
-    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1:0", "raw": raw, "processed": False}])
+    fake_client.seed("batch_results", [{"batch_id": "batch_1", "custom_id": "u1_0", "raw": raw, "processed": False}])
 
     reprocess_staged(fake_client, "batch_1")
 
