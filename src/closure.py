@@ -38,6 +38,69 @@ _SAFETY_CEILING_DAYS = 30
 _OPEN_STATUSES = ("pending_enrich", "enriched")
 _JOB_SELECT_COLUMNS = "id,canonical_url,source_board,content_hash,last_seen"
 
+# closure-health metric: a job whose OWNING board (jobs.source_board) hasn't
+# had a complete fetch in this long, but whose last_seen is still fresher
+# than this — meaning some OTHER board's cross-board touch (see ingest.py's
+# "neither board restricted" branch: only last_seen is bumped, source_board
+# never changes) is the only thing keeping it out of closure. 14 days: half
+# of _SAFETY_CEILING_DAYS, deliberately — this is meant to surface the
+# situation well before rule (b) would otherwise close the job outright.
+_STALE_OWNER_DAYS = 14
+
+
+def compute_closure_health(client) -> dict:
+    """Count open jobs (status in pending_enrich/enriched) that are only
+    staying open because a board OTHER than their nominal owner keeps
+    touching last_seen — the owning board itself hasn't had a complete fetch
+    in _STALE_OWNER_DAYS. Confirmed for real as a live scenario during the
+    AAC go-live: IAP has been disabled since 2026-08-18 (see
+    src/pipeline_v2.py's adapter registry) and never fetches at all, so
+    EVERY still-open IAP-owned job falls in this bucket the moment any other
+    board cross-sights it even once.
+
+    This is an APPROXIMATION, not an exact per-board sighting history:
+    jobs has exactly one last_seen column, shared across every board that's
+    ever cross-touched a row, so there is no way to tell, from `jobs` alone,
+    WHICH board's sighting most recently bumped a given row. This uses
+    source_fetch_log's most recent COMPLETE run per board as a proxy for
+    "has the owning board had a chance to see this job recently" instead —
+    the draft job_status_events migration (see supabase/migrations/) would
+    make this exact by recording every board's sighting of every job over
+    time, but that's not applied or wired up yet.
+
+    Returns {"stale_owner_fresh_cross_board": int, "example_job_ids": [...]}
+    (at most 10 examples — enough to spot-check, not a full dump).
+    """
+    now = datetime.now(timezone.utc)
+    stale_owner_cutoff = now - timedelta(days=_STALE_OWNER_DAYS)
+
+    rows = fetch_all(client.table("jobs").select(_JOB_SELECT_COLUMNS).in_("status", list(_OPEN_STATUSES)))
+
+    fetch_log = fetch_all(client.table("source_fetch_log").select("source_board,fetched_at,complete"))
+    last_complete_fetch: dict[str, datetime] = {}
+    for log_row in fetch_log:
+        if not log_row["complete"]:
+            continue
+        fetched_at = datetime.fromisoformat(log_row["fetched_at"])
+        current = last_complete_fetch.get(log_row["source_board"])
+        if current is None or fetched_at > current:
+            last_complete_fetch[log_row["source_board"]] = fetched_at
+
+    stale_owner_fresh_cross_board = []
+    for row in rows:
+        owner_last_fetch = last_complete_fetch.get(row["source_board"])
+        owner_stale = owner_last_fetch is None or owner_last_fetch < stale_owner_cutoff
+        if not owner_stale:
+            continue
+        last_seen = datetime.fromisoformat(row["last_seen"])
+        if last_seen >= stale_owner_cutoff:
+            stale_owner_fresh_cross_board.append(row["id"])
+
+    return {
+        "stale_owner_fresh_cross_board": len(stale_owner_fresh_cross_board),
+        "example_job_ids": stale_owner_fresh_cross_board[:10],
+    }
+
 
 def plan_closures(client, *, complete_sources: frozenset[str] = frozenset()) -> dict:
     """Compute, WITHOUT writing anything, which open jobs (status in
@@ -139,13 +202,19 @@ def close_jobs(
     else:
         closed = 0
 
+    closure_health = compute_closure_health(client)
+
     insert_run_metrics(client, {
         "run_at": datetime.now(timezone.utc).isoformat(),
         "run_id": run_id,
         "stage": "closure",
         "trigger": trigger,
         "closure_summary": {"closed": closed, "by_source": plan["by_source"], "by_rule": by_rule_counts},
+        "closure_health": closure_health,
     })
 
-    log.info("close_jobs: closed %d job(s) — by_source=%s, by_rule=%s", closed, plan["by_source"], by_rule_counts)
-    return {"closed": closed, "by_source": plan["by_source"], "by_rule": by_rule_counts}
+    log.info(
+        "close_jobs: closed %d job(s) — by_source=%s, by_rule=%s, closure_health=%s",
+        closed, plan["by_source"], by_rule_counts, closure_health,
+    )
+    return {"closed": closed, "by_source": plan["by_source"], "by_rule": by_rule_counts, "closure_health": closure_health}

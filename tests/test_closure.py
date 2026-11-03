@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from src.closure import close_jobs, plan_closures
+from src.closure import close_jobs, compute_closure_health, plan_closures
 
 
 def _iso(days_ago: float) -> str:
@@ -128,7 +128,9 @@ def test_close_jobs_writes_closed_status(fake_client):
 
     result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))
 
-    assert result == {"closed": 1, "by_source": {"80000_hours": 1}, "by_rule": {"complete_source_stale": 1, "safety_ceiling": 0}}
+    assert result["closed"] == 1
+    assert result["by_source"] == {"80000_hours": 1}
+    assert result["by_rule"] == {"complete_source_stale": 1, "safety_ceiling": 0}
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "closed"
 
@@ -138,7 +140,9 @@ def test_close_jobs_noop_when_nothing_qualifies(fake_client):
 
     result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))
 
-    assert result == {"closed": 0, "by_source": {}, "by_rule": {"complete_source_stale": 0, "safety_ceiling": 0}}
+    assert result["closed"] == 0
+    assert result["by_source"] == {}
+    assert result["by_rule"] == {"complete_source_stale": 0, "safety_ceiling": 0}
     assert fake_client.table("jobs").rows[0]["status"] == "enriched"
 
 
@@ -225,7 +229,103 @@ def test_close_jobs_survives_run_metrics_insert_failure(fake_client, caplog):
     with caplog.at_level("ERROR"):
         result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))  # must not raise
 
-    assert result == {"closed": 1, "by_source": {"80000_hours": 1}, "by_rule": {"complete_source_stale": 1, "safety_ceiling": 0}}
+    assert result["closed"] == 1
+    assert result["by_source"] == {"80000_hours": 1}
+    assert result["by_rule"] == {"complete_source_stale": 1, "safety_ceiling": 0}
     assert fake_client.table("jobs").rows[0]["status"] == "closed"  # the real write survived
     assert fake_client.table("run_metrics").rows == []  # the metrics row did not
     assert any(r.levelname == "ERROR" for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# compute_closure_health — open jobs kept alive only by a board OTHER than
+# their nominal owner (confirmed real-world scenario: IAP disabled since
+# 2026-08-18, so any still-open IAP-owned job cross-sighted by another board
+# falls in this bucket).
+# ---------------------------------------------------------------------------
+
+def test_compute_closure_health_flags_stale_owner_fresh_cross_board(fake_client):
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},  # owner: stale
+        {"source_board": "80000_hours", "fetched_at": _iso(1), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 1
+    assert health["example_job_ids"] == ["job-1"]
+
+
+def test_compute_closure_health_owner_still_fetching_is_not_flagged(fake_client):
+    fake_client.seed("jobs", [_job("job-1", source_board="80000_hours", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "80000_hours", "fetched_at": _iso(1), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 0
+
+
+def test_compute_closure_health_owner_stale_and_last_seen_also_stale_not_flagged(fake_client):
+    """Not kept alive by anything — this job is genuinely just stale, not a
+    cross-board-rescued case; rule (b) would catch it on its own merits."""
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=20)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 0
+
+
+def test_compute_closure_health_owner_never_fetched_treated_as_stale(fake_client):
+    """A board with NO source_fetch_log rows at all (e.g. disabled before
+    source_fetch_log existed, or never once completed) is stale by
+    definition — there's no complete fetch to compare against."""
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 1
+
+
+def test_compute_closure_health_ignores_incomplete_fetches(fake_client):
+    """An incomplete fetch doesn't count as the owner having 'seen' its
+    pool — only a complete run resets staleness."""
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(1), "complete": False},
+    ])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 1
+
+
+def test_compute_closure_health_examples_capped_at_ten(fake_client):
+    jobs = [_job(f"job-{i}", source_board="iap", last_seen_days_ago=1) for i in range(15)]
+    fake_client.seed("jobs", jobs)
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 15
+    assert len(health["example_job_ids"]) == 10
+
+
+def test_close_jobs_writes_closure_health_in_run_metrics(fake_client):
+    fake_client.seed("jobs", [
+        _job("job-1", source_board="80000_hours", last_seen_days_ago=4),  # closes under rule (a)
+        _job("job-2", source_board="iap", last_seen_days_ago=1),  # stale owner, fresh cross-board
+    ])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))
+
+    assert result["closure_health"] == {"stale_owner_fresh_cross_board": 1, "example_job_ids": ["job-2"]}
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["closure_health"] == {"stale_owner_fresh_cross_board": 1, "example_job_ids": ["job-2"]}
