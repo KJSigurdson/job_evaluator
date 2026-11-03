@@ -764,6 +764,32 @@ def test_run_passes_this_runs_complete_sources_to_close_jobs(fake_client, monkey
     assert captured["complete_sources"] == frozenset({"80000_hours"})
 
 
+def test_run_passes_disabled_registry_boards_to_close_jobs(fake_client, monkeypatch):
+    """disabled_boards must come from _ADAPTER_REGISTRY's disabled entries
+    (IAP, today) — not _ADAPTERS, which already excludes them entirely and
+    so can't be used to recover which ones were skipped."""
+    from src.adapters.base import FetchResult
+    from src.adapters.iap import IAPAdapter
+
+    class _ActiveAdapter:
+        source_board = "80000_hours"
+
+        def fetch(self):
+            return FetchResult(postings=[], fetched=0, nb_hits=0, complete=True)
+
+    captured = {}
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [_ActiveAdapter])
+    monkeypatch.setattr(pipeline_v2, "_ADAPTER_REGISTRY", [(_ActiveAdapter, True), (IAPAdapter, False)])
+    monkeypatch.setattr(pipeline_v2, "close_jobs", lambda client, *, disabled_boards, **k: (
+        captured.update(disabled_boards=disabled_boards), {"closed": 0, "by_source": {}, "by_rule": {}})[1])
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    assert captured["disabled_boards"] == frozenset({"iap"})
+
+
 def test_run_dry_run_never_calls_close_jobs(fake_client, monkeypatch):
     _seed_active_user(fake_client, profile_embedding="[0.1]")
     _patch_full_pipeline_noops(monkeypatch)

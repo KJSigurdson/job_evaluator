@@ -48,15 +48,26 @@ _JOB_SELECT_COLUMNS = "id,canonical_url,source_board,content_hash,last_seen"
 _STALE_OWNER_DAYS = 14
 
 
-def compute_closure_health(client) -> dict:
+def compute_closure_health(client, *, disabled_boards: frozenset[str] = frozenset()) -> dict:
     """Count open jobs (status in pending_enrich/enriched) that are only
     staying open because a board OTHER than their nominal owner keeps
     touching last_seen — the owning board itself hasn't had a complete fetch
-    in _STALE_OWNER_DAYS. Confirmed for real as a live scenario during the
-    AAC go-live: IAP has been disabled since 2026-08-18 (see
-    src/pipeline_v2.py's adapter registry) and never fetches at all, so
-    EVERY still-open IAP-owned job falls in this bucket the moment any other
-    board cross-sights it even once.
+    in _STALE_OWNER_DAYS.
+
+    disabled_boards: source_board names whose adapter is deliberately
+    disabled (see src/pipeline_v2.py's _ADAPTER_REGISTRY — IAP, since
+    2026-08-18). A disabled board's fetch is NEVER going to refresh within
+    _STALE_OWNER_DAYS, ever, by design — that's not a signal worth acting
+    on every single run, and folding it into the same count as a board
+    that's unexpectedly gone quiet would permanently bury the one case
+    actually worth looking at under known, accepted noise (confirmed for
+    real: every still-open IAP-owned job qualifies the moment any other
+    board cross-sights it even once, which is common enough that the count
+    was never once zero). Jobs owned by a disabled board are reported
+    separately, under disabled_owner_fresh_cross_board — defaults to
+    frozenset() (no board treated as disabled) for callers with no "this
+    run's registry" to speak of, same default-permissive convention as
+    plan_closures()'s complete_sources.
 
     This is an APPROXIMATION, not an exact per-board sighting history:
     jobs has exactly one last_seen column, shared across every board that's
@@ -68,8 +79,10 @@ def compute_closure_health(client) -> dict:
     make this exact by recording every board's sighting of every job over
     time, but that's not applied or wired up yet.
 
-    Returns {"stale_owner_fresh_cross_board": int, "example_job_ids": [...]}
-    (at most 10 examples — enough to spot-check, not a full dump).
+    Returns {"stale_owner_fresh_cross_board": int, "example_job_ids": [...],
+    "disabled_owner_fresh_cross_board": int, "disabled_owner_example_job_ids":
+    [...]} (at most 10 examples per bucket — enough to spot-check, not a
+    full dump).
     """
     now = datetime.now(timezone.utc)
     stale_owner_cutoff = now - timedelta(days=_STALE_OWNER_DAYS)
@@ -87,18 +100,25 @@ def compute_closure_health(client) -> dict:
             last_complete_fetch[log_row["source_board"]] = fetched_at
 
     stale_owner_fresh_cross_board = []
+    disabled_owner_fresh_cross_board = []
     for row in rows:
         owner_last_fetch = last_complete_fetch.get(row["source_board"])
         owner_stale = owner_last_fetch is None or owner_last_fetch < stale_owner_cutoff
         if not owner_stale:
             continue
         last_seen = datetime.fromisoformat(row["last_seen"])
-        if last_seen >= stale_owner_cutoff:
+        if last_seen < stale_owner_cutoff:
+            continue
+        if row["source_board"] in disabled_boards:
+            disabled_owner_fresh_cross_board.append(row["id"])
+        else:
             stale_owner_fresh_cross_board.append(row["id"])
 
     return {
         "stale_owner_fresh_cross_board": len(stale_owner_fresh_cross_board),
         "example_job_ids": stale_owner_fresh_cross_board[:10],
+        "disabled_owner_fresh_cross_board": len(disabled_owner_fresh_cross_board),
+        "disabled_owner_example_job_ids": disabled_owner_fresh_cross_board[:10],
     }
 
 
@@ -160,7 +180,7 @@ def plan_closures(client, *, complete_sources: frozenset[str] = frozenset()) -> 
 
 
 def close_jobs(
-    client, *, complete_sources: frozenset[str] = frozenset(),
+    client, *, complete_sources: frozenset[str] = frozenset(), disabled_boards: frozenset[str] = frozenset(),
     run_id: str | None = None, trigger: str | None = None,
 ) -> dict:
     """Apply plan_closures()'s plan for real: status -> 'closed' for every
@@ -170,7 +190,12 @@ def close_jobs(
     never raises, so a schema-drift/observability failure here can't undo
     or block on the closure writes that already landed above.
 
-    Returns {"closed": int, "by_source": {...}, "by_rule": {rule: count}}.
+    disabled_boards is passed straight through to compute_closure_health()
+    — see that function's docstring for why a deliberately-disabled
+    adapter's jobs are reported separately, not folded into the main count.
+
+    Returns {"closed": int, "by_source": {...}, "by_rule": {rule: count},
+    "closure_health": {...}}.
     """
     plan = plan_closures(client, complete_sources=complete_sources)
     job_ids = plan["by_rule"]["complete_source_stale"] + plan["by_rule"]["safety_ceiling"]
@@ -202,7 +227,7 @@ def close_jobs(
     else:
         closed = 0
 
-    closure_health = compute_closure_health(client)
+    closure_health = compute_closure_health(client, disabled_boards=disabled_boards)
 
     insert_run_metrics(client, {
         "run_at": datetime.now(timezone.utc).isoformat(),

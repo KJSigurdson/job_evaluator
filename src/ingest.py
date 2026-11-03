@@ -218,11 +218,29 @@ def ingest(
                 # docstring). Checked before cross-board/hash comparisons:
                 # "it's back" matters more than which board revived it or
                 # whether the text happens to match what it was closed with.
+                #
+                # source_board on reopen: PRESERVE the original owner, same
+                # "permitted beats restricted, otherwise leave it alone"
+                # precedence as the cross-board touch branch below — not
+                # posting.source_board unconditionally. Confirmed for real:
+                # AAC rediscovering a closed probably_good job relabeled it
+                # 'aac' outright, even though probably_good isn't restricted
+                # and had every right to keep owning it. Only when the
+                # ORIGINAL board is restricted and the incoming one isn't
+                # does the incoming board actually win — e.g. AAC reviving a
+                # closed IAP-owned job, which SHOULD end up attributed to
+                # AAC, the same as a live cross-board touch would.
+                original_board = existing["source_board"]
+                original_restricted = original_board in _RESTRICTED_SOURCE_BOARDS
+                incoming_restricted = posting.source_board in _RESTRICTED_SOURCE_BOARDS
+                reopened_source_board = (
+                    posting.source_board if (original_restricted and not incoming_restricted) else original_board
+                )
                 has_enrichment = existing.get("enrichment") is not None
                 content_changed = existing["content_hash"] != this_hash
                 reopen_payload = {
                     "canonical_url": canonical,
-                    "source_board": posting.source_board,
+                    "source_board": reopened_source_board,
                     "raw_description": posting.description,
                     "location_field": posting.location_field,
                     "content_hash": this_hash,
@@ -238,7 +256,7 @@ def ingest(
                 counts.reopened += 1
                 board_counts.reopened += 1
                 by_url[canonical] = {
-                    "content_hash": this_hash, "source_board": posting.source_board,
+                    "content_hash": this_hash, "source_board": reopened_source_board,
                     "raw_description": posting.description,
                     "enrichment": existing.get("enrichment"),
                     "reenrich_requested_at": reopen_payload.get("reenrich_requested_at", existing.get("reenrich_requested_at")),

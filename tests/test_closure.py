@@ -315,6 +315,61 @@ def test_compute_closure_health_examples_capped_at_ten(fake_client):
     assert len(health["example_job_ids"]) == 10
 
 
+# ---------------------------------------------------------------------------
+# disabled_boards — a deliberately-disabled adapter (IAP) is permanently
+# stale by design; its jobs must be reported separately, not folded into
+# the actionable main count (confirmed real: the main count was NEVER once
+# zero before this split, since IAP's jobs qualify the moment anything
+# cross-sights them).
+# ---------------------------------------------------------------------------
+
+def test_compute_closure_health_disabled_board_reported_separately(fake_client):
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client, disabled_boards=frozenset({"iap"}))
+
+    assert health["stale_owner_fresh_cross_board"] == 0
+    assert health["example_job_ids"] == []
+    assert health["disabled_owner_fresh_cross_board"] == 1
+    assert health["disabled_owner_example_job_ids"] == ["job-1"]
+
+
+def test_compute_closure_health_defaults_to_no_disabled_boards(fake_client):
+    """Default frozenset() — same "caller has no 'this run' context"
+    convention as plan_closures()'s complete_sources — treats every board
+    as not-disabled, same as before this parameter existed."""
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client)
+
+    assert health["stale_owner_fresh_cross_board"] == 1
+    assert health["disabled_owner_fresh_cross_board"] == 0
+
+
+def test_compute_closure_health_mixed_disabled_and_active_boards(fake_client):
+    fake_client.seed("jobs", [
+        _job("iap-job", source_board="iap", last_seen_days_ago=1),
+        _job("pg-job", source_board="probably_good", last_seen_days_ago=1),
+    ])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+        {"source_board": "probably_good", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    health = compute_closure_health(fake_client, disabled_boards=frozenset({"iap"}))
+
+    assert health["stale_owner_fresh_cross_board"] == 1
+    assert health["example_job_ids"] == ["pg-job"]
+    assert health["disabled_owner_fresh_cross_board"] == 1
+    assert health["disabled_owner_example_job_ids"] == ["iap-job"]
+
+
 def test_close_jobs_writes_closure_health_in_run_metrics(fake_client):
     fake_client.seed("jobs", [
         _job("job-1", source_board="80000_hours", last_seen_days_ago=4),  # closes under rule (a)
@@ -326,6 +381,26 @@ def test_close_jobs_writes_closure_health_in_run_metrics(fake_client):
 
     result = close_jobs(fake_client, complete_sources=frozenset({"80000_hours"}))
 
-    assert result["closure_health"] == {"stale_owner_fresh_cross_board": 1, "example_job_ids": ["job-2"]}
+    expected_health = {
+        "stale_owner_fresh_cross_board": 1, "example_job_ids": ["job-2"],
+        "disabled_owner_fresh_cross_board": 0, "disabled_owner_example_job_ids": [],
+    }
+    assert result["closure_health"] == expected_health
     [metrics] = fake_client.table("run_metrics").rows
-    assert metrics["closure_health"] == {"stale_owner_fresh_cross_board": 1, "example_job_ids": ["job-2"]}
+    assert metrics["closure_health"] == expected_health
+
+
+def test_close_jobs_passes_disabled_boards_through_to_closure_health(fake_client):
+    """IAP is disabled (see pipeline_v2.py's _ADAPTER_REGISTRY) — its own
+    stale-owner jobs must land under disabled_owner_fresh_cross_board, not
+    the main (actionable) count, when the caller tells close_jobs() so."""
+    fake_client.seed("jobs", [_job("job-1", source_board="iap", last_seen_days_ago=1)])
+    fake_client.seed("source_fetch_log", [
+        {"source_board": "iap", "fetched_at": _iso(60), "complete": True},
+    ])
+
+    result = close_jobs(fake_client, disabled_boards=frozenset({"iap"}))
+
+    assert result["closure_health"]["stale_owner_fresh_cross_board"] == 0
+    assert result["closure_health"]["disabled_owner_fresh_cross_board"] == 1
+    assert result["closure_health"]["disabled_owner_example_job_ids"] == ["job-1"]

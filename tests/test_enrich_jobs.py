@@ -756,11 +756,20 @@ def test_enrich_jobs_survives_run_metrics_insert_failure(fake_client, monkeypatc
 
 
 def test_enrich_jobs_run_metrics_counts_enriched_jobs_missing_embedding(fake_client, monkeypatch):
+    """3, not 2: the 2 pre-existing already-enriched jobs missing an
+    embedding (e.g. enriched before VOYAGE_API_KEY existed) PLUS job-1
+    itself — THIS round's own job, embedding-less here (VOYAGE_API_KEY
+    unset) too. Regression for a real incident: job-1 used to be invisible
+    to this count entirely, because the DB query backing it is scoped to
+    status='enriched', and job-1 is still status='pending_enrich' at the
+    point this metric used to be computed (_write_enrichment, which flips
+    it, hadn't run yet) — so a Voyage outage affecting ONLY the current
+    run's own enrichment reported enriched_without_embedding=0, exactly
+    what happened for real during the 2026-11-03 AAC go-live run (132 jobs
+    with no embedding, reported as 0). A third, stale (non-enriched) job
+    must still not be counted."""
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     fake_client.seed("jobs", [_job_row()])
-    # Two pre-existing jobs already enriched, already missing an embedding
-    # (e.g. enriched before VOYAGE_API_KEY existed) — the backlog this metric
-    # is meant to surface. A third, non-enriched job must not be counted.
     fake_client.seed("jobs", [
         {"id": "old-1", "canonical_url": "https://x/1", "source_board": "80000_hours",
          "content_hash": "h1", "status": "enriched", "embedding": None},
@@ -776,7 +785,7 @@ def test_enrich_jobs_run_metrics_counts_enriched_jobs_missing_embedding(fake_cli
     run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
 
     [metrics] = fake_client.table("run_metrics").rows
-    assert metrics["enriched_without_embedding"] == 2
+    assert metrics["enriched_without_embedding"] == 3
 
 
 def test_enrich_jobs_backfills_missing_embeddings_as_part_of_the_enrich_stage(fake_client, monkeypatch):
@@ -873,6 +882,31 @@ def test_enrich_jobs_voyage_failure_does_not_block_enrichment_write(fake_client,
     row = fake_client.table("jobs").rows[0]
     assert row["status"] == "enriched"
     assert row["embedding"] is None
+
+
+def test_enrich_jobs_voyage_failure_with_no_prior_backlog_still_counted(fake_client, monkeypatch):
+    """The exact real incident, isolated: VOYAGE_API_KEY is SET (not
+    missing) but every call fails (401-style), and there is NO pre-existing
+    backlog at all — enriched_without_embedding must still be 1, not 0.
+    Before the fix, this scenario reported 0 every time, because the DB
+    query backing the count only ever sees status='enriched' rows, and
+    job-1 is still status='pending_enrich' at the moment the count used to
+    run (_write_enrichment hadn't flipped it yet)."""
+    monkeypatch.setenv("VOYAGE_API_KEY", "fake-key")
+
+    def _raise(texts):
+        raise httpx.HTTPError("401 Unauthorized")
+
+    monkeypatch.setattr(enrich_jobs, "embed_texts", _raise)
+    fake_client.seed("jobs", [_job_row()])
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("job-1", _FakeSucceededResult(_block(_valid_enrichment_dict())))],
+    ])
+
+    run_enrich_jobs(client=fake_client, anthropic_client=anthropic_client)
+
+    [metrics] = fake_client.table("run_metrics").rows
+    assert metrics["enriched_without_embedding"] == 1
 
 
 # ---------------------------------------------------------------------------

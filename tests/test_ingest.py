@@ -719,6 +719,63 @@ def test_ingest_reopens_closed_job_with_enrichment_and_changed_content_flags_ree
     assert row["reenrich_requested_at"] is not None
 
 
+def test_ingest_reopen_preserves_original_source_board_when_not_restricted(fake_client):
+    """Regression for a real incident: AAC rediscovering a closed
+    probably_good job relabeled it 'aac' outright. Neither board is
+    restricted, so the ORIGINAL owner must be preserved — same precedence
+    as the cross-board touch branch for a still-open job."""
+    p = _posting(source_board="aac")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "probably_good",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "closed",
+        "enrichment": {"summary": "still good"}, "reenrich_requested_at": None,
+    }])
+
+    ingest([p], client=fake_client)
+
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "probably_good"
+
+
+def test_ingest_reopen_incoming_permitted_board_overrides_restricted_original(fake_client):
+    """The one case where the incoming board DOES win: the original owner
+    was restricted (iap) and the incoming board isn't — same "permitted
+    beats restricted" rule as a live cross-board touch, applied on reopen."""
+    p = _posting(source_board="aac")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "iap",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "closed",
+        "enrichment": {"summary": "still good"}, "reenrich_requested_at": None,
+    }])
+
+    ingest([p], client=fake_client)
+
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "aac"
+
+
+def test_ingest_reopen_same_restricted_board_keeps_it(fake_client):
+    """Both sides restricted (today's only restricted board reopening its
+    own closed job) — nothing to upgrade, original (==incoming) stands."""
+    p = _posting(source_board="iap")
+    canonical = normalize_job_url(p.url)
+    fake_client.seed("jobs", [{
+        "id": "job-1", "canonical_url": canonical, "source_board": "iap",
+        "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
+        "raw_description": p.description, "status": "closed",
+        "enrichment": {"summary": "still good"}, "reenrich_requested_at": None,
+    }])
+
+    ingest([p], client=fake_client)
+
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "iap"
+
+
 def test_ingest_reopens_closed_job_with_no_enrichment_to_pending_enrich(fake_client):
     """A job closed before it was ever successfully enriched has nothing to
     preserve — reopens straight to pending_enrich, same as a never-enriched

@@ -588,6 +588,19 @@ def _finalize_round(
 
     Returns {"enriched", "stale", "requeued", "embeddings_skipped"} (int/int/int/bool).
     """
+    # Computed BEFORE the write_run_metrics block below, not after (where
+    # this call used to live) — confirmed for real as a live bug during the
+    # Voyage 401 incident: enriched_without_embedding is a DB query scoped to
+    # status='enriched' rows, but THIS round's own jobs are still
+    # status='pending_enrich' at this point (_write_enrichment, which flips
+    # them, hasn't run yet — same crash-safety ordering as jobs_enriched
+    # above). So a Voyage outage affecting ONLY this round's own enrichment
+    # was invisible to the metric: the DB query only ever saw a stale PRIOR
+    # backlog, and reported 0 every time Voyage had been fine until exactly
+    # this run (which is exactly what the 2026-11-03 AAC go-live run did —
+    # 132 jobs with no embedding, reported as enriched_without_embedding=0).
+    embeddings = _embed_enriched(enriched, by_id)
+
     if write_run_metrics:
         # Run the embedding backfill BEFORE counting the gap below, not after
         # — so enriched_without_embedding reflects what's STILL missing once
@@ -617,10 +630,14 @@ def _finalize_round(
         # just above, so this reflects what's genuinely still missing (e.g.
         # Voyage itself down this run), not a stale pre-backfill count.
         # Surfaces the gap match_v2_top_jobs's embedding IS NOT NULL filter
-        # creates silently otherwise.
-        enriched_without_embedding = len(fetch_all(
+        # creates silently otherwise. Plus THIS round's own gap (embeddings
+        # computed just above, before _write_enrichment has flipped these
+        # jobs to status='enriched') — see this function's docstring.
+        db_backlog = len(fetch_all(
             client.table("jobs").select("id").eq("status", "enriched").is_("embedding", "null")
         ))
+        this_round_missing = len(enriched) - len(embeddings)
+        enriched_without_embedding = db_backlog + this_round_missing
         insert_run_metrics(client, {
             "run_at": now,
             "run_id": run_id,
@@ -641,7 +658,9 @@ def _finalize_round(
     for job_id, reason in requeued.items():
         log.warning("Job %s returned to pending_enrich (no LLM retry spent): %s", job_id, reason)
 
-    embeddings = _embed_enriched(enriched, by_id)
+    # embeddings was already computed above (before write_run_metrics'
+    # block) — NOT recomputed here, which would otherwise mean a second,
+    # wasted Voyage API call for the exact same jobs.
     skipped = _write_enrichment(client, enriched=enriched, failures=stale, requeued=requeued, by_id=by_id, embeddings=embeddings)
 
     if batch_id_by_job:

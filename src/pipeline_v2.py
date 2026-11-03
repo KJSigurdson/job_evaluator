@@ -531,8 +531,14 @@ def run(
                 # source_fetch_log query (see src.closure.plan_closures's
                 # docstring on why that distinction matters for rule (a)).
                 complete_sources = frozenset(r["source_board"] for r in fetch_log_rows if r["complete"])
+                # disabled_boards: every registry entry NOT enabled (IAP,
+                # today) — see closure.compute_closure_health()'s docstring
+                # for why its jobs are reported separately from the
+                # actionable closure-health signal, not folded into it.
+                disabled_boards = frozenset(cls.source_board for cls, enabled in _ADAPTER_REGISTRY if not enabled)
                 closure_result = close_jobs(
-                    client, complete_sources=complete_sources, run_id=run_id, trigger=trigger,
+                    client, complete_sources=complete_sources, disabled_boards=disabled_boards,
+                    run_id=run_id, trigger=trigger,
                 )
                 log.info("Closure: %s", closure_result)
 
