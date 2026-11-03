@@ -120,6 +120,7 @@ def test_build_digest_payload_maps_v2_fields_to_v1_shape():
     assert payload == [{
         "title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
         "fit_score": 0.82, "why_fits": "- Strong fit", "url": "https://example.org/job-1",
+        "summary": "Lead data.",
     }]
 
 
@@ -165,7 +166,10 @@ def test_build_digest_payload_shortlist_only_arm_omits_why_fits_key_entirely():
 
 def test_build_digest_payload_non_support_fields_identical_across_arms():
     """The experiment's hard rule: only why_fits may differ — title/org/
-    location/fit_score/url must be byte-identical regardless of arm."""
+    location/fit_score/url/summary must be byte-identical regardless of
+    arm. summary in particular is NOT application support (it's a neutral,
+    shared enrichment field, not Tier 2 per-user fit reasoning) and must
+    never be gated on arm — confirmed explicitly, 2026-11-04."""
     matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
     jobs_by_id = {"job-1": _job()}
     full_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="full")[0]
@@ -173,6 +177,50 @@ def test_build_digest_payload_non_support_fields_identical_across_arms():
 
     non_support_fields = {k: v for k, v in full_entry.items() if k != "why_fits"}
     assert shortlist_entry == non_support_fields
+    assert "summary" in shortlist_entry
+    assert shortlist_entry["summary"] == full_entry["summary"]
+
+
+# ---------------------------------------------------------------------------
+# _build_digest_payload — enrichment.summary, sent for BOTH arms
+# ---------------------------------------------------------------------------
+
+def test_build_digest_payload_includes_summary_for_full_arm():
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="full")
+    assert payload[0]["summary"] == "Lead data."
+
+
+def test_build_digest_payload_includes_summary_for_shortlist_only_arm():
+    """summary is explicitly NOT application support — it must be sent even
+    on the arm that omits why_fits."""
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="shortlist_only")
+    assert payload[0]["summary"] == "Lead data."
+
+
+def test_build_digest_payload_omits_summary_key_when_job_has_none():
+    """Shouldn't happen for a status='enriched' job (summary is a required
+    JobEnrichment field) — guarded defensively anyway. Omission, not a
+    null/empty-string value."""
+    job_no_summary = _job(enrichment={
+        "seniority": ["senior"], "cause_area": [], "skill_tags": [],
+        "work_arrangement": {"mode": "remote", "remote_scope": "global", "eligible_regions": [],
+                              "timezone_constraint": None, "restriction_type": None},
+    })
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": job_no_summary}, arm="full")
+    assert "summary" not in payload[0]
+
+
+def test_build_digest_payload_omits_summary_key_when_summary_is_empty_string():
+    job_empty_summary = _job(enrichment={"summary": "", "seniority": [], "cause_area": [], "skill_tags": [],
+                                          "work_arrangement": {"mode": "unspecified", "remote_scope": "unspecified",
+                                                                "eligible_regions": [], "timezone_constraint": None,
+                                                                "restriction_type": None}})
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": job_empty_summary}, arm="full")
+    assert "summary" not in payload[0]
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +667,8 @@ def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(f
     [(user_id, matches)] = digest_calls
     assert user_id == "u1"
     assert matches == [{"title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
-                         "fit_score": 0.8, "why_fits": "- Great fit", "url": "https://example.org/job-1"}]
+                         "fit_score": 0.8, "why_fits": "- Great fit", "url": "https://example.org/job-1",
+                         "summary": "Lead data."}]
     [row] = fake_client.table("matches_v2").rows
     assert row["notified_at"] is not None
 

@@ -282,13 +282,29 @@ def _build_digest_payload(
     about which matches reach this function (gating, Tier 1, Tier 2
     generation/threshold, the matches_v2 insert itself) depends on arm —
     this is the only place arm has any effect, by design: ranking/insert
-    stays byte-identical across arms."""
+    stays byte-identical across arms.
+
+    summary is jobs.enrichment.summary verbatim (NOT application support —
+    a neutral role description shared across the whole org/job pool, not
+    LLM-generated per-user fit reasoning) and is sent for EVERY arm,
+    unconditionally — deliberately decided 2026-11-04 against adding a new
+    enrichment field after confirming the existing summary (already
+    neutral/descriptive, "do not editorialize or assess fit" per its
+    prompt) already satisfies the requirement; see src.enrich_jobs.
+    build_prompt field 1. Must never be touched by the arm branch above, and
+    must never feed back into _job_card_text/gate_v2.py/the embedding-text
+    builders (enrich_jobs.py's _embed_enriched/_catch_up_embed) — those stay
+    exactly as they were, reading enrichment.summary for their own,
+    unrelated purposes. Omitted entirely (not null/empty-string) when a job
+    lacks a summary — shouldn't happen for status='enriched' jobs (summary
+    is a required JobEnrichment field), but guarded defensively anyway."""
     payload = []
     for row in matches_v2_rows:
         job = jobs_by_id.get(row["job_id"])
         if job is None:
             continue
         tier2 = row.get("tier2") or {}
+        enrichment = job.get("enrichment") or {}
         entry = {
             "title": job.get("title"),
             "org": job.get("org"),
@@ -296,6 +312,9 @@ def _build_digest_payload(
             "fit_score": row["tier1_score"] / 100,
             "url": job.get("canonical_url"),
         }
+        summary = enrichment.get("summary")
+        if summary:
+            entry["summary"] = summary
         if arm != _SHORTLIST_ONLY_ARM:
             entry["why_fits"] = tier2.get("why_fits")
         payload.append(entry)
@@ -360,7 +379,7 @@ def _send_queued_digest(client, user, *, arm: str = _FULL_ARM) -> bool:
     job_ids = [row["job_id"] for row in backlog_rows]
     jobs = fetch_all_in(
         client.table("jobs"), "id", job_ids,
-        select_cols="id,title,org,location_field,canonical_url,status",
+        select_cols="id,title,org,location_field,canonical_url,status,enrichment",
     )
     jobs_by_id = {j["id"]: j for j in jobs}
 
