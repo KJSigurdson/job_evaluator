@@ -139,6 +139,70 @@ def test_build_digest_payload_skips_row_with_no_matching_job():
 
 
 # ---------------------------------------------------------------------------
+# _build_digest_payload — 'application_support_v1' experiment arm
+# ---------------------------------------------------------------------------
+
+def test_build_digest_payload_full_arm_includes_why_fits():
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="full")
+    assert payload[0]["why_fits"] == "- Great fit"
+
+
+def test_build_digest_payload_no_arm_given_defaults_to_full():
+    """Every existing call site that predates this experiment (and any
+    future one that doesn't know about it) must keep getting why_fits —
+    missing experiment_assignments row means 'full', not 'shortlist_only'."""
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
+    assert payload[0]["why_fits"] == "- Great fit"
+
+
+def test_build_digest_payload_shortlist_only_arm_omits_why_fits_key_entirely():
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="shortlist_only")
+    assert "why_fits" not in payload[0]  # omitted, not null/empty-string
+
+
+def test_build_digest_payload_non_support_fields_identical_across_arms():
+    """The experiment's hard rule: only why_fits may differ — title/org/
+    location/fit_score/url must be byte-identical regardless of arm."""
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    jobs_by_id = {"job-1": _job()}
+    full_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="full")[0]
+    shortlist_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="shortlist_only")[0]
+
+    non_support_fields = {k: v for k, v in full_entry.items() if k != "why_fits"}
+    assert shortlist_entry == non_support_fields
+
+
+# ---------------------------------------------------------------------------
+# _fetch_experiment_arms — one chunked query per run, not per user
+# ---------------------------------------------------------------------------
+
+def test_fetch_experiment_arms_returns_assigned_arms(fake_client):
+    fake_client.seed("experiment_assignments", [
+        {"user_id": "u1", "experiment": "application_support_v1", "arm": "shortlist_only"},
+        {"user_id": "u2", "experiment": "application_support_v1", "arm": "full"},
+        {"user_id": "u3", "experiment": "some_other_experiment", "arm": "shortlist_only"},
+    ])
+
+    arms = pipeline_v2._fetch_experiment_arms(fake_client, ["u1", "u2", "u3"], "application_support_v1")
+
+    assert arms == {"u1": "shortlist_only", "u2": "full"}  # u3's row is a different experiment
+
+
+def test_fetch_experiment_arms_no_row_absent_from_dict(fake_client):
+    fake_client.seed("experiment_assignments", [
+        {"user_id": "u1", "experiment": "application_support_v1", "arm": "shortlist_only"},
+    ])
+
+    arms = pipeline_v2._fetch_experiment_arms(fake_client, ["u1", "u2"], "application_support_v1")
+
+    assert arms == {"u1": "shortlist_only"}
+    assert "u2" not in arms  # caller defaults missing users to _FULL_ARM
+
+
+# ---------------------------------------------------------------------------
 # _send_queued_digest — delivery tracking via matches_v2.notified_at,
 # decoupled from "new this run" (added 2026-11-03 after the 9 real Adam
 # Holt matches from run 56a07def went unnotified with no way to retry)
@@ -1161,6 +1225,65 @@ def test_run_manual_mode_never_submits_tier1_batch(fake_client, monkeypatch):
     run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
 
     assert calls == ["tier1_batch"]
+
+
+def test_run_shortlist_only_arm_omits_why_fits_end_to_end(fake_client, monkeypatch):
+    """Wiring test: run() must fetch this user's experiment_assignments row
+    and actually thread the resulting arm all the way through
+    _finish_user_matching -> _send_queued_digest -> _build_digest_payload."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    fake_client.seed("experiment_assignments", [
+        {"user_id": "u1", "experiment": "application_support_v1", "arm": "shortlist_only"},
+    ])
+    fake_client.seed("jobs", [_job("job-1")])
+    fake_client.seed("matches_v2", [{
+        "id": "m1", "user_id": "u1", "job_id": "job-1", "tier1_score": 80,
+        "tier2": {"why_fits": "- Great fit"}, "created_at": "2026-11-01T00:00:00+00:00", "notified_at": None,
+    }])
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [])
+    sent_payloads = []
+    monkeypatch.setattr(
+        pipeline_v2, "send_match_digest",
+        lambda user_id, matches: (sent_payloads.append(matches), True)[1],
+    )
+
+    run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    [payload] = sent_payloads
+    assert "why_fits" not in payload[0]
+    assert payload[0]["title"] == "Head of Data"  # non-support fields still present
+
+
+def test_run_full_arm_includes_why_fits_end_to_end(fake_client, monkeypatch):
+    """Same wiring, opposite arm — and the no-row (missing experiment_assignments
+    row) case, since u1 is deliberately NOT seeded into that table here."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    fake_client.seed("jobs", [_job("job-1")])
+    fake_client.seed("matches_v2", [{
+        "id": "m1", "user_id": "u1", "job_id": "job-1", "tier1_score": 80,
+        "tier2": {"why_fits": "- Great fit"}, "created_at": "2026-11-01T00:00:00+00:00", "notified_at": None,
+    }])
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [])
+    sent_payloads = []
+    monkeypatch.setattr(
+        pipeline_v2, "send_match_digest",
+        lambda user_id, matches: (sent_payloads.append(matches), True)[1],
+    )
+
+    run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    [payload] = sent_payloads
+    assert payload[0]["why_fits"] == "- Great fit"
 
 
 def test_run_manual_mode_sets_quota_running_then_complete(fake_client, monkeypatch):

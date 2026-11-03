@@ -245,7 +245,18 @@ def _close_pipeline_run(client, *, run_id: str, status: str, user_count: int | N
         log.warning("pipeline_runs close (run %s, status=%s) failed — telemetry only, ignored: %r", run_id, status, exc)
 
 
-def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dict]) -> list[dict]:
+# 'application_support_v1' experiment (experiment_assignments table) — arm
+# only ever affects _build_digest_payload's output, never gating/Tier 1/
+# Tier 2 generation/threshold/the matches_v2 insert itself. A user with no
+# experiment_assignments row (existing users, admins) defaults to _FULL_ARM.
+_APPLICATION_SUPPORT_EXPERIMENT = "application_support_v1"
+_FULL_ARM = "full"
+_SHORTLIST_ONLY_ARM = "shortlist_only"
+
+
+def _build_digest_payload(
+    matches_v2_rows: list[dict], jobs_by_id: dict[str, dict], *, arm: str = _FULL_ARM,
+) -> list[dict]:
     """Map v2's matches_v2 rows into v1's exact digest payload shape
     ({title, org, location, fit_score, why_fits, url}) — notify.send_match_digest
     is reused UNCHANGED, so this must match the field names its Edge Function
@@ -258,28 +269,58 @@ def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dic
     expects 0.0-1.0 (schemas.py's ScoredPosting.fit_score). Sending the raw
     0-100 value unscaled was a real bug (confirmed 2026-11-03, never caught
     because MATCH_DIGEST_URL has been 401ing since before this field existed
-    — see src.pipeline_v2._finish_user_matching's notified handling)."""
+    — see src.pipeline_v2._finish_user_matching's notified handling).
+
+    arm: the 'application_support_v1' experiment's per-user arm (see
+    _fetch_experiment_arms) — _FULL_ARM (default, including every existing
+    user/admin with no experiment_assignments row) includes why_fits;
+    _SHORTLIST_ONLY_ARM omits the key entirely (not null/empty-string — a
+    true omission). why_fits is the ONLY Tier 2 output field that reaches
+    this payload at all today: org_summary/why_not_fits/emphasize_in_cv/
+    deemphasize are written to matches_v2.tier2 (tier2_enrich.py) but never
+    read here, by any arm — see this experiment's Phase 0 report. Nothing
+    about which matches reach this function (gating, Tier 1, Tier 2
+    generation/threshold, the matches_v2 insert itself) depends on arm —
+    this is the only place arm has any effect, by design: ranking/insert
+    stays byte-identical across arms."""
     payload = []
     for row in matches_v2_rows:
         job = jobs_by_id.get(row["job_id"])
         if job is None:
             continue
         tier2 = row.get("tier2") or {}
-        payload.append({
+        entry = {
             "title": job.get("title"),
             "org": job.get("org"),
             "location": job.get("location_field"),
             "fit_score": row["tier1_score"] / 100,
-            "why_fits": tier2.get("why_fits"),
             "url": job.get("canonical_url"),
-        })
+        }
+        if arm != _SHORTLIST_ONLY_ARM:
+            entry["why_fits"] = tier2.get("why_fits")
+        payload.append(entry)
     return payload
 
 
 _DIGEST_BATCH_CAP = 20
 
 
-def _send_queued_digest(client, user) -> bool:
+def _fetch_experiment_arms(client, user_ids: list[str], experiment: str) -> dict[str, str]:
+    """{user_id: arm} for every experiment_assignments row matching
+    *experiment* among *user_ids* — ONE query (chunked via fetch_all_in,
+    same as every other id-list lookup in this module) covering every user
+    about to go through Phase C this run, not a per-user query. A user with
+    no row here is simply absent from the returned dict; callers default
+    that to _FULL_ARM (see _build_digest_payload) rather than this function
+    inventing a sentinel value."""
+    rows = fetch_all_in(
+        client.table("experiment_assignments"), "user_id", user_ids,
+        select_cols="user_id,arm", filter_fn=lambda q: q.eq("experiment", experiment),
+    )
+    return {row["user_id"]: row["arm"] for row in rows}
+
+
+def _send_queued_digest(client, user, *, arm: str = _FULL_ARM) -> bool:
     """Send (at most) this user's _DIGEST_BATCH_CAP oldest never-delivered
     matches_v2 rows — NOT just whatever Tier 2 wrote THIS run. Deliberately
     decoupled from this run's own candidates: a match that failed to send,
@@ -343,7 +384,7 @@ def _send_queued_digest(client, user) -> bool:
     if not sendable_rows:
         return False
 
-    payload = _build_digest_payload(sendable_rows, jobs_by_id)
+    payload = _build_digest_payload(sendable_rows, jobs_by_id, arm=arm)
     try:
         # send_match_digest() never raises by contract, but this try/except
         # is a deliberate second layer of defense (see CLAUDE.md) — notified
@@ -444,7 +485,9 @@ def _prepare_tier1_request(
     }
 
 
-def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run: bool, run_id=None, trigger=None) -> dict:
+def _finish_user_matching(
+    client, anthropic_client, user, prep: dict, *, dry_run: bool, run_id=None, trigger=None, arm: str = _FULL_ARM,
+) -> dict:
     """Phase C for one user: Tier 2 candidates = valid tier1_verdicts rows
     >= this user's threshold with no existing matches_v2 row
     (tier2_enrich.fetch_candidates — reads the DB directly, so this is
@@ -490,7 +533,7 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
         # have an older never-delivered backlog (see _send_queued_digest) —
         # must still attempt it, not short-circuit to notified=False.
         return {**base_result, "tier1_scored": tier1_scored, "tier2_enriched": 0,
-                "notified": _send_queued_digest(client, user)}
+                "notified": _send_queued_digest(client, user, arm=arm)}
 
     tier2_result = run_tier2_enrich(
         client, anthropic_client, candidates=candidates, threshold=threshold,
@@ -507,7 +550,7 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
 
     return {
         **base_result, "tier1_scored": tier1_scored,
-        "tier2_enriched": tier2_result["enriched"], "notified": _send_queued_digest(client, user),
+        "tier2_enriched": tier2_result["enriched"], "notified": _send_queued_digest(client, user, arm=arm),
     }
 
 
@@ -715,11 +758,16 @@ def run(
 
         # Phase C — per user: Tier 2 candidates from tier1_verdicts (fresh
         # DB read, resumable from anything Tier 1/the drainer has written),
-        # Tier 2 itself, digest.
+        # Tier 2 itself, digest. Arms fetched ONCE here for every digest
+        # user this run (not a per-user query) — see _fetch_experiment_arms.
+        arms_by_user = _fetch_experiment_arms(
+            client, [user.user_id for user in users], _APPLICATION_SUPPORT_EXPERIMENT,
+        )
         for user in users:
             result = _finish_user_matching(
                 client, anthropic_client, user, prep_by_user[user.user_id],
                 dry_run=dry_run, run_id=run_id, trigger=trigger,
+                arm=arms_by_user.get(user.user_id, _FULL_ARM),
             )
             log.info("User %s: %s", user.user_id, result)
             user_results.append(result)
