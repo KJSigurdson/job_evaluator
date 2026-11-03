@@ -29,6 +29,8 @@ class _FakeQuery:
         self._on_conflict = on_conflict
         self._filters: list[tuple[str, object]] = []
         self._range: tuple[int, int] | None = None
+        self._order: tuple[str, bool] | None = None
+        self._limit: int | None = None
 
     def select(self, _cols: str = "*") -> "_FakeQuery":
         return self
@@ -38,6 +40,19 @@ class _FakeQuery:
         # matching real PostgREST semantics (src.supabase_client.fetch_all relies
         # on this to paginate past the real API's default 1000-row response cap).
         self._range = (start, end)
+        return self
+
+    def order(self, col: str, *, desc: bool = False) -> "_FakeQuery":
+        # Mirrors postgrest-py's .order(col, desc=...). Assumes col has no
+        # None values among the rows actually reaching this sort (true for
+        # every real caller today — e.g. matches_v2.created_at, never
+        # null) — a bare sorted() on a column with real Nones would raise,
+        # which is an acceptable gap for this fake.
+        self._order = (col, desc)
+        return self
+
+    def limit(self, n: int) -> "_FakeQuery":
+        self._limit = n
         return self
 
     def eq(self, col: str, val) -> "_FakeQuery":
@@ -104,6 +119,11 @@ class _FakeQuery:
                         rows = [r for r in rows if r.get(col) is False]
                     else:
                         raise NotImplementedError(f"is_ value {val!r}")
+            if self._order is not None:
+                order_col, order_desc = self._order
+                rows = sorted(rows, key=lambda r: r.get(order_col), reverse=order_desc)
+            if self._limit is not None:
+                rows = rows[: self._limit]
             if self._range is not None:
                 start, end = self._range
                 rows = rows[start:end + 1]

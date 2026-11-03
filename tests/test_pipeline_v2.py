@@ -22,7 +22,13 @@ import json
 import pytest
 
 from src import pipeline_v2
-from src.pipeline_v2 import _build_digest_payload, _finish_user_matching, _prepare_tier1_request, run
+from src.pipeline_v2 import (
+    _build_digest_payload,
+    _finish_user_matching,
+    _prepare_tier1_request,
+    _send_queued_digest,
+    run,
+)
 
 
 def _profile_row(**kwargs) -> dict:
@@ -130,6 +136,117 @@ def test_build_digest_payload_scales_tier1_score_to_v1s_0_to_1_range():
 def test_build_digest_payload_skips_row_with_no_matching_job():
     payload = _build_digest_payload([{"job_id": "missing", "tier1_score": 80, "tier2": {}}], {})
     assert payload == []
+
+
+# ---------------------------------------------------------------------------
+# _send_queued_digest — delivery tracking via matches_v2.notified_at,
+# decoupled from "new this run" (added 2026-11-03 after the 9 real Adam
+# Holt matches from run 56a07def went unnotified with no way to retry)
+# ---------------------------------------------------------------------------
+
+def _match_row(match_id, job_id, *, created_at, notified_at=None, tier1_score=80):
+    return {
+        "id": match_id, "user_id": "u1", "job_id": job_id, "tier1_score": tier1_score,
+        "tier2": {"why_fits": "- Great fit"}, "created_at": created_at, "notified_at": notified_at,
+    }
+
+
+def test_send_queued_digest_false_when_email_on_match_off(fake_client):
+    user = _user_context({"email_on_match": False})
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [_match_row("m1", "job-1", created_at="2026-11-01T00:00:00+00:00")])
+
+    assert _send_queued_digest(fake_client, user) is False
+
+
+def test_send_queued_digest_false_when_nothing_queued(fake_client):
+    user = _user_context({"email_on_match": True})
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [
+        _match_row("m1", "job-1", created_at="2026-11-01T00:00:00+00:00", notified_at="2026-11-01T00:05:00+00:00"),
+    ])
+
+    assert _send_queued_digest(fake_client, user) is False
+
+
+def test_send_queued_digest_stamps_only_sent_ids_on_success(fake_client, monkeypatch):
+    """A successful send must stamp notified_at on exactly the rows that
+    were actually included in the sent payload — a different user's (or a
+    DIFFERENT job's) un-sent row must stay untouched."""
+    user = _user_context({"email_on_match": True})
+    fake_client.seed("jobs", [_job("job-1"), _job("job-2")])
+    fake_client.seed("matches_v2", [
+        _match_row("m1", "job-1", created_at="2026-11-01T00:00:00+00:00"),
+        _match_row("m2", "job-2", created_at="2026-11-01T00:01:00+00:00"),
+        _match_row("other-user", "job-1", created_at="2026-11-01T00:00:00+00:00"),  # different user_id below
+    ])
+    fake_client.table("matches_v2").rows[2]["user_id"] = "someone-else"
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: True)
+
+    result = _send_queued_digest(fake_client, user)
+
+    assert result is True
+    rows_by_id = {r["id"]: r for r in fake_client.table("matches_v2").rows}
+    assert rows_by_id["m1"]["notified_at"] is not None
+    assert rows_by_id["m2"]["notified_at"] is not None
+    assert rows_by_id["other-user"]["notified_at"] is None  # not this user's row — untouched
+
+
+def test_send_queued_digest_failed_send_leaves_notified_at_null_for_retry(fake_client, monkeypatch):
+    """A failed send (non-2xx, surfaced as a False return) must leave
+    notified_at NULL so the identical rows are picked up again on a later
+    call — this is the exact mechanism that replaces the old "new this
+    run only" logic that lost the 9 real Adam Holt matches."""
+    user = _user_context({"email_on_match": True})
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [_match_row("m1", "job-1", created_at="2026-11-01T00:00:00+00:00")])
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: False)
+
+    first = _send_queued_digest(fake_client, user)
+    assert first is False
+    [row] = fake_client.table("matches_v2").rows
+    assert row["notified_at"] is None
+
+    # Retried on a later call (e.g. next run) with the endpoint now healthy:
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: True)
+    second = _send_queued_digest(fake_client, user)
+    assert second is True
+    assert fake_client.table("matches_v2").rows[0]["notified_at"] is not None
+
+
+def test_send_queued_digest_caps_at_batch_size_oldest_first(fake_client, monkeypatch):
+    """More than _DIGEST_BATCH_CAP eligible rows exist for this user — only
+    the oldest _DIGEST_BATCH_CAP get sent/stamped; the rest stay queued for
+    a later run."""
+    jobs = [_job(f"job-{i}") for i in range(25)]
+    fake_client.seed("jobs", jobs)
+    # Oldest first: job-0 is oldest (created_at increases with i), so the
+    # 20 oldest are job-0..job-19 — job-20..job-24 must stay un-stamped.
+    rows = [
+        _match_row(f"m{i}", f"job-{i}", created_at=f"2026-11-01T00:{i:02d}:00+00:00")
+        for i in range(25)
+    ]
+    fake_client.seed("matches_v2", rows)
+    sent_payloads = []
+    monkeypatch.setattr(
+        pipeline_v2, "send_match_digest",
+        lambda user_id, matches: (sent_payloads.append(matches), True)[1],
+    )
+    user = _user_context({"email_on_match": True})
+
+    result = _send_queued_digest(fake_client, user)
+
+    assert result is True
+    [payload] = sent_payloads
+    assert len(payload) == pipeline_v2._DIGEST_BATCH_CAP
+    sent_urls = {m["url"] for m in payload}
+    assert sent_urls == {f"https://example.org/job-{i}" for i in range(20)}
+
+    rows_by_job = {r["job_id"]: r for r in fake_client.table("matches_v2").rows}
+    for i in range(20):
+        assert rows_by_job[f"job-{i}"]["notified_at"] is not None
+    for i in range(20, 25):
+        assert rows_by_job[f"job-{i}"]["notified_at"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -362,8 +479,10 @@ def test_finish_user_matching_calls_fetch_candidates_then_tier2(fake_client, mon
 def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(fake_client, monkeypatch):
     user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
     prep = _prep()
-    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80,
-                                      "tier2": {"why_fits": "- Great fit"}}])
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [{"id": "m1", "user_id": "u1", "job_id": "job-1", "tier1_score": 80,
+                                      "tier2": {"why_fits": "- Great fit"}, "created_at": "2026-11-01T00:00:00+00:00",
+                                      "notified_at": None}])
     monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
@@ -383,6 +502,8 @@ def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(f
     assert user_id == "u1"
     assert matches == [{"title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
                          "fit_score": 0.8, "why_fits": "- Great fit", "url": "https://example.org/job-1"}]
+    [row] = fake_client.table("matches_v2").rows
+    assert row["notified_at"] is not None
 
 
 def test_finish_user_matching_notified_false_when_digest_returns_false(fake_client, monkeypatch):
@@ -392,8 +513,10 @@ def test_finish_user_matching_notified_false_when_digest_returns_false(fake_clie
     send_match_digest(), regardless of whether the POST actually succeeded."""
     user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
     prep = _prep()
-    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80,
-                                      "tier2": {"why_fits": "- Great fit"}}])
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [{"id": "m1", "user_id": "u1", "job_id": "job-1", "tier1_score": 80,
+                                      "tier2": {"why_fits": "- Great fit"}, "created_at": "2026-11-01T00:00:00+00:00",
+                                      "notified_at": None}])
     monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
@@ -403,6 +526,8 @@ def test_finish_user_matching_notified_false_when_digest_returns_false(fake_clie
     result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
 
     assert result["notified"] is False
+    [row] = fake_client.table("matches_v2").rows
+    assert row["notified_at"] is None  # failed send must not stamp
 
 
 def test_finish_user_matching_no_digest_when_email_on_match_false(fake_client, monkeypatch):
@@ -426,7 +551,9 @@ def test_finish_user_matching_no_digest_when_email_on_match_false(fake_client, m
 def test_finish_user_matching_digest_failure_does_not_raise(fake_client, monkeypatch):
     user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
     prep = _prep()
-    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}])
+    fake_client.seed("jobs", [_job()])
+    fake_client.seed("matches_v2", [{"id": "m1", "user_id": "u1", "job_id": "job-1", "tier1_score": 80, "tier2": {},
+                                      "created_at": "2026-11-01T00:00:00+00:00", "notified_at": None}])
     monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
     monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,

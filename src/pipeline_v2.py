@@ -276,6 +276,70 @@ def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dic
     return payload
 
 
+_DIGEST_BATCH_CAP = 20
+
+
+def _send_queued_digest(client, user) -> bool:
+    """Send (at most) this user's _DIGEST_BATCH_CAP oldest never-delivered
+    matches_v2 rows — NOT just whatever Tier 2 wrote THIS run. Deliberately
+    decoupled from this run's own candidates: a match that failed to send,
+    or never even attempted (e.g. MATCH_DIGEST_URL unset in the calling
+    process's environment — confirmed for real, 2026-11-03), must resurface
+    on a LATER run rather than vanish. Once a matches_v2 row exists, the
+    already-matched skip-set (match_v2.fetch_matched_job_ids) means that
+    job can never reach Tier 1/2 again — so matches_v2.notified_at IS NULL
+    is the only durable record that a match still needs delivering.
+
+    On a confirmed 2xx only, stamps notified_at = now() for EXACTLY the row
+    ids included in the payload actually sent. A failed send (or nothing
+    queued, or email_on_match off) leaves notified_at untouched, so the
+    same rows are picked up again next run.
+    """
+    if not user.profile.get("email_on_match"):
+        return False
+
+    backlog_rows = (
+        client.table("matches_v2").select("id,job_id,tier1_score,tier2")
+        .eq("user_id", user.user_id).is_("notified_at", "null")
+        .order("created_at").limit(_DIGEST_BATCH_CAP).execute().data
+    )
+    if not backlog_rows:
+        return False
+
+    job_ids = [row["job_id"] for row in backlog_rows]
+    jobs = fetch_all_in(
+        client.table("jobs"), "id", job_ids,
+        select_cols="id,title,org,location_field,canonical_url",
+    )
+    jobs_by_id = {j["id"]: j for j in jobs}
+    # Keep in exact 1:1 correspondence with the payload _build_digest_payload
+    # actually builds (it silently skips a row whose job can't be found) so
+    # the notified_at stamp below only ever covers rows truly included in
+    # the sent payload, never a row that got dropped.
+    sendable_rows = [row for row in backlog_rows if row["job_id"] in jobs_by_id]
+    if not sendable_rows:
+        return False
+
+    payload = _build_digest_payload(sendable_rows, jobs_by_id)
+    try:
+        # send_match_digest() never raises by contract, but this try/except
+        # is a deliberate second layer of defense (see CLAUDE.md) — notified
+        # reflects its actual return value (True only on a confirmed 2xx),
+        # not just "was it called".
+        notified = send_match_digest(user.user_id, payload)
+    except Exception as exc:
+        log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
+        notified = False
+
+    if notified:
+        sent_ids = [row["id"] for row in sendable_rows]
+        client.table("matches_v2").update({
+            "notified_at": datetime.now(timezone.utc).isoformat(),
+        }).in_("id", sent_ids).execute()
+
+    return notified
+
+
 def _prepare_tier1_request(
     client, user, jobs_pool: list[dict], *, gate_rejections_out: dict | None = None,
 ) -> dict:
@@ -399,7 +463,11 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
         profile_content_hash=prep["profile_content_hash"], threshold=threshold,
     )
     if not candidates:
-        return {**base_result, "tier1_scored": tier1_scored, "tier2_enriched": 0, "notified": False}
+        # Even with zero new Tier 2 candidates THIS run, this user may still
+        # have an older never-delivered backlog (see _send_queued_digest) —
+        # must still attempt it, not short-circuit to notified=False.
+        return {**base_result, "tier1_scored": tier1_scored, "tier2_enriched": 0,
+                "notified": _send_queued_digest(client, user)}
 
     tier2_result = run_tier2_enrich(
         client, anthropic_client, candidates=candidates, threshold=threshold,
@@ -414,35 +482,9 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
         log.info("User %s: Tier 2 pending (batch %s) — digest deferred to next run", user.user_id, tier2_result.get("batch_id"))
         return {**base_result, "tier1_scored": tier1_scored, "tier2_enriched": tier2_result["enriched"], "notified": False}
 
-    # fetch_tier2_candidates() already filters tier1_score >= threshold (its
-    # own .gte("score", threshold) query) — every candidate here qualifies.
-    # Everything tier2_enrich() writes to matches_v2 for this user THIS run
-    # is, by construction, new: fetch_tier2_candidates() already excluded
-    # every pre-existing match before Tier 2 even ran, so no before/after
-    # diffing is needed to know what's new for the digest.
-    qualifying_job_ids = [c["job"]["id"] for c in candidates]
-    notified = False
-    if qualifying_job_ids and user.profile.get("email_on_match"):
-        new_rows = fetch_all_in(
-            client.table("matches_v2"), "job_id", qualifying_job_ids,
-            select_cols="job_id,tier1_score,tier2", filter_fn=lambda q: q.eq("user_id", user.user_id),
-        )
-        if new_rows:
-            jobs_by_id = {c["job"]["id"]: c["job"] for c in candidates}
-            payload = _build_digest_payload(new_rows, jobs_by_id)
-            try:
-                # send_match_digest() never raises by contract, but this
-                # try/except is a deliberate second layer of defense (see
-                # CLAUDE.md) — notified reflects its actual return value
-                # (True only on a confirmed 2xx), not just "was it called".
-                notified = send_match_digest(user.user_id, payload)
-            except Exception as exc:
-                log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
-                notified = False
-
     return {
         **base_result, "tier1_scored": tier1_scored,
-        "tier2_enriched": tier2_result["enriched"], "notified": notified,
+        "tier2_enriched": tier2_result["enriched"], "notified": _send_queued_digest(client, user),
     }
 
 
