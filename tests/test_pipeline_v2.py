@@ -77,11 +77,16 @@ def _job(job_id="job-1", **overrides) -> dict:
     return defaults
 
 
-def _seed_active_user(fake_client, *, profile_embedding=None, **profile_overrides):
+def _seed_active_user(fake_client, *, profile_embedding=None, consent_granted=True, **profile_overrides):
     row = _profile_row(**profile_overrides)
     row["profile_embedding"] = profile_embedding
     fake_client.seed("profiles", [row])
     fake_client.seed("scoring_weights", [_weights_row()])
+    if consent_granted:
+        fake_client.seed("user_consents", [{
+            "user_id": row["user_id"], "consent_key": "data_storage", "granted": True,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }])
 
 
 def _user_context(profile: dict, rubric: dict | None = None):
@@ -248,6 +253,69 @@ def test_fetch_experiment_arms_no_row_absent_from_dict(fake_client):
 
     assert arms == {"u1": "shortlist_only"}
     assert "u2" not in arms  # caller defaults missing users to _FULL_ARM
+
+
+# ---------------------------------------------------------------------------
+# _fetch_consented_user_ids — consent gating, fail closed
+# ---------------------------------------------------------------------------
+
+def _consent_row(user_id, *, consent_key="data_storage", granted, created_at):
+    return {"user_id": user_id, "consent_key": consent_key, "granted": granted, "created_at": created_at}
+
+
+def test_fetch_consented_user_ids_granted(fake_client):
+    fake_client.seed("user_consents", [
+        _consent_row("u1", granted=True, created_at="2026-01-01T00:00:00+00:00"),
+    ])
+
+    assert pipeline_v2._fetch_consented_user_ids(fake_client, ["u1"]) == {"u1"}
+
+
+def test_fetch_consented_user_ids_withdrawn_after_granting(fake_client):
+    """Two rows for the same user, same key — granted, then later
+    withdrawn. The LATEST row (by created_at) must win, not the first one
+    seen or whichever the API happens to return first."""
+    fake_client.seed("user_consents", [
+        _consent_row("u1", granted=True, created_at="2026-01-01T00:00:00+00:00"),
+        _consent_row("u1", granted=False, created_at="2026-02-01T00:00:00+00:00"),
+    ])
+
+    assert pipeline_v2._fetch_consented_user_ids(fake_client, ["u1"]) == set()
+
+
+def test_fetch_consented_user_ids_re_granted_after_withdrawal(fake_client):
+    """Opposite direction of the above, to prove this is genuinely
+    'latest wins' and not just 'any False row poisons the user'."""
+    fake_client.seed("user_consents", [
+        _consent_row("u1", granted=False, created_at="2026-01-01T00:00:00+00:00"),
+        _consent_row("u1", granted=True, created_at="2026-02-01T00:00:00+00:00"),
+    ])
+
+    assert pipeline_v2._fetch_consented_user_ids(fake_client, ["u1"]) == {"u1"}
+
+
+def test_fetch_consented_user_ids_never_answered(fake_client):
+    """No row at all for this user — fail closed: absence is NOT treated
+    as implicitly granted."""
+    fake_client.seed("user_consents", [
+        _consent_row("u2", granted=True, created_at="2026-01-01T00:00:00+00:00"),
+    ])
+
+    assert pipeline_v2._fetch_consented_user_ids(fake_client, ["u1", "u2"]) == {"u2"}
+
+
+def test_fetch_consented_user_ids_other_keys_irrelevant(fake_client):
+    """A granted row for a DIFFERENT consent_key (e.g. behavioral_tracking)
+    must not count — only data_storage matters here, and a user with no
+    data_storage row of their own is still fail-closed even if they've
+    granted every other consent key there is."""
+    fake_client.seed("user_consents", [
+        _consent_row("u1", consent_key="behavioral_tracking", granted=True, created_at="2026-01-01T00:00:00+00:00"),
+        _consent_row("u1", consent_key="third_party_aggregate_analytics", granted=True,
+                     created_at="2026-01-01T00:00:00+00:00"),
+    ])
+
+    assert pipeline_v2._fetch_consented_user_ids(fake_client, ["u1"]) == set()
 
 
 # ---------------------------------------------------------------------------
@@ -1274,6 +1342,55 @@ def test_run_manual_mode_never_submits_tier1_batch(fake_client, monkeypatch):
     run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
 
     assert calls == ["tier1_batch"]
+
+
+def test_run_skips_user_without_granted_consent_entirely(fake_client, monkeypatch):
+    """No granted data_storage consent row -> no gating, scoring, Tier 2,
+    matches_v2 write, or digest for this user — it must never even reach
+    _prepare_tier1_request/_finish_user_matching."""
+    _seed_active_user(fake_client, consent_granted=False)
+    _patch_full_pipeline_noops(monkeypatch)
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("consent-ungranted user must never reach Phase A")
+
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _should_not_run)
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert result["users"] == []
+
+
+def test_run_consent_gating_skips_only_the_unconsented_user(fake_client, monkeypatch):
+    """Two users, one consented, one not — only the consented one is
+    processed; the other is completely absent from the results, not
+    present-with-a-skip-reason."""
+    _seed_active_user(fake_client, consent_granted=True)  # u1
+    fake_client.seed("profiles", [_profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u2")])
+    # u2 deliberately gets NO user_consents row at all — never answered.
+    _patch_full_pipeline_noops(monkeypatch)
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    processed_ids = [r["user_id"] for r in result["users"]]
+    assert processed_ids == ["u1"]
+
+
+def test_run_consent_gating_logs_count_without_user_ids(fake_client, monkeypatch, caplog):
+    """'Log the count of skipped users per run (no names)' — the log line
+    must carry the count but never the raw user_id string."""
+    _seed_active_user(fake_client, consent_granted=False)
+    _patch_full_pipeline_noops(monkeypatch)
+
+    with caplog.at_level("INFO"):
+        run(_client=fake_client, _anthropic_client=object())
+
+    consent_logs = [r.message for r in caplog.records if "Consent gating" in r.message]
+    assert len(consent_logs) == 1
+    assert "1" in consent_logs[0]
+    assert "u1" not in consent_logs[0]
 
 
 def test_run_shortlist_only_arm_omits_why_fits_end_to_end(fake_client, monkeypatch):

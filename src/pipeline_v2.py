@@ -573,6 +573,44 @@ def _finish_user_matching(
     }
 
 
+# Consent gating — a user is processed at all (gating, scoring, Tier 2,
+# matches_v2 writes, digest) only if their LATEST user_consents row for
+# this key has granted=True. Fail closed: no row, a withdrawn (granted=
+# False) latest row, or any other key is irrelevant here are all treated
+# identically — "not processed", never "processed by default".
+_REQUIRED_CONSENT_KEY = "data_storage"
+
+
+def _fetch_consented_user_ids(client, user_ids: list[str]) -> set[str]:
+    """{user_id} for every id in *user_ids* whose LATEST user_consents row
+    (by created_at) for _REQUIRED_CONSENT_KEY has granted=True — ONE
+    chunked query (fetch_all_in) covering every candidate user this run,
+    not a per-user query, mirroring _fetch_experiment_arms's shape.
+
+    user_consents is append-only (a new row per consent change, see
+    20261104100000_match_events_user_consents_baseline.sql — no update-in-
+    place), so "latest" must be resolved client-side by comparing
+    created_at across every row this user has for this key, not just
+    taking whichever row the API happens to return first.
+
+    A user_id with NO data_storage row at all, or whose latest row has
+    granted=False (consent withdrawn after being granted), is simply
+    absent from the returned set — callers must treat absence as "do not
+    process" (fail closed), never assume absence means "never asked,
+    default to allowed"."""
+    rows = fetch_all_in(
+        client.table("user_consents"), "user_id", user_ids,
+        select_cols="user_id,granted,created_at",
+        filter_fn=lambda q: q.eq("consent_key", _REQUIRED_CONSENT_KEY),
+    )
+    latest_by_user: dict[str, dict] = {}
+    for row in rows:
+        current = latest_by_user.get(row["user_id"])
+        if current is None or row["created_at"] > current["created_at"]:
+            latest_by_user[row["user_id"]] = row
+    return {user_id for user_id, row in latest_by_user.items() if row["granted"] is True}
+
+
 def run(
     *, dry_run: bool = False, only_user_id: str | None = None,
     _client=None, _anthropic_client=None,
@@ -728,7 +766,28 @@ def run(
             run_outcome = "complete"
             return {"ingest": ingest_counts, "enrich": enrich_result, "users": []}
 
-        if only_user_id is not None and not dry_run:
+        # Consent gating — fail closed: a user is processed further this
+        # run only if their LATEST user_consents row for
+        # _REQUIRED_CONSENT_KEY has granted=True. Deliberately placed AFTER
+        # the "no users" check above (that check's error message is about
+        # a missing profile+scoring_weights row specifically, not consent —
+        # keeping them separate avoids a misleading error for the manual
+        # --only-user-id path) but BEFORE every other per-user step below,
+        # including the single-user profile-embed refresh just past this
+        # block — "skip them entirely" means no per-user work of any kind,
+        # not just no gating/scoring/Tier 2/matches_v2/digest.
+        consented_ids = _fetch_consented_user_ids(client, [user.user_id for user in users])
+        users_before_consent = users
+        users = [user for user in users_before_consent if user.user_id in consented_ids]
+        skipped_for_consent = len(users_before_consent) - len(users)
+        if skipped_for_consent:
+            log.info(
+                "Consent gating: skipping %d user(s) this run — no granted '%s' consent "
+                "(no gating, scoring, Tier 2, matches_v2 writes, or digest for them)",
+                skipped_for_consent, _REQUIRED_CONSENT_KEY,
+            )
+
+        if only_user_id is not None and not dry_run and users:
             profile_embed_result = backfill_profile_embeddings(client, only_user_id=only_user_id)
             log.info("Profile embed refresh (single user): %s", profile_embed_result)
 
