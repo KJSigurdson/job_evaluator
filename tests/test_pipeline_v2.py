@@ -17,6 +17,8 @@ internal correctness.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 
 import pytest
@@ -29,6 +31,16 @@ from src.pipeline_v2 import (
     _send_queued_digest,
     run,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_click_link_secret_by_default(monkeypatch):
+    """Every existing test in this file assumes url == canonical_url (the
+    CLICK_LINK_SECRET-unset fallback path) unless it explicitly opts into
+    click tracking — without this, a secret leaking in from the real shell
+    environment (e.g. a dev's .env sourced into the same shell pytest runs
+    in) would make this file's url assertions non-deterministic."""
+    monkeypatch.delenv("CLICK_LINK_SECRET", raising=False)
 
 
 def _profile_row(**kwargs) -> dict:
@@ -119,7 +131,7 @@ def _candidate(job_id="job-1", tier1_score=80, tier1_reason="Great fit", job=Non
 # ---------------------------------------------------------------------------
 
 def test_build_digest_payload_maps_v2_fields_to_v1_shape():
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 82, "tier2": {"why_fits": "- Strong fit"}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 82, "tier2": {"why_fits": "- Strong fit"}}]
     jobs_by_id = {"job-1": _job()}
     payload = _build_digest_payload(matches_v2_rows, jobs_by_id)
     assert payload == [{
@@ -134,7 +146,7 @@ def test_build_digest_payload_scales_tier1_score_to_v1s_0_to_1_range():
     Function's existing template) expects fit_score on 0.0-1.0 — confirmed
     real bug fixed 2026-11-03: a tier1_score of 78 must render as 0.78, not
     the raw unscaled 78."""
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 78, "tier2": {}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 78, "tier2": {}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
     assert payload[0]["fit_score"] == pytest.approx(0.78)
 
@@ -149,7 +161,7 @@ def test_build_digest_payload_skips_row_with_no_matching_job():
 # ---------------------------------------------------------------------------
 
 def test_build_digest_payload_full_arm_includes_why_fits():
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="full")
     assert payload[0]["why_fits"] == "- Great fit"
 
@@ -158,13 +170,13 @@ def test_build_digest_payload_no_arm_given_defaults_to_full():
     """Every existing call site that predates this experiment (and any
     future one that doesn't know about it) must keep getting why_fits —
     missing experiment_assignments row means 'full', not 'shortlist_only'."""
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
     assert payload[0]["why_fits"] == "- Great fit"
 
 
 def test_build_digest_payload_shortlist_only_arm_omits_why_fits_key_entirely():
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="shortlist_only")
     assert "why_fits" not in payload[0]  # omitted, not null/empty-string
 
@@ -175,7 +187,7 @@ def test_build_digest_payload_non_support_fields_identical_across_arms():
     arm. summary in particular is NOT application support (it's a neutral,
     shared enrichment field, not Tier 2 per-user fit reasoning) and must
     never be gated on arm — confirmed explicitly, 2026-11-04."""
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
     jobs_by_id = {"job-1": _job()}
     full_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="full")[0]
     shortlist_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="shortlist_only")[0]
@@ -191,7 +203,7 @@ def test_build_digest_payload_non_support_fields_identical_across_arms():
 # ---------------------------------------------------------------------------
 
 def test_build_digest_payload_includes_summary_for_full_arm():
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="full")
     assert payload[0]["summary"] == "Lead data."
 
@@ -199,7 +211,7 @@ def test_build_digest_payload_includes_summary_for_full_arm():
 def test_build_digest_payload_includes_summary_for_shortlist_only_arm():
     """summary is explicitly NOT application support — it must be sent even
     on the arm that omits why_fits."""
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()}, arm="shortlist_only")
     assert payload[0]["summary"] == "Lead data."
 
@@ -213,7 +225,7 @@ def test_build_digest_payload_omits_summary_key_when_job_has_none():
         "work_arrangement": {"mode": "remote", "remote_scope": "global", "eligible_regions": [],
                               "timezone_constraint": None, "restriction_type": None},
     })
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": job_no_summary}, arm="full")
     assert "summary" not in payload[0]
 
@@ -223,9 +235,94 @@ def test_build_digest_payload_omits_summary_key_when_summary_is_empty_string():
                                           "work_arrangement": {"mode": "unspecified", "remote_scope": "unspecified",
                                                                 "eligible_regions": [], "timezone_constraint": None,
                                                                 "restriction_type": None}})
-    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
     payload = _build_digest_payload(matches_v2_rows, {"job-1": job_empty_summary}, arm="full")
     assert "summary" not in payload[0]
+
+
+# ---------------------------------------------------------------------------
+# _build_digest_payload — tracked click links (CLICK_LINK_SECRET)
+# ---------------------------------------------------------------------------
+
+def test_build_digest_payload_falls_back_to_canonical_url_when_secret_unset(monkeypatch, caplog):
+    """CLICK_LINK_SECRET unset (the default in this test file, via the
+    autouse fixture) must never break the digest — the raw canonical_url
+    is sent unchanged, with a WARNING (not an error, not a crash)."""
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    with caplog.at_level("WARNING"):
+        payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
+    assert payload[0]["url"] == "https://example.org/job-1"
+    assert any("CLICK_LINK_SECRET" in r.message for r in caplog.records)
+
+
+def test_build_digest_payload_logs_fallback_warning_once_per_call_not_per_match():
+    """Must not spam the log once per match in a multi-match digest."""
+    import logging as _logging
+
+    matches_v2_rows = [
+        {"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}},
+        {"id": "match-2", "job_id": "job-2", "tier1_score": 80, "tier2": {}},
+    ]
+    jobs_by_id = {"job-1": _job("job-1"), "job-2": _job("job-2")}
+
+    records = []
+    handler = _logging.Handler()
+    handler.emit = lambda record: records.append(record)
+    logger = _logging.getLogger("src.pipeline_v2")
+    logger.addHandler(handler)
+    try:
+        _build_digest_payload(matches_v2_rows, jobs_by_id)
+    finally:
+        logger.removeHandler(handler)
+
+    click_secret_warnings = [r for r in records if "CLICK_LINK_SECRET" in r.getMessage()]
+    assert len(click_secret_warnings) == 1
+
+
+def test_build_digest_payload_generates_tracked_click_url_when_secret_set(monkeypatch):
+    monkeypatch.setenv("CLICK_LINK_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
+
+    expected_token = hmac.new(b"test-secret", b"match-1", hashlib.sha256).hexdigest()[:32]
+    assert payload[0]["url"] == f"https://proj.supabase.co/functions/v1/track-click?m=match-1&t={expected_token}"
+
+
+def test_build_digest_payload_click_url_differs_per_match_not_per_arm(monkeypatch):
+    """The experiment's hard rule, extended: url must differ per MATCH
+    (different match_id -> different HMAC token) but stay byte-identical
+    across arms for the SAME match."""
+    monkeypatch.setenv("CLICK_LINK_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    jobs_by_id = {"job-1": _job("job-1"), "job-2": _job("job-2")}
+    row_a = [{"id": "match-a", "job_id": "job-1", "tier1_score": 80, "tier2": {}}]
+    row_b = [{"id": "match-b", "job_id": "job-2", "tier1_score": 80, "tier2": {}}]
+
+    url_a_full = _build_digest_payload(row_a, jobs_by_id, arm="full")[0]["url"]
+    url_a_shortlist = _build_digest_payload(row_a, jobs_by_id, arm="shortlist_only")[0]["url"]
+    url_b_full = _build_digest_payload(row_b, jobs_by_id, arm="full")[0]["url"]
+
+    assert url_a_full == url_a_shortlist  # same match, different arm -> identical url
+    assert url_a_full != url_b_full  # different match -> different url
+
+
+def test_build_digest_payload_non_support_fields_identical_across_arms_with_click_url(monkeypatch):
+    """Extends the experiment's byte-identity test: with CLICK_LINK_SECRET
+    configured, url is still arm-invariant (it's keyed on match_id, not
+    arm) — only why_fits may differ."""
+    monkeypatch.setenv("CLICK_LINK_SECRET", "test-secret")
+    monkeypatch.setenv("SUPABASE_URL", "https://proj.supabase.co")
+    matches_v2_rows = [{"id": "match-1", "job_id": "job-1", "tier1_score": 80, "tier2": {"why_fits": "- Great fit"}}]
+    jobs_by_id = {"job-1": _job()}
+
+    full_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="full")[0]
+    shortlist_entry = _build_digest_payload(matches_v2_rows, jobs_by_id, arm="shortlist_only")[0]
+
+    non_support_fields = {k: v for k, v in full_entry.items() if k != "why_fits"}
+    assert shortlist_entry == non_support_fields
+    assert shortlist_entry["url"].startswith("https://proj.supabase.co/functions/v1/track-click?m=match-1&t=")
 
 
 # ---------------------------------------------------------------------------

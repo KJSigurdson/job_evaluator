@@ -76,8 +76,11 @@ those v1 functions directly. No-op in dry_run, same as every other write here.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import math
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -253,6 +256,29 @@ _APPLICATION_SUPPORT_EXPERIMENT = "application_support_v1"
 _FULL_ARM = "full"
 _SHORTLIST_ONLY_ARM = "shortlist_only"
 
+# Tracked digest-click links — see supabase/functions/track-click/index.ts,
+# which must compute this identically (same secret, same HMAC input, same
+# truncation) to validate a link a user actually clicks.
+_CLICK_TOKEN_HEX_LENGTH = 32
+
+
+def _click_token(secret: str, match_id: str) -> str:
+    return hmac.new(secret.encode(), match_id.encode(), hashlib.sha256).hexdigest()[:_CLICK_TOKEN_HEX_LENGTH]
+
+
+def _digest_link_url(match_id: str, canonical_url: str | None, *, click_secret: str | None) -> str | None:
+    """The tracked-click redirect URL for one digest entry — or the raw
+    canonical_url unchanged if CLICK_LINK_SECRET isn't configured. Click
+    tracking is a nice-to-have; a missing/misconfigured secret must never
+    be a reason to withhold or break the actual digest link a user needs
+    to reach the posting (see _build_digest_payload's WARNING log for the
+    fallback case)."""
+    if not click_secret:
+        return canonical_url
+    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    token = _click_token(click_secret, match_id)
+    return f"{supabase_url}/functions/v1/track-click?m={match_id}&t={token}"
+
 
 def _build_digest_payload(
     matches_v2_rows: list[dict], jobs_by_id: dict[str, dict], *, arm: str = _FULL_ARM,
@@ -297,7 +323,21 @@ def _build_digest_payload(
     exactly as they were, reading enrichment.summary for their own,
     unrelated purposes. Omitted entirely (not null/empty-string) when a job
     lacks a summary — shouldn't happen for status='enriched' jobs (summary
-    is a required JobEnrichment field), but guarded defensively anyway."""
+    is a required JobEnrichment field), but guarded defensively anyway.
+
+    url is a tracked-click redirect (see _digest_link_url) through
+    CLICK_LINK_SECRET — also NOT application support, identical across
+    arms; what differs is per-MATCH (the token is keyed on matches_v2.id),
+    never per-arm. Falls back to the raw canonical_url, logged once per
+    call (not once per match — would spam the log otherwise) at WARNING if
+    the secret isn't configured, since click tracking must never be a
+    reason to break the digest link itself."""
+    click_secret = os.environ.get("CLICK_LINK_SECRET")
+    if not click_secret:
+        log.warning(
+            "CLICK_LINK_SECRET not set — digest links sent as raw canonical_url this run "
+            "(no click tracking); never a reason to withhold the digest itself"
+        )
     payload = []
     for row in matches_v2_rows:
         job = jobs_by_id.get(row["job_id"])
@@ -310,7 +350,7 @@ def _build_digest_payload(
             "org": job.get("org"),
             "location": job.get("location_field"),
             "fit_score": row["tier1_score"] / 100,
-            "url": job.get("canonical_url"),
+            "url": _digest_link_url(row["id"], job.get("canonical_url"), click_secret=click_secret),
         }
         summary = enrichment.get("summary")
         if summary:

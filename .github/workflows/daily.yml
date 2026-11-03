@@ -121,6 +121,7 @@ jobs:
           VOYAGE_API_KEY:              ${{ secrets.VOYAGE_API_KEY }}
           MATCH_DIGEST_URL:            ${{ secrets.MATCH_DIGEST_URL }}
           PIPELINE_SHARED_SECRET:      ${{ secrets.PIPELINE_SHARED_SECRET }}
+          CLICK_LINK_SECRET:           ${{ secrets.CLICK_LINK_SECRET }}
         run: |
           ARGS=""
           [ "${{ inputs.dry_run }}" = "true" ]   && ARGS="$ARGS --dry-run"
