@@ -1,0 +1,16 @@
+-- DRAFT — NOT APPLIED. For dashboard-paste review only.
+--
+-- matches_v2.notified_skip_reason: records why a queued (notified_at-null)
+-- match was removed from the digest queue WITHOUT ever being emailed —
+-- e.g. its job closed, or disappeared, between being matched and being
+-- sent. Without this, src.pipeline_v2._send_queued_digest's
+-- notified_at-IS-NULL query would keep re-selecting the same dead-job row
+-- every run forever (it's always among the oldest, so it would permanently
+-- occupy one of the _DIGEST_BATCH_CAP=20 slots and starve genuinely
+-- sendable matches behind it).
+--
+-- Deliberately unconstrained text (no CHECK list), same precedent as
+-- job_status_events.status/reason — a future skip reason shouldn't need a
+-- second migration to land. NULL means "not skipped" (either never queued,
+-- still queued, or successfully sent).
+alter table matches_v2 add column if not exists notified_skip_reason text null;

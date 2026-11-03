@@ -294,6 +294,16 @@ def _send_queued_digest(client, user) -> bool:
     ids included in the payload actually sent. A failed send (or nothing
     queued, or email_on_match off) leaves notified_at untouched, so the
     same rows are picked up again next run.
+
+    A queued row whose job has closed, or whose job can no longer be found
+    at all, is excluded from the payload AND stamped notified_at = now()
+    (with notified_skip_reason recording why) unconditionally — regardless
+    of whether the rest of this batch's send succeeds. Without this, a
+    dead-job row never leaves the notified_at-IS-NULL queue (it's always
+    among the oldest, so it would re-occupy a _DIGEST_BATCH_CAP slot every
+    run forever, permanently starving genuinely sendable matches behind
+    it) — confirmed worth guarding against 2026-11-03, before any real
+    instance of it has actually happened.
     """
     if not user.profile.get("email_on_match"):
         return False
@@ -309,14 +319,27 @@ def _send_queued_digest(client, user) -> bool:
     job_ids = [row["job_id"] for row in backlog_rows]
     jobs = fetch_all_in(
         client.table("jobs"), "id", job_ids,
-        select_cols="id,title,org,location_field,canonical_url",
+        select_cols="id,title,org,location_field,canonical_url,status",
     )
     jobs_by_id = {j["id"]: j for j in jobs}
-    # Keep in exact 1:1 correspondence with the payload _build_digest_payload
-    # actually builds (it silently skips a row whose job can't be found) so
-    # the notified_at stamp below only ever covers rows truly included in
-    # the sent payload, never a row that got dropped.
-    sendable_rows = [row for row in backlog_rows if row["job_id"] in jobs_by_id]
+
+    skip_ids_by_reason: dict[str, list[str]] = {}
+    sendable_rows = []
+    for row in backlog_rows:
+        job = jobs_by_id.get(row["job_id"])
+        if job is None:
+            skip_ids_by_reason.setdefault("job_missing", []).append(row["id"])
+        elif job.get("status") == "closed":
+            skip_ids_by_reason.setdefault("job_closed", []).append(row["id"])
+        else:
+            sendable_rows.append(row)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for reason, skip_ids in skip_ids_by_reason.items():
+        client.table("matches_v2").update({
+            "notified_at": now_iso, "notified_skip_reason": reason,
+        }).in_("id", skip_ids).execute()
+
     if not sendable_rows:
         return False
 
@@ -335,7 +358,7 @@ def _send_queued_digest(client, user) -> bool:
         sent_ids = [row["id"] for row in sendable_rows]
         client.table("matches_v2").update({
             "notified_at": datetime.now(timezone.utc).isoformat(),
-        }).in_("id", sent_ids).execute()
+        }).in_("id", sent_ids).execute()  # notified_skip_reason untouched — this is a real send, not a skip
 
     return notified
 

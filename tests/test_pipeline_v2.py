@@ -148,6 +148,7 @@ def _match_row(match_id, job_id, *, created_at, notified_at=None, tier1_score=80
     return {
         "id": match_id, "user_id": "u1", "job_id": job_id, "tier1_score": tier1_score,
         "tier2": {"why_fits": "- Great fit"}, "created_at": created_at, "notified_at": notified_at,
+        "notified_skip_reason": None,
     }
 
 
@@ -247,6 +248,59 @@ def test_send_queued_digest_caps_at_batch_size_oldest_first(fake_client, monkeyp
         assert rows_by_job[f"job-{i}"]["notified_at"] is not None
     for i in range(20, 25):
         assert rows_by_job[f"job-{i}"]["notified_at"] is None
+
+
+def test_send_queued_digest_skips_closed_job_and_stamps_skip_reason(fake_client, monkeypatch):
+    """A queued match whose job has since closed must never be emailed, but
+    also must not block the queue forever — it gets stamped notified_at +
+    notified_skip_reason='job_closed' immediately, independent of whether
+    the rest of the batch's send succeeds."""
+    user = _user_context({"email_on_match": True})
+    fake_client.seed("jobs", [_job("job-open"), _job("job-closed", status="closed")])
+    fake_client.seed("matches_v2", [
+        _match_row("m-open", "job-open", created_at="2026-11-01T00:00:00+00:00"),
+        _match_row("m-closed", "job-closed", created_at="2026-11-01T00:01:00+00:00"),
+    ])
+    sent_payloads = []
+    monkeypatch.setattr(
+        pipeline_v2, "send_match_digest",
+        lambda user_id, matches: (sent_payloads.append(matches), True)[1],
+    )
+
+    result = _send_queued_digest(fake_client, user)
+
+    assert result is True
+    [payload] = sent_payloads
+    # the closed job must never reach the payload at all
+    assert [m["url"] for m in payload] == ["https://example.org/job-open"]
+
+    rows_by_id = {r["id"]: r for r in fake_client.table("matches_v2").rows}
+    assert rows_by_id["m-open"]["notified_at"] is not None
+    assert rows_by_id["m-open"]["notified_skip_reason"] is None
+    assert rows_by_id["m-closed"]["notified_at"] is not None
+    assert rows_by_id["m-closed"]["notified_skip_reason"] == "job_closed"
+
+
+def test_send_queued_digest_skips_missing_job_even_when_send_fails(fake_client, monkeypatch):
+    """A queued match whose job can't be found at all (e.g. deleted out of
+    band) is stamped notified_skip_reason='job_missing' unconditionally —
+    even when the rest of the batch's send fails, the dead row must still
+    leave the queue rather than retry forever alongside the real failure."""
+    user = _user_context({"email_on_match": True})
+    fake_client.seed("jobs", [_job("job-open")])  # "job-gone" deliberately not seeded
+    fake_client.seed("matches_v2", [
+        _match_row("m-open", "job-open", created_at="2026-11-01T00:00:00+00:00"),
+        _match_row("m-gone", "job-gone", created_at="2026-11-01T00:01:00+00:00"),
+    ])
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: False)
+
+    result = _send_queued_digest(fake_client, user)
+
+    assert result is False  # the real send failed
+    rows_by_id = {r["id"]: r for r in fake_client.table("matches_v2").rows}
+    assert rows_by_id["m-open"]["notified_at"] is None  # failed send — stays queued for retry
+    assert rows_by_id["m-gone"]["notified_at"] is not None  # skipped regardless of send outcome
+    assert rows_by_id["m-gone"]["notified_skip_reason"] == "job_missing"
 
 
 # ---------------------------------------------------------------------------
