@@ -178,10 +178,23 @@ def test_posting_type_funding_excluded(profile):
     assert result.rejection_reason == "posting_type"
 
 
-def test_posting_type_internship_fellowship_program_speculative_not_excluded(profile):
+def test_posting_type_speculative_excluded(profile):
+    """Added after the Animal Advocacy Careers recon: several of its listings
+    are literal "general application"/"expression of interest" posts with no
+    specific role — exactly the enrichment prompt's own speculative
+    definition — and would otherwise reach Tier 1 scoring."""
+    result = check(_passable_job(posting_type="speculative"), profile)
+    assert not result.posting_type_pass
+    assert not result.passed
+    assert result.rejection_reason == "posting_type"
+
+
+def test_posting_type_internship_fellowship_program_not_excluded(profile):
     """Per-user opt-in for these is future work — for now they pass by default,
-    same as "job"."""
-    for value in ["internship", "fellowship", "program", "speculative"]:
+    same as "job". program specifically is NOT treated like speculative: it's
+    a structured course/accelerator/incubator, a different category, and no
+    confirmed mis-filed posting has been found there yet."""
+    for value in ["internship", "fellowship", "program"]:
         result = check(_passable_job(posting_type=value), profile)
         assert result.posting_type_pass, f"{value} should not be excluded by default"
 

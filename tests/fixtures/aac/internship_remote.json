@@ -1,0 +1,190 @@
+{
+  "id": 51295,
+  "date": "2026-10-27T20:54:48",
+  "date_gmt": "2026-10-27T20:54:48",
+  "guid": {
+    "rendered": "https://animaladvocacycareers.org/job/pro-bono-program-summer-2027-clerkship-2/"
+  },
+  "modified": "2026-10-27T21:04:09",
+  "modified_gmt": "2026-10-27T21:04:09",
+  "slug": "pro-bono-program-summer-2027-clerkship-2",
+  "status": "publish",
+  "type": "job_listing",
+  "link": "https://animaladvocacycareers.org/job/pro-bono-program-summer-2027-clerkship-2/",
+  "title": {
+    "rendered": "Pro Bono Program Summer 2027 Clerkship"
+  },
+  "content": {
+    "rendered": "<p>ALDF&#8217;s Pro Bono Program works to expand the practice and understanding of animal law in the legal community, connecting law firms, bar associations, and practitioners with animal protection work.</p>\n<h3>What You&#8217;ll Do</h3>\n<ul>\n<li>Research law firms, bar associations, CLEs, and opportunities in animal law</li>\n<li>Work on housing/animal custody issues, dangerous dog designations, breed-specific restrictions</li>\n<li>Research tort law matters, negligence issues, and questions around animals as legal property</li>\n<li>Participate in networking and engagement activities</li>\n</ul>\n<h3>Requirements</h3>\n<ul>\n<li>Current 2L (or part-time equivalent) or LLM student at an ABA-accredited law school</li>\n<li>Eligibility to work in the United States</li>\n<li>Superior legal research and writing skills</li>\n<li>Sincere interest in animal protection; familiarity with animal law preferred</li>\n</ul>\n<h3>How to Apply</h3>\n<p>Apply via Paylocity. Required: resume, cover letter, references, law school transcript, and writing sample. <strong>Deadline: 20 November 2026.</strong></p>\n",
+    "protected": false
+  },
+  "excerpt": {
+    "rendered": "<p>10-week summer clerkship in ALDF&#8217;s Pro Bono Program. Researches law firms and bar associations; works on housing/animal custody issues, breed-specific restrictions, tort law, and expanding animal law practice.</p>\n",
+    "protected": false
+  },
+  "author": 16,
+  "featured_media": 20468,
+  "template": "",
+  "meta": {
+    "_acf_changed": false,
+    "_promoted": "",
+    "_job_location": "United States",
+    "_application": "",
+    "_company_name": "Animal Legal Defense Fund",
+    "_company_website": "https://recruiting.paylocity.com/Recruiting/Jobs/Details/4479370",
+    "_company_tagline": "The Animal Legal Defense Fund's mission is to protect the lives and advance the interests of animals through the legal system. The Animal Legal Defense Fund accomplishes this mission by filing high-impact lawsuits to protect animals from harm, providing free legal assistance and training to prosecutors to assure that animal abusers are held accountable for their crimes, supporting tough animal protection legislation and fighting legislation harmful to animals, and providing resources and opportunities to law students and professionals to advance the emerging field of animal law.",
+    "_company_twitter": "",
+    "_company_video": "",
+    "_filled": 0,
+    "_featured": 0,
+    "_remote_position": 1,
+    "_job_salary": "$20/hour",
+    "_job_salary_currency": "",
+    "_job_salary_unit": ""
+  },
+  "job-types": [
+    6
+  ],
+  "job_filter": [
+    97
+  ],
+  "job_function": [
+    137
+  ],
+  "job_listing_location": [
+    174
+  ],
+  "job_remote": [
+    89
+  ],
+  "job_type": [
+    99
+  ],
+  "organisation_type": [
+    103
+  ],
+  "language_requirements": [
+    109
+  ],
+  "week_posted": [
+    117
+  ],
+  "job_location": [],
+  "class_list": [
+    "post-51295",
+    "job_listing",
+    "type-job_listing",
+    "status-publish",
+    "has-post-thumbnail",
+    "hentry",
+    "job_listing_type-internship",
+    "job_filter-entry-level",
+    "job_function-legal-or-law",
+    "job_listing_location-united-states",
+    "job_remote-remote",
+    "job_type-internship",
+    "organisation_type-nonprofit",
+    "language_requirements-english",
+    "week_posted-this-week",
+    "job-type-internship"
+  ],
+  "acf": [],
+  "_links": {
+    "self": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-listings/51295",
+        "targetHints": {
+          "allow": [
+            "GET"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-listings"
+      }
+    ],
+    "about": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/types/job_listing"
+      }
+    ],
+    "author": [
+      {
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/users/16"
+      }
+    ],
+    "wp:featuredmedia": [
+      {
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/media/20468"
+      }
+    ],
+    "wp:attachment": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/media?parent=51295"
+      }
+    ],
+    "wp:term": [
+      {
+        "taxonomy": "job_listing_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-types?post=51295"
+      },
+      {
+        "taxonomy": "job_filter",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_filter?post=51295"
+      },
+      {
+        "taxonomy": "job_function",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_function?post=51295"
+      },
+      {
+        "taxonomy": "job_listing_location",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_listing_location?post=51295"
+      },
+      {
+        "taxonomy": "job_remote",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_remote?post=51295"
+      },
+      {
+        "taxonomy": "job_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_type?post=51295"
+      },
+      {
+        "taxonomy": "organisation_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/organisation_type?post=51295"
+      },
+      {
+        "taxonomy": "language_requirements",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/language_requirements?post=51295"
+      },
+      {
+        "taxonomy": "week_posted",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/week_posted?post=51295"
+      },
+      {
+        "taxonomy": "job_location",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_location?post=51295"
+      }
+    ],
+    "curies": [
+      {
+        "name": "wp",
+        "href": "https://api.w.org/{rel}",
+        "templated": true
+      }
+    ]
+  }
+}

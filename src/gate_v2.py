@@ -26,13 +26,24 @@ from dataclasses import dataclass
 
 from src.gate import _matches_region  # reuse verbatim, don't refork
 
-# posting_type in {volunteer, funding} is excluded by default — boards mix real
-# jobs with these opportunity types, and neither belongs in a "job match" list.
+# posting_type in {volunteer, funding, speculative} is excluded by default —
+# boards mix real jobs with these opportunity types, and none belongs in a
+# "job match" list. speculative added after Animal Advocacy Careers' recon:
+# several of its listings are literal "general application"/"expression of
+# interest"/"talent pool" posts with no specific role (2 had zero description
+# text after stripping AAC's own "No description found" placeholder) — exactly
+# what the enrichment prompt's own speculative definition describes (see
+# enrich_jobs.py's posting_type prompt section), so they'd otherwise reach
+# Tier 1 scoring despite not being individual job openings. program is
+# DELIBERATELY NOT excluded yet — see enrich_jobs.py's prompt: it's a
+# structured course/accelerator/incubator, a materially different category
+# from speculative's "no specific role", and no confirmed AAC (or other
+# source) posting has been found that's actually mis-filed there.
 # None (missing, or a pre-posting_type-field enrichment row) is treated as "job"
 # — a null value here is never itself a reason to filter a posting. Per-user
-# opt-in for other types (internship/fellowship/program/speculative) is future
-# work, deliberately not built here.
-_EXCLUDED_POSTING_TYPES = frozenset({"volunteer", "funding"})
+# opt-in for other types (internship/fellowship/program) is future work,
+# deliberately not built here.
+_EXCLUDED_POSTING_TYPES = frozenset({"volunteer", "funding", "speculative"})
 
 
 @dataclass

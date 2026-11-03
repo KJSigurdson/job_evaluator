@@ -435,18 +435,30 @@ def test_adapter_registry_iap_is_disabled():
     assert entries[IAPAdapter] is False
 
 
-def test_adapter_registry_80k_and_probably_good_are_enabled():
+def test_adapter_registry_80k_probably_good_and_aac_are_enabled():
+    from src.adapters.aac import AACAdapter
     from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter
     from src.adapters.probably_good import ProbablyGoodAdapter
     entries = dict(pipeline_v2._ADAPTER_REGISTRY)
     assert entries[EightyThousandHoursAdapter] is True
     assert entries[ProbablyGoodAdapter] is True
+    assert entries[AACAdapter] is True
+
+
+def test_adapter_registry_aac_is_last():
+    from src.adapters.aac import AACAdapter
+    assert pipeline_v2._ADAPTER_REGISTRY[-1][0] is AACAdapter
 
 
 def test_adapters_derived_list_excludes_disabled_iap():
     from src.adapters.iap import IAPAdapter
     assert IAPAdapter not in pipeline_v2._ADAPTERS
-    assert len(pipeline_v2._ADAPTERS) == 2
+    assert len(pipeline_v2._ADAPTERS) == 3
+
+
+def test_adapters_derived_list_has_aac_last():
+    from src.adapters.aac import AACAdapter
+    assert pipeline_v2._ADAPTERS[-1] is AACAdapter
 
 
 def test_run_scheduled_mode_logs_active_and_skipped_adapters(fake_client, monkeypatch, caplog):
@@ -459,6 +471,7 @@ def test_run_scheduled_mode_logs_active_and_skipped_adapters(fake_client, monkey
     [log_line] = [r.message for r in caplog.records if r.message.startswith("Adapters active:")]
     assert "EightyThousandHoursAdapter" in log_line
     assert "ProbablyGoodAdapter" in log_line
+    assert "AACAdapter" in log_line
     assert "IAPAdapter" in log_line  # named in the skipped half, not silently dropped
 
 

@@ -1,0 +1,454 @@
+{
+  "job_remote": {
+    "90": {
+      "slug": "hybrid",
+      "name": "Hybrid"
+    },
+    "91": {
+      "slug": "on-site",
+      "name": "On-site"
+    },
+    "92": {
+      "slug": "optional",
+      "name": "Optional"
+    },
+    "89": {
+      "slug": "remote",
+      "name": "Remote"
+    }
+  },
+  "job_listing_location": {
+    "183": {
+      "slug": "africa",
+      "name": "Africa"
+    },
+    "177": {
+      "slug": "argentina",
+      "name": "Argentina"
+    },
+    "160": {
+      "slug": "asia-pacific",
+      "name": "Asia-Pacific"
+    },
+    "165": {
+      "slug": "australia",
+      "name": "Australia"
+    },
+    "644": {
+      "slug": "austria",
+      "name": "Austria"
+    },
+    "660": {
+      "slug": "bahrain",
+      "name": "Bahrain"
+    },
+    "522": {
+      "slug": "bangkok",
+      "name": "Bangkok"
+    },
+    "147": {
+      "slug": "belgium",
+      "name": "Belgium"
+    },
+    "634": {
+      "slug": "berlin",
+      "name": "Berlin"
+    },
+    "178": {
+      "slug": "brazil",
+      "name": "Brazil"
+    },
+    "643": {
+      "slug": "brussels",
+      "name": "Brussels"
+    },
+    "642": {
+      "slug": "bulgaria",
+      "name": "Bulgaria"
+    },
+    "173": {
+      "slug": "canada",
+      "name": "Canada"
+    },
+    "176": {
+      "slug": "chile",
+      "name": "Chile"
+    },
+    "163": {
+      "slug": "china",
+      "name": "China"
+    },
+    "180": {
+      "slug": "colombia",
+      "name": "Colombia"
+    },
+    "149": {
+      "slug": "czechia",
+      "name": "Czechia"
+    },
+    "155": {
+      "slug": "denmark",
+      "name": "Denmark"
+    },
+    "621": {
+      "slug": "east-africa",
+      "name": "East Africa"
+    },
+    "179": {
+      "slug": "ecuador",
+      "name": "Ecuador"
+    },
+    "622": {
+      "slug": "europe",
+      "name": "Europe"
+    },
+    "156": {
+      "slug": "finland",
+      "name": "Finland"
+    },
+    "146": {
+      "slug": "france",
+      "name": "France"
+    },
+    "153": {
+      "slug": "germany",
+      "name": "Germany"
+    },
+    "627": {
+      "slug": "hong-kong",
+      "name": "Hong Kong"
+    },
+    "476": {
+      "slug": "hungary",
+      "name": "Hungary"
+    },
+    "162": {
+      "slug": "india",
+      "name": "India"
+    },
+    "161": {
+      "slug": "indonesia",
+      "name": "Indonesia"
+    },
+    "358": {
+      "slug": "ireland",
+      "name": "Ireland"
+    },
+    "626": {
+      "slug": "israel",
+      "name": "Israel"
+    },
+    "152": {
+      "slug": "italy",
+      "name": "Italy"
+    },
+    "624": {
+      "slug": "japan",
+      "name": "Japan"
+    },
+    "659": {
+      "slug": "jordon",
+      "name": "Jordon"
+    },
+    "653": {
+      "slug": "kenya",
+      "name": "Kenya"
+    },
+    "661": {
+      "slug": "kuwait",
+      "name": "Kuwait"
+    },
+    "175": {
+      "slug": "latin-america",
+      "name": "Latin America"
+    },
+    "655": {
+      "slug": "lebanon",
+      "name": "Lebanon"
+    },
+    "670": {
+      "slug": "lithuania",
+      "name": "Lithuania"
+    },
+    "645": {
+      "slug": "london",
+      "name": "London"
+    },
+    "649": {
+      "slug": "luxembourg",
+      "name": "Luxembourg"
+    },
+    "170": {
+      "slug": "malaysia",
+      "name": "Malaysia"
+    },
+    "182": {
+      "slug": "mexico",
+      "name": "Mexico"
+    },
+    "654": {
+      "slug": "middle-east",
+      "name": "Middle-East"
+    },
+    "625": {
+      "slug": "netherlands",
+      "name": "Netherlands"
+    },
+    "166": {
+      "slug": "new-zealand",
+      "name": "New Zealand"
+    },
+    "172": {
+      "slug": "north-america",
+      "name": "North America"
+    },
+    "668": {
+      "slug": "norway",
+      "name": "Norway"
+    },
+    "181": {
+      "slug": "peru",
+      "name": "Peru"
+    },
+    "169": {
+      "slug": "philippines",
+      "name": "Philippines"
+    },
+    "151": {
+      "slug": "poland",
+      "name": "Poland"
+    },
+    "144": {
+      "slug": "portugal",
+      "name": "Portugal"
+    },
+    "657": {
+      "slug": "qatar",
+      "name": "Qatar"
+    },
+    "185": {
+      "slug": "rwanda",
+      "name": "Rwanda"
+    },
+    "656": {
+      "slug": "saudi-arabia",
+      "name": "Saudi Arabia"
+    },
+    "164": {
+      "slug": "singapore",
+      "name": "Singapore"
+    },
+    "637": {
+      "slug": "slovakia",
+      "name": "Slovakia"
+    },
+    "186": {
+      "slug": "south-africa",
+      "name": "South Africa"
+    },
+    "168": {
+      "slug": "south-korea",
+      "name": "South Korea"
+    },
+    "639": {
+      "slug": "southeast-asia",
+      "name": "Southeast Asia"
+    },
+    "623": {
+      "slug": "spain",
+      "name": "Spain"
+    },
+    "150": {
+      "slug": "sweden",
+      "name": "Sweden"
+    },
+    "154": {
+      "slug": "switzerland",
+      "name": "Switzerland"
+    },
+    "157": {
+      "slug": "taiwan",
+      "name": "Taiwan"
+    },
+    "167": {
+      "slug": "thailand",
+      "name": "Thailand"
+    },
+    "184": {
+      "slug": "tunisia",
+      "name": "Tunisia"
+    },
+    "658": {
+      "slug": "uae",
+      "name": "UAE"
+    },
+    "663": {
+      "slug": "uganda",
+      "name": "Uganda"
+    },
+    "159": {
+      "slug": "united-kingdom",
+      "name": "United Kingdom"
+    },
+    "174": {
+      "slug": "united-states",
+      "name": "United States"
+    },
+    "171": {
+      "slug": "vietnam",
+      "name": "Vietnam"
+    },
+    "313": {
+      "slug": "worldwide",
+      "name": "Worldwide"
+    }
+  },
+  "job_function": {
+    "131": {
+      "slug": "campaigns-and-corporate-engagement",
+      "name": "Campaigns and corporate engagement"
+    },
+    "139": {
+      "slug": "education",
+      "name": "Education"
+    },
+    "135": {
+      "slug": "finance-and-accounting",
+      "name": "Finance and accounting"
+    },
+    "127": {
+      "slug": "fundraising-or-development",
+      "name": "Fundraising or development"
+    },
+    "136": {
+      "slug": "government-and-policy",
+      "name": "Government and policy"
+    },
+    "133": {
+      "slug": "human-resources",
+      "name": "Human resources"
+    },
+    "130": {
+      "slug": "leadership",
+      "name": "Leadership"
+    },
+    "137": {
+      "slug": "legal-or-law",
+      "name": "Legal or law"
+    },
+    "126": {
+      "slug": "marketing-or-communications",
+      "name": "Marketing or communications"
+    },
+    "132": {
+      "slug": "operations-or-administration",
+      "name": "Operations or administration"
+    },
+    "141": {
+      "slug": "other",
+      "name": "Other"
+    },
+    "142": {
+      "slug": "pr-or-event-management",
+      "name": "PR or Event management"
+    },
+    "134": {
+      "slug": "project-or-programme-management",
+      "name": "Project or programme management"
+    },
+    "129": {
+      "slug": "research-or-data",
+      "name": "Research or data"
+    },
+    "140": {
+      "slug": "science",
+      "name": "Science"
+    },
+    "128": {
+      "slug": "tech-and-it",
+      "name": "Tech and IT"
+    },
+    "138": {
+      "slug": "design-or-video",
+      "name": "Web design, graphic design or video"
+    }
+  },
+  "job_filter": {
+    "93": {
+      "slug": "all",
+      "name": "All"
+    },
+    "94": {
+      "slug": "director",
+      "name": "Director"
+    },
+    "97": {
+      "slug": "entry-level",
+      "name": "Entry-level"
+    },
+    "95": {
+      "slug": "executive",
+      "name": "Executive"
+    },
+    "96": {
+      "slug": "mid-senior-level",
+      "name": "Mid-senior level"
+    },
+    "98": {
+      "slug": "none-specified",
+      "name": "None specified"
+    }
+  },
+  "job_type": {
+    "369": {
+      "slug": "freelance",
+      "name": "Freelance"
+    },
+    "101": {
+      "slug": "full-time",
+      "name": "Full-time"
+    },
+    "99": {
+      "slug": "internship",
+      "name": "Internship"
+    },
+    "100": {
+      "slug": "part-time",
+      "name": "Part-time"
+    },
+    "102": {
+      "slug": "temporary",
+      "name": "Temporary"
+    }
+  },
+  "organisation_type": {
+    "104": {
+      "slug": "academia",
+      "name": "Academia"
+    },
+    "106": {
+      "slug": "alt-protein",
+      "name": "Alt-protein"
+    },
+    "629": {
+      "slug": "for-profit",
+      "name": "For-profit"
+    },
+    "105": {
+      "slug": "government",
+      "name": "Government"
+    },
+    "107": {
+      "slug": "grantmaker",
+      "name": "Grantmaker"
+    },
+    "638": {
+      "slug": "media",
+      "name": "Media"
+    },
+    "103": {
+      "slug": "nonprofit",
+      "name": "Nonprofit"
+    }
+  }
+}

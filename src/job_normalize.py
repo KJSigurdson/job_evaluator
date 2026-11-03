@@ -27,15 +27,31 @@ RE_ENRICH_SIMILARITY_THRESHOLD = 0.97
 
 def normalize_job_url(url: str) -> str:
     """Canonical form of *url* for the v2 jobs table: dedup.canonical_url()'s
-    UTM/tracking-param stripping, fragment-dropping, and scheme/host lowercasing,
-    plus a trailing slash stripped from the path (so ".../123/" and ".../123"
-    canonicalize identically). The bare root path "/" is left alone."""
+    UTM/tracking-param stripping and scheme/host lowercasing, plus a trailing
+    slash stripped from the path (so ".../123/" and ".../123" canonicalize
+    identically). The bare root path "/" is left alone.
+
+    Fragment handling is NOT simply "drop it" (dedup.canonical_url()'s
+    behavior, unconditional, left unmodified there since v1 still relies on
+    that): a hash-ROUTED fragment (one starting with "/", e.g.
+    "#/job/details/261") encodes the actual resource identity for a
+    client-side-routed SPA apply page, unlike an ordinary same-page anchor
+    (e.g. "#contact", "#apply-form") which really is just page-scroll
+    position and is correctly dropped. Confirmed for real: Animal Advocacy
+    Careers' listings link to Compassion in World Farming's careers site
+    (ciwf.livevacancies.co.uk), which posts multiple DISTINCT jobs whose
+    URLs differ ONLY by this kind of fragment
+    (".../#/job/details/261" vs "...248" vs "...258" vs "...249") —
+    dropping it unconditionally collapsed all of them to one canonical_url.
+    """
+    original_fragment = urlparse(url).fragment
     canonical = _v1_canonical_url(url)
     parsed = urlparse(canonical)
     path = parsed.path
     if len(path) > 1 and path.endswith("/"):
         path = path.rstrip("/")
-    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, parsed.fragment))
+    fragment = original_fragment if original_fragment.startswith("/") else ""
+    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, parsed.query, fragment))
 
 
 def _normalize_text(text: str) -> str:

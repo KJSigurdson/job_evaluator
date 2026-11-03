@@ -49,6 +49,51 @@ def test_normalize_job_url_preserves_non_tracking_query_params():
     assert normalize_job_url("https://example.org/job/123?ref_id=5") == "https://example.org/job/123?ref_id=5"
 
 
+def test_normalize_job_url_preserves_hash_routed_fragment():
+    """A fragment starting with "/" is a client-side SPA ROUTE, not a
+    same-page anchor — it must survive normalization, unlike a plain anchor
+    (see test_normalize_job_url_strips_fragment)."""
+    assert normalize_job_url("https://example.org/#/job/details/261") == "https://example.org/#/job/details/261"
+
+
+def test_normalize_job_url_ciwf_four_distinct_jobs_four_distinct_urls():
+    """Regression for a real finding: Compassion in World Farming's careers
+    site (ciwf.livevacancies.co.uk) posts multiple DISTINCT jobs whose URLs
+    differ ONLY by a hash-routed fragment. Before preserving "/"-prefixed
+    fragments, all four collapsed to the same canonical_url."""
+    urls = [
+        "https://ciwf.livevacancies.co.uk/#/job/details/261",
+        "https://ciwf.livevacancies.co.uk/#/job/details/248",
+        "https://ciwf.livevacancies.co.uk/#/job/details/258",
+        "https://ciwf.livevacancies.co.uk/#/job/details/249",
+    ]
+    normalized = [normalize_job_url(u) for u in urls]
+    assert len(set(normalized)) == 4
+
+
+def test_normalize_job_url_hash_routed_fragment_still_strips_utm():
+    """UTM/tracking-param stripping must still apply to the query string even
+    when the fragment is a preserved hash-route."""
+    a = normalize_job_url("https://example.org/?utm_source=80k#/job/details/261")
+    b = normalize_job_url("https://example.org/?utm_source=iap#/job/details/261")
+    assert a == b == "https://example.org/#/job/details/261"
+
+
+def test_normalize_job_url_hash_routed_fragment_different_route_different_url():
+    """Two hash-routed URLs with a different route must NOT canonicalize to
+    the same string — that's the entire point of preserving the fragment."""
+    a = normalize_job_url("https://example.org/#/job/details/1")
+    b = normalize_job_url("https://example.org/#/job/details/2")
+    assert a != b
+
+
+def test_normalize_job_url_ordinary_anchor_without_leading_slash_still_dropped():
+    """A fragment that does NOT start with "/" is an ordinary same-page
+    anchor (not a route) and must still be dropped, matching the existing
+    (pre-AAC) behavior exactly — see test_normalize_job_url_strips_fragment."""
+    assert normalize_job_url("https://example.org/job/123#section-2") == "https://example.org/job/123"
+
+
 # ---------------------------------------------------------------------------
 # content_hash
 # ---------------------------------------------------------------------------

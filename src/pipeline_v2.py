@@ -83,6 +83,7 @@ from datetime import datetime, timezone
 
 import anthropic
 
+from src.adapters.aac import AACAdapter
 from src.adapters.eighty_thousand_hours import EightyThousandHoursAdapter
 from src.adapters.iap import IAPAdapter
 from src.adapters.probably_good import ProbablyGoodAdapter
@@ -118,6 +119,10 @@ _ADAPTER_REGISTRY: list[tuple[type, bool]] = [
     (EightyThousandHoursAdapter, True),
     (ProbablyGoodAdapter, True),
     (IAPAdapter, False),
+    # AAC last, deliberately: it's the newest/least-audited source (no v1
+    # history, no production run yet) — if it ever needs to be pulled
+    # quickly, every other board's fetch/ingest has already run first.
+    (AACAdapter, True),
 ]
 
 _ADAPTERS = [cls for cls, enabled in _ADAPTER_REGISTRY if enabled]

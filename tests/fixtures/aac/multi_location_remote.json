@@ -1,0 +1,185 @@
+{
+  "id": 50861,
+  "date": "2026-10-19T18:54:11",
+  "date_gmt": "2026-10-19T18:54:11",
+  "guid": {
+    "rendered": "https://animaladvocacycareers.org/job/executive-assistant-to-the-ceo-4/"
+  },
+  "modified": "2026-10-27T21:06:18",
+  "modified_gmt": "2026-10-27T21:06:18",
+  "slug": "executive-assistant-to-the-ceo-4",
+  "status": "publish",
+  "type": "job_listing",
+  "link": "https://animaladvocacycareers.org/job/executive-assistant-to-the-ceo-4/",
+  "title": {
+    "rendered": "Executive Assistant to the CEO"
+  },
+  "content": {
+    "rendered": "<p>Myrias is looking for an <strong>Executive Assistant</strong> to work directly with our founder and CEO, Yaqi Grover. This is a high-trust, high-variety role: you&#8217;ll get close exposure to how an organization gets built, how funding decisions get made, and how a small, ambitious team moves quickly on a neglected problem — while also handling the practical, day-to-day work that makes that possible.</p>\n<p>We&#8217;re looking for someone early in their career who is driven, passionate about farmed animal welfare, and committed to supporting us as we ramp up over the next year and beyond.</p>\n",
+    "protected": false
+  },
+  "excerpt": {
+    "rendered": "<p>This is a high-trust, high-variety role: you’ll get close exposure to how an organization gets built, how funding decisions get made, and how a small, ambitious team moves quickly on a neglected problem – while also handling the practical, day-to-day work that makes that possible.</p>\n",
+    "protected": false
+  },
+  "author": 16,
+  "featured_media": 0,
+  "template": "",
+  "meta": {
+    "_acf_changed": false,
+    "_promoted": "",
+    "_job_location": "China",
+    "_application": "",
+    "_company_name": "Myrias",
+    "_company_website": "https://docs.google.com/document/d/1IixxFavHyxVVv-ZE5pMXE170u6OAcgHAPPviZRZNpKo/edit?usp=sharing",
+    "_company_tagline": "Myrias is a venture studio for animal welfare. Nonprofit or for-profit, we build whatever the problem needs and aim it at the largest, most neglected sources of suffering. The evidence sets our priorities.",
+    "_company_twitter": "",
+    "_company_video": "",
+    "_filled": 0,
+    "_featured": 0,
+    "_remote_position": 1,
+    "_job_salary": "$45,000-$85,000 USD",
+    "_job_salary_currency": "",
+    "_job_salary_unit": ""
+  },
+  "job-types": [
+    2
+  ],
+  "job_filter": [
+    97
+  ],
+  "job_function": [
+    132
+  ],
+  "job_listing_location": [
+    163,
+    174
+  ],
+  "job_remote": [
+    89
+  ],
+  "job_type": [
+    101
+  ],
+  "organisation_type": [
+    103
+  ],
+  "language_requirements": [
+    109
+  ],
+  "week_posted": [
+    122
+  ],
+  "job_location": [],
+  "class_list": [
+    "post-50861",
+    "job_listing",
+    "type-job_listing",
+    "status-publish",
+    "hentry",
+    "job_listing_type-full-time",
+    "job_filter-entry-level",
+    "job_function-operations-or-administration",
+    "job_listing_location-china",
+    "job_listing_location-united-states",
+    "job_remote-remote",
+    "job_type-full-time",
+    "organisation_type-nonprofit",
+    "language_requirements-english",
+    "week_posted-a-month-ago-or-more",
+    "job-type-full-time"
+  ],
+  "acf": [],
+  "_links": {
+    "self": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-listings/50861",
+        "targetHints": {
+          "allow": [
+            "GET"
+          ]
+        }
+      }
+    ],
+    "collection": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-listings"
+      }
+    ],
+    "about": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/types/job_listing"
+      }
+    ],
+    "author": [
+      {
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/users/16"
+      }
+    ],
+    "wp:attachment": [
+      {
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/media?parent=50861"
+      }
+    ],
+    "wp:term": [
+      {
+        "taxonomy": "job_listing_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job-types?post=50861"
+      },
+      {
+        "taxonomy": "job_filter",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_filter?post=50861"
+      },
+      {
+        "taxonomy": "job_function",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_function?post=50861"
+      },
+      {
+        "taxonomy": "job_listing_location",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_listing_location?post=50861"
+      },
+      {
+        "taxonomy": "job_remote",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_remote?post=50861"
+      },
+      {
+        "taxonomy": "job_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_type?post=50861"
+      },
+      {
+        "taxonomy": "organisation_type",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/organisation_type?post=50861"
+      },
+      {
+        "taxonomy": "language_requirements",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/language_requirements?post=50861"
+      },
+      {
+        "taxonomy": "week_posted",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/week_posted?post=50861"
+      },
+      {
+        "taxonomy": "job_location",
+        "embeddable": true,
+        "href": "https://animaladvocacycareers.org/wp-json/wp/v2/job_location?post=50861"
+      }
+    ],
+    "curies": [
+      {
+        "name": "wp",
+        "href": "https://api.w.org/{rel}",
+        "templated": true
+      }
+    ]
+  }
+}
