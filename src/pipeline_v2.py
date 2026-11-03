@@ -250,7 +250,15 @@ def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dic
     ({title, org, location, fit_score, why_fits, url}) — notify.send_match_digest
     is reused UNCHANGED, so this must match the field names its Edge Function
     contract already expects. location comes from jobs.location_field (v1's
-    posting.location has no cleaner v2 equivalent)."""
+    posting.location has no cleaner v2 equivalent).
+
+    fit_score is tier1_score / 100: matches_v2.tier1_score is stored on the
+    0-100 scale (see scoring_weights.insert_threshold's own x100 comment
+    above), but v1's contract — and this Edge Function's existing template —
+    expects 0.0-1.0 (schemas.py's ScoredPosting.fit_score). Sending the raw
+    0-100 value unscaled was a real bug (confirmed 2026-11-03, never caught
+    because MATCH_DIGEST_URL has been 401ing since before this field existed
+    — see src.pipeline_v2._finish_user_matching's notified handling)."""
     payload = []
     for row in matches_v2_rows:
         job = jobs_by_id.get(row["job_id"])
@@ -261,7 +269,7 @@ def _build_digest_payload(matches_v2_rows: list[dict], jobs_by_id: dict[str, dic
             "title": job.get("title"),
             "org": job.get("org"),
             "location": job.get("location_field"),
-            "fit_score": row["tier1_score"],
+            "fit_score": row["tier1_score"] / 100,
             "why_fits": tier2.get("why_fits"),
             "url": job.get("canonical_url"),
         })
@@ -423,10 +431,14 @@ def _finish_user_matching(client, anthropic_client, user, prep: dict, *, dry_run
             jobs_by_id = {c["job"]["id"]: c["job"] for c in candidates}
             payload = _build_digest_payload(new_rows, jobs_by_id)
             try:
-                send_match_digest(user.user_id, payload)
-                notified = True
+                # send_match_digest() never raises by contract, but this
+                # try/except is a deliberate second layer of defense (see
+                # CLAUDE.md) — notified reflects its actual return value
+                # (True only on a confirmed 2xx), not just "was it called".
+                notified = send_match_digest(user.user_id, payload)
             except Exception as exc:
                 log.warning("Match-digest email failed for user %s: %s", user.user_id, exc)
+                notified = False
 
     return {
         **base_result, "tier1_scored": tier1_scored,

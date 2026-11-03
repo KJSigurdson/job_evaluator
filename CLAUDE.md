@@ -114,7 +114,7 @@ Required in `.env` / GitHub Actions secrets:
 - `VOYAGE_API_KEY` — job/profile embeddings (voyage-3.5). No `voyageai` package; `enrich_jobs.embed_texts`/`profile_embed` call Voyage's REST API directly via `httpx` to avoid an unused dependency. Unset = embedding step skipped, not an error (embeddings backfill later once the key exists).
 
 Optional (degrade gracefully when unset — see `.env.example`):
-- `MATCH_DIGEST_URL` / `PIPELINE_SHARED_SECRET` — match-digest email, same contract as v1. **Currently returning 401 Unauthorized in production** (confirmed pre-existing, not caused by the v2 cutover — v1's last scheduled run before the cutover hit the identical error on the identical endpoint) — needs the Edge Function/secret checked outside this pipeline's code.
+- `MATCH_DIGEST_URL` / `PIPELINE_SHARED_SECRET` — match-digest email, same contract as v1. The 401 noted here previously is **stale**: checked every `daily.yml` run's logs from 2026-10-27 through the latest scheduled run (2026-11-02T14:36Z) via `gh run view --log` — every one logs `src.notify: Sent match digest for user ... (N match(es))`, which `notify.send_match_digest()` only reaches after a confirmed 2xx. No 401 evidence found in any real production run (2026-11-03). `notify.send_match_digest()` now returns `bool` (True only on a confirmed 2xx) instead of unconditionally letting the caller assume success — `pipeline_v2.py`'s `notified` field reflects that return value, not just "was it called". Local `.env` deliberately has no `MATCH_DIGEST_URL` (only GitHub Actions secrets do) — a local/manual script therefore always hits the "not configured" skip branch, never the real endpoint; do not add it to `.env`, since that would make local test runs email real users.
 
 ## LLM usage
 

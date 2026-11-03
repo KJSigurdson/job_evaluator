@@ -780,3 +780,17 @@ def test_reprocess_staged_marks_rows_processed(fake_client):
 
     [row] = fake_client.table("batch_results").rows
     assert row["processed"] is True
+
+
+def test_rerank_tier1_batch_has_no_budget_seconds_override(fake_client):
+    """rerank_tier1_batch() always polls with DEFAULT_POLL_BUDGET_SECONDS
+    (hardcoded internally, same as tier2_enrich/enrich_jobs) and does not
+    accept a budget_seconds override — a one-off manual recovery script
+    passed budget_seconds=900 expecting a longer poll window and got a
+    TypeError in production (2026-11-03), since no call site in the
+    repository has ever needed one. This pins that contract so a future
+    recovery script finds this test instead of repeating the mistake."""
+    with pytest.raises(TypeError, match="budget_seconds"):
+        rerank_tier1_batch(
+            fake_client, anthropic_client=object(), user_requests=_user_requests(), budget_seconds=900,
+        )

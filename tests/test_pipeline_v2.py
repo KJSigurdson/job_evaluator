@@ -113,8 +113,18 @@ def test_build_digest_payload_maps_v2_fields_to_v1_shape():
     payload = _build_digest_payload(matches_v2_rows, jobs_by_id)
     assert payload == [{
         "title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
-        "fit_score": 82, "why_fits": "- Strong fit", "url": "https://example.org/job-1",
+        "fit_score": 0.82, "why_fits": "- Strong fit", "url": "https://example.org/job-1",
     }]
+
+
+def test_build_digest_payload_scales_tier1_score_to_v1s_0_to_1_range():
+    """matches_v2.tier1_score is stored 0-100; v1's contract (and the Edge
+    Function's existing template) expects fit_score on 0.0-1.0 — confirmed
+    real bug fixed 2026-11-03: a tier1_score of 78 must render as 0.78, not
+    the raw unscaled 78."""
+    matches_v2_rows = [{"job_id": "job-1", "tier1_score": 78, "tier2": {}}]
+    payload = _build_digest_payload(matches_v2_rows, {"job-1": _job()})
+    assert payload[0]["fit_score"] == pytest.approx(0.78)
 
 
 def test_build_digest_payload_skips_row_with_no_matching_job():
@@ -359,7 +369,12 @@ def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(f
         "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
     })
     digest_calls = []
-    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: digest_calls.append((user_id, matches)))
+
+    def _fake_send(user_id, matches):
+        digest_calls.append((user_id, matches))
+        return True  # confirmed 2xx
+
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", _fake_send)
 
     result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
 
@@ -367,7 +382,27 @@ def test_finish_user_matching_sends_digest_when_email_on_match_and_new_matches(f
     [(user_id, matches)] = digest_calls
     assert user_id == "u1"
     assert matches == [{"title": "Head of Data", "org": "GiveDirectly", "location": "Remote, Global",
-                         "fit_score": 80, "why_fits": "- Great fit", "url": "https://example.org/job-1"}]
+                         "fit_score": 0.8, "why_fits": "- Great fit", "url": "https://example.org/job-1"}]
+
+
+def test_finish_user_matching_notified_false_when_digest_returns_false(fake_client, monkeypatch):
+    """send_match_digest() returning False (e.g. a non-2xx response) must
+    surface as notified=False — confirmed real bug fixed 2026-11-03: this
+    call site used to set notified=True unconditionally right after calling
+    send_match_digest(), regardless of whether the POST actually succeeded."""
+    user = _user_context({"career_goals": "x", "hard_constraints": {}, "email_on_match": True})
+    prep = _prep()
+    fake_client.seed("matches_v2", [{"user_id": "u1", "job_id": "job-1", "tier1_score": 80,
+                                      "tier2": {"why_fits": "- Great fit"}}])
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
+        "considered": 1, "enriched": 1, "skipped_below_threshold": 0, "failed": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "send_match_digest", lambda user_id, matches: False)
+
+    result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
+
+    assert result["notified"] is False
 
 
 def test_finish_user_matching_no_digest_when_email_on_match_false(fake_client, monkeypatch):

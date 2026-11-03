@@ -1,0 +1,15 @@
+-- DRAFT — NOT APPLIED. For dashboard-paste review only.
+--
+-- Enables RLS on job_status_events with NO policies defined. This means:
+--   - the service-role key (what this pipeline's code always uses) still
+--     reads/writes normally — service_role bypasses RLS entirely, policies
+--     or not.
+--   - any other role (anon/authenticated, e.g. a frontend querying with the
+--     anon/publishable key) gets zero rows and cannot insert/update/delete,
+--     by default-deny, until a policy is explicitly added.
+-- Correct default for this table specifically: its own creating migration
+-- (20261103120000_job_status_events.sql) says "nothing reads this table
+-- yet" — there is no legitimate non-service-role reader today, so
+-- default-deny costs nothing and closes the gap before a frontend query
+-- is ever written against it.
+alter table job_status_events enable row level security;

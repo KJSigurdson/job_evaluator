@@ -12,8 +12,9 @@ _MATCHES = [{"title": "Head of Data", "org": "GiveDirectly", "location": "Remote
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int = 200):
+    def __init__(self, status_code: int = 200, text: str = ""):
         self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -39,8 +40,9 @@ def test_send_match_digest_posts_correct_body_and_header(monkeypatch):
 
     monkeypatch.setattr(notify.httpx, "post", fake_post)
 
-    notify.send_match_digest("u1", _MATCHES)
+    result = notify.send_match_digest("u1", _MATCHES)
 
+    assert result is True
     assert len(calls) == 1
     call = calls[0]
     assert call["url"] == "https://example.org/digest"
@@ -60,14 +62,37 @@ def test_send_match_digest_swallows_httpx_exception(monkeypatch):
 
     monkeypatch.setattr(notify.httpx, "post", raising_post)
 
-    notify.send_match_digest("u1", _MATCHES)  # must not raise
+    result = notify.send_match_digest("u1", _MATCHES)  # must not raise
+    assert result is False
 
 
 def test_send_match_digest_swallows_non_2xx_response(monkeypatch):
     _set_config(monkeypatch)
     monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: _FakeResponse(500))
 
-    notify.send_match_digest("u1", _MATCHES)  # must not raise
+    result = notify.send_match_digest("u1", _MATCHES)  # must not raise
+    assert result is False
+
+
+def test_send_match_digest_logs_status_and_body_on_non_2xx(monkeypatch, caplog):
+    """Confirmed real incident (2026-11-03): MATCH_DIGEST_URL returning 401
+    in production with no logged detail beyond the bare exception string —
+    this pins that the status code and response body both land in the
+    warning log, since a 401 alone gives no clue whether it's a secret
+    mismatch or the Edge Function's own JWT verification rejecting first."""
+    _set_config(monkeypatch)
+    monkeypatch.setattr(
+        notify.httpx, "post",
+        lambda *a, **k: _FakeResponse(401, text='{"error":"Invalid JWT"}'),
+    )
+
+    with caplog.at_level("WARNING"):
+        result = notify.send_match_digest("u1", _MATCHES)
+
+    assert result is False
+    [record] = caplog.records
+    assert "401" in record.message
+    assert "Invalid JWT" in record.message
 
 
 def test_send_match_digest_swallows_arbitrary_exception(monkeypatch):
@@ -78,7 +103,8 @@ def test_send_match_digest_swallows_arbitrary_exception(monkeypatch):
 
     monkeypatch.setattr(notify.httpx, "post", raising_post)
 
-    notify.send_match_digest("u1", _MATCHES)  # must not raise
+    result = notify.send_match_digest("u1", _MATCHES)  # must not raise
+    assert result is False
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +117,9 @@ def test_send_match_digest_skips_when_url_missing(monkeypatch):
     called = []
     monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: called.append(1))
 
-    notify.send_match_digest("u1", _MATCHES)
+    result = notify.send_match_digest("u1", _MATCHES)
 
+    assert result is False
     assert called == []
 
 
@@ -102,8 +129,9 @@ def test_send_match_digest_skips_when_secret_missing(monkeypatch):
     called = []
     monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: called.append(1))
 
-    notify.send_match_digest("u1", _MATCHES)
+    result = notify.send_match_digest("u1", _MATCHES)
 
+    assert result is False
     assert called == []
 
 
@@ -113,6 +141,7 @@ def test_send_match_digest_skips_when_both_missing(monkeypatch):
     called = []
     monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: called.append(1))
 
-    notify.send_match_digest("u1", _MATCHES)
+    result = notify.send_match_digest("u1", _MATCHES)
 
+    assert result is False
     assert called == []
