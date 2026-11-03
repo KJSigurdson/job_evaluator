@@ -253,6 +253,23 @@ def test_build_profile_email_on_match_null_normalises_to_false():
     assert profile["email_on_match"] is False
 
 
+def test_build_profile_loads_opportunity_types_and_open_to_part_time():
+    prow = _profile_row(opportunity_types=["job", "internship"], open_to_part_time=True)
+    profile = _build_profile(prow, _weights_row())
+    assert profile["opportunity_types"] == ["job", "internship"]
+    assert profile["open_to_part_time"] is True
+
+
+def test_build_profile_opportunity_types_defaults_to_none_when_absent():
+    """null = unanswered — gate_v2.check() relies on this being a real None,
+    not e.g. an empty list, to fall back to the global rule."""
+    prow = _profile_row()
+    assert "opportunity_types" not in prow
+    profile = _build_profile(prow, _weights_row())
+    assert profile["opportunity_types"] is None
+    assert profile["open_to_part_time"] is None
+
+
 # ---------------------------------------------------------------------------
 # _build_rubric
 # ---------------------------------------------------------------------------

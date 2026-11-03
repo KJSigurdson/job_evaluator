@@ -205,3 +205,81 @@ def test_posting_type_and_location_both_fail_categorized_as_hard_constraints(pro
     assert not result.location_pass
     assert not result.posting_type_pass
     assert result.seniority_pass
+
+
+# ---------------------------------------------------------------------------
+# posting_type — per-user profiles.opportunity_types allow-list
+# (profile["opportunity_types"], null = unanswered -> global fallback above)
+# ---------------------------------------------------------------------------
+
+def test_opportunity_types_null_is_identical_to_old_global_behaviour(profile):
+    """The fixture `profile` has no opportunity_types key at all (predates
+    this feature) -> profile.get("opportunity_types") is None -> every one
+    of this file's other posting_type tests already exercises this exact
+    path. This test just names the invariant explicitly: unanswered must
+    behave byte-for-byte like the old hardcoded rule, for every posting_type
+    value, not just a sample of them."""
+    assert profile.get("opportunity_types") is None
+    for value, should_pass in [
+        ("job", True), ("internship", True), ("fellowship", True), ("program", True),
+        ("volunteer", False), ("funding", False), ("speculative", False), (None, True),
+    ]:
+        result = check(_passable_job(posting_type=value), profile)
+        assert result.posting_type_pass is should_pass, f"{value!r} should_pass={should_pass}"
+
+
+def test_opportunity_types_set_allows_only_listed_types(profile):
+    """An allow-list is exhaustive — 'job' is NOT automatically included
+    just because it's the default; it must be explicitly listed."""
+    narrow_profile = {**profile, "opportunity_types": ["internship", "fellowship"]}
+
+    assert check(_passable_job(posting_type="internship"), narrow_profile).posting_type_pass
+    assert check(_passable_job(posting_type="fellowship"), narrow_profile).posting_type_pass
+    assert not check(_passable_job(posting_type="job"), narrow_profile).posting_type_pass
+
+
+def test_opportunity_types_excludes_job_when_not_listed(profile):
+    """Mirrors the test above from the 'job' side specifically, per the
+    task's explicit scenario list: an allow-list that omits 'job' must
+    reject a standard job posting, even though the global fallback never
+    would."""
+    no_job_profile = {**profile, "opportunity_types": ["volunteer"]}
+
+    result = check(_passable_job(posting_type="job"), no_job_profile)
+    assert not result.posting_type_pass
+    assert result.rejection_reason == "posting_type"
+
+
+def test_opportunity_types_null_posting_type_treated_as_job_in_allow_list(profile):
+    """Same null->'job' substitution as the global-fallback path, now under
+    an explicit allow-list: a job with no posting_type at all must be
+    treated exactly like posting_type='job' when checked against the
+    user's list."""
+    job_allowed_profile = {**profile, "opportunity_types": ["job"]}
+    job_not_allowed_profile = {**profile, "opportunity_types": ["volunteer"]}
+
+    assert check(_passable_job(posting_type=None), job_allowed_profile).posting_type_pass
+    assert not check(_passable_job(posting_type=None), job_not_allowed_profile).posting_type_pass
+
+
+def test_opportunity_types_volunteer_allowed_when_explicitly_selected(profile):
+    """The whole point of the feature: a type the global fallback always
+    excludes must pass once a user explicitly opts into it."""
+    volunteer_opt_in_profile = {**profile, "opportunity_types": ["job", "volunteer"]}
+
+    result = check(_passable_job(posting_type="volunteer"), volunteer_opt_in_profile)
+    assert result.posting_type_pass
+    assert result.passed
+
+
+def test_opportunity_types_rejection_reason_mentions_users_list_not_default(profile):
+    """The free-text reason must distinguish an allow-list miss from the
+    global default exclusion — the gate_rejections tally itself (by
+    rejection_reason='posting_type') is unaffected either way (see
+    match_v2.gate_survivors_with_rejections), this is purely about the
+    human-readable message not being misleading."""
+    narrow_profile = {**profile, "opportunity_types": ["job"]}
+
+    result = check(_passable_job(posting_type="volunteer"), narrow_profile)
+    assert "opportunity_types" in result.reason
+    assert "excluded by default" not in result.reason

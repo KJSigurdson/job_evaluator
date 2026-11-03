@@ -26,24 +26,27 @@ from dataclasses import dataclass
 
 from src.gate import _matches_region  # reuse verbatim, don't refork
 
-# posting_type in {volunteer, funding, speculative} is excluded by default —
-# boards mix real jobs with these opportunity types, and none belongs in a
-# "job match" list. speculative added after Animal Advocacy Careers' recon:
-# several of its listings are literal "general application"/"expression of
-# interest"/"talent pool" posts with no specific role (2 had zero description
-# text after stripping AAC's own "No description found" placeholder) — exactly
-# what the enrichment prompt's own speculative definition describes (see
-# enrich_jobs.py's posting_type prompt section), so they'd otherwise reach
-# Tier 1 scoring despite not being individual job openings. program is
-# DELIBERATELY NOT excluded yet — see enrich_jobs.py's prompt: it's a
-# structured course/accelerator/incubator, a materially different category
-# from speculative's "no specific role", and no confirmed AAC (or other
-# source) posting has been found that's actually mis-filed there.
-# None (missing, or a pre-posting_type-field enrichment row) is treated as "job"
-# — a null value here is never itself a reason to filter a posting. Per-user
-# opt-in for other types (internship/fellowship/program) is future work,
-# deliberately not built here.
-_EXCLUDED_POSTING_TYPES = frozenset({"volunteer", "funding", "speculative"})
+# GLOBAL FALLBACK posting_type rule (named _DEFAULT_EXCLUDED_POSTING_TYPES,
+# not _EXCLUDED_POSTING_TYPES, since 2026-11-04 — see _check_posting_type)
+# — applied only for a user who hasn't answered profiles.opportunity_types
+# (null = unanswered). {volunteer, funding, speculative} excluded by
+# default — boards mix real jobs with these opportunity types, and none
+# belongs in a "job match" list by default. speculative added after Animal
+# Advocacy Careers' recon: several of its listings are literal "general
+# application"/"expression of interest"/"talent pool" posts with no
+# specific role (2 had zero description text after stripping AAC's own "No
+# description found" placeholder) — exactly what the enrichment prompt's
+# own speculative definition describes (see enrich_jobs.py's posting_type
+# prompt section), so they'd otherwise reach Tier 1 scoring despite not
+# being individual job openings. program is DELIBERATELY NOT excluded by
+# default — see enrich_jobs.py's prompt: it's a structured course/
+# accelerator/incubator, a materially different category from
+# speculative's "no specific role", and no confirmed AAC (or other source)
+# posting has been found that's actually mis-filed there.
+# None (missing, or a pre-posting_type-field enrichment row) is treated as
+# "job" — a null value here is never itself a reason to filter a posting,
+# under EITHER the global fallback or a user's own explicit allow-list.
+_DEFAULT_EXCLUDED_POSTING_TYPES = frozenset({"volunteer", "funding", "speculative"})
 
 
 @dataclass
@@ -87,7 +90,8 @@ def check(job: dict, profile: dict) -> GateV2Result:
         job.get("location_field"), enrichment.get("work_arrangement") or {}, loc_constraints, profile,
     )
     seniority_pass = _check_seniority_v2(enrichment.get("seniority") or [], seniority_constraints)
-    posting_type_pass = _check_posting_type(enrichment.get("posting_type"))
+    opportunity_types = profile.get("opportunity_types")
+    posting_type_pass = _check_posting_type(enrichment.get("posting_type"), opportunity_types)
     passed = location_pass and seniority_pass and posting_type_pass
 
     if not passed:
@@ -100,7 +104,10 @@ def check(job: dict, profile: dict) -> GateV2Result:
             parts.append(f"seniority: {enrichment.get('seniority')!r} signals below threshold")
             failed_dims.append("seniority")
         if not posting_type_pass:
-            parts.append(f"posting_type: {enrichment.get('posting_type')!r} is excluded by default")
+            if opportunity_types is not None:
+                parts.append(f"posting_type: {enrichment.get('posting_type')!r} not in this user's opportunity_types {opportunity_types!r}")
+            else:
+                parts.append(f"posting_type: {enrichment.get('posting_type')!r} is excluded by default")
             failed_dims.append("posting_type")
         reason = "; ".join(parts)
         # Same "hard_constraints" bucket convention as v1's gate.py for a
@@ -121,8 +128,17 @@ def check(job: dict, profile: dict) -> GateV2Result:
     )
 
 
-def _check_posting_type(posting_type: str | None) -> bool:
-    return posting_type not in _EXCLUDED_POSTING_TYPES
+def _check_posting_type(posting_type: str | None, opportunity_types: list[str] | None) -> bool:
+    """opportunity_types is profile["opportunity_types"] (profiles.
+    opportunity_types, text[], null = unanswered) — None -> the global
+    fallback rule unchanged (_DEFAULT_EXCLUDED_POSTING_TYPES); a real list
+    -> pass only if this job's posting_type is in it. Either way, a null/
+    missing job posting_type is treated as 'job' first (same substitution
+    both paths need, so it's done once here rather than twice)."""
+    effective_type = posting_type or "job"
+    if opportunity_types is None:
+        return effective_type not in _DEFAULT_EXCLUDED_POSTING_TYPES
+    return effective_type in opportunity_types
 
 
 def _check_location_v2(location_field: str | None, work_arrangement: dict, constraints: dict, profile: dict) -> bool:

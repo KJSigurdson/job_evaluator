@@ -267,6 +267,19 @@ def _build_profile(
     "email_on_match" is the opt-in flag pipeline.py checks before sending a match-
     digest email (src/notify.py) — normalised to a strict bool so a missing/null
     column defaults to no email, not an error.
+
+    "opportunity_types" (profiles.opportunity_types, text[], PostingType vocabulary,
+    null = unanswered) and "open_to_part_time" (profiles.open_to_part_time, boolean,
+    nullable) are passed through unparsed — both are native Postgres array/boolean
+    columns, PostgREST already returns them as a plain Python list/bool (or None),
+    unlike location_rule/seniority_rule's text-holding-JSON columns above, which
+    need _parse_rule(). gate_v2.check() reads profile["opportunity_types"] directly
+    (a top-level profile key, NOT nested under hard_constraints — see gate_v2.py's
+    own docstring for why) to replace its global posting_type exclusion with this
+    user's explicit allow-list when they've answered; open_to_part_time isn't read
+    by the gate at all yet, only carried through as LLM context (same category as
+    career_goals: reaches Tier 1/Tier 2 via the wholesale profile dict dump, not
+    consumed structurally).
     """
     achievements_by_experience = achievements_by_experience or {}
     experience_text = _render_experience_text(experiences, achievements_by_experience)
@@ -282,6 +295,8 @@ def _build_profile(
         "email_on_match": bool(prow.get("email_on_match")),
         "skills": skills_text if skills_text is not None else prow.get("skills"),
         "experience_inventory": experience_text if experience_text is not None else prow.get("experience"),
+        "opportunity_types": prow.get("opportunity_types"),
+        "open_to_part_time": prow.get("open_to_part_time"),
         "hard_constraints": {
             "location": _parse_rule(wrow.get("location_rule"), user_id=wrow.get("user_id"), field="location_rule"),
             "seniority": _parse_rule(wrow.get("seniority_rule"), user_id=wrow.get("user_id"), field="seniority_rule"),
