@@ -1486,6 +1486,31 @@ def test_run_manual_mode_sets_quota_failed_on_exception(fake_client, monkeypatch
     assert quota_row["status"] == "failed"
 
 
+def test_run_manual_mode_sets_quota_failed_when_consent_not_granted(fake_client, monkeypatch):
+    """The actual gap this guards against: without this, a manual run for a
+    consent-gated-out user would fall through to the normal 'complete'
+    path (zero matches) — indistinguishable in search_quota from "we
+    processed you and found nothing", when nothing was processed at all."""
+    _seed_active_user(fake_client, consent_granted=False)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("consent-ungranted user must never reach Phase A/C")
+
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _should_not_run)
+
+    with pytest.raises(RuntimeError, match="consent"):
+        run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    [quota_row] = fake_client.table("search_quota").rows
+    assert quota_row["status"] == "failed"
+    [run_row] = fake_client.table("pipeline_runs").rows
+    assert run_row["status"] == "failed"
+
+
 def test_run_scheduled_mode_never_touches_quota(fake_client, monkeypatch):
     _seed_active_user(fake_client)
     _patch_full_pipeline_noops(monkeypatch)

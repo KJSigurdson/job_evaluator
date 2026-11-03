@@ -787,6 +787,17 @@ def run(
                 skipped_for_consent, _REQUIRED_CONSENT_KEY,
             )
 
+        # Manual/single-user mode: the one user fetch_users() found just got
+        # filtered out above — without this, search_quota would otherwise be
+        # left at 'complete' (zero matches, same as a real run that found
+        # nothing) by the finally block below, indistinguishable from "we
+        # processed you and found no matches" when nothing was actually
+        # processed at all. Mirrors the "no profile+scoring_weights row"
+        # RuntimeError just above this block — same track_quota/except
+        # handling, distinct message so logs show the real cause.
+        if track_quota and not users:
+            raise RuntimeError(f"only_user_id={only_user_id}: consent not granted for '{_REQUIRED_CONSENT_KEY}'")
+
         if only_user_id is not None and not dry_run and users:
             profile_embed_result = backfill_profile_embeddings(client, only_user_id=only_user_id)
             log.info("Profile embed refresh (single user): %s", profile_embed_result)
