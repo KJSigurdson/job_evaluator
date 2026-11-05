@@ -7,6 +7,14 @@
 # (compare-and-swap on batch_submissions.status), so at most one of them is
 # ever actually polling/applying a given batch at a time — see
 # src/batch_poll.py's module docstring for the full rationale.
+#
+# 2026-11-05: after a drain pass, src/drain_batches.py may now trigger a
+# continuation run of daily.yml (`gh workflow run daily.yml -f
+# mode=continue`) — see that module's _should_trigger_continuation. `actions:
+# write` below is required for the gh CLI (authenticated via GH_TOKEN, set in
+# the step env) to be allowed to dispatch another workflow; `contents: read`
+# is kept explicit alongside it since actions/checkout needs it and declaring
+# ANY permissions key switches this job off the repo's broad default set.
 
 name: Drain pending batches
 
@@ -14,6 +22,10 @@ on:
   schedule:
     - cron: "15 * * * *"   # hourly, offset from daily.yml's 06:00 UTC run
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: write
 
 concurrency:
   group: ${{ github.workflow }}
@@ -47,4 +59,5 @@ jobs:
           SUPABASE_URL:               ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY:  ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           VOYAGE_API_KEY:             ${{ secrets.VOYAGE_API_KEY }}
+          GH_TOKEN:                   ${{ secrets.GITHUB_TOKEN }}
         run: python -m src.drain_batches

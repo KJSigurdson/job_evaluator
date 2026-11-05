@@ -7,6 +7,8 @@ drain() calls them correctly (right modules, right order, right args) and
 never raises."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from src import drain_batches
 from src.batch_poll import BatchOutcome
 
@@ -152,3 +154,263 @@ def test_drain_never_submits_new_work(monkeypatch):
     drain_batches.drain(client=client, anthropic_client=object())
 
     assert seen_requests == [None] * len(_ALL_MODULES)
+
+
+# ---------------------------------------------------------------------------
+# Drainer-triggered continuation runs (2026-11-05)
+# ---------------------------------------------------------------------------
+
+class _FakeBatch:
+    def __init__(self, processing_status):
+        self.processing_status = processing_status
+
+
+class _FakeBatchesAPI:
+    def __init__(self, statuses_by_id: dict[str, str]):
+        self._statuses_by_id = statuses_by_id
+        self.retrieved_ids: list[str] = []
+
+    def retrieve(self, batch_id):
+        self.retrieved_ids.append(batch_id)
+        return _FakeBatch(self._statuses_by_id.get(batch_id, "in_progress"))
+
+
+class _FakeMessagesAPI:
+    def __init__(self, batches_api):
+        self.batches = batches_api
+
+
+class _FakeAnthropicClient:
+    def __init__(self, statuses_by_id: dict[str, str] | None = None):
+        self.messages = _FakeMessagesAPI(_FakeBatchesAPI(statuses_by_id or {}))
+
+
+def _daily_run_row(*, status, started_at, trigger="scheduled", is_continuation=False, run_id="r1"):
+    return {"run_id": run_id, "status": status, "trigger": trigger, "started_at": started_at, "is_continuation": is_continuation}
+
+
+def test_should_trigger_continuation_false_when_no_daily_run_exists(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is False
+    assert "missing" in reason
+
+
+def test_should_trigger_continuation_false_when_latest_is_complete(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="complete", started_at="2026-11-05T06:17:00+00:00")])
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is False
+    assert "complete" in reason
+
+
+def test_should_trigger_continuation_ignores_drains_own_bookkeeping_rows(monkeypatch):
+    """drain()'s own trigger='drain' rows (_open_drain_run) must never be
+    mistaken for 'the latest daily run' or 'a daily run is running' — a
+    drain cycle's own just-opened 'running' row would otherwise poison
+    every single decision, since _open_drain_run runs before this check."""
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [
+        _daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00", run_id="daily-1"),
+        _daily_run_row(status="running", started_at="2026-11-05T07:15:00+00:00", trigger="drain", run_id="drain-1"),
+    ])
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is True, reason
+
+
+def test_should_trigger_continuation_false_when_a_daily_run_is_running(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [
+        _daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00", run_id="daily-1"),
+        _daily_run_row(status="running", started_at="2026-11-05T07:00:00+00:00", trigger="manual", run_id="daily-2"),
+    ])
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is False
+    assert "running" in reason
+
+
+def test_should_trigger_continuation_false_when_daily_cap_reached(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    rows = [_daily_run_row(status="incomplete", started_at=today, run_id="daily-0")]
+    for i in range(3):
+        rows.append(_daily_run_row(status="complete", started_at=today, is_continuation=True, run_id=f"cont-{i}"))
+    client.seed("pipeline_runs", rows)
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is False
+    assert "cap" in reason
+
+
+def test_should_trigger_continuation_under_cap_still_triggers(monkeypatch):
+    """Sibling of the cap test above — 2 continuations today (under the
+    cap of 3) must still allow triggering, proving the cap boundary
+    itself (>=3, not >3) is right."""
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+    rows = [_daily_run_row(status="incomplete", started_at=today, run_id="daily-0")]
+    for i in range(2):
+        rows.append(_daily_run_row(status="complete", started_at=today, is_continuation=True, run_id=f"cont-{i}"))
+    client.seed("pipeline_runs", rows)
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is True, reason
+
+
+def test_should_trigger_continuation_true_when_drained_any(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+
+    should, reason = drain_batches._should_trigger_continuation(client, _FakeAnthropicClient(), drained_any=True)
+
+    assert should is True
+    assert "retrieved" in reason
+
+
+def test_should_trigger_continuation_true_when_tier2_batch_ended_status_only(monkeypatch):
+    """Confirms this is a STATUS-ONLY lookup — only .retrieve() is called,
+    never .results(), and nothing gets applied as a side effect of this
+    check."""
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+    client.seed("batch_submissions", [
+        {"batch_id": "msgbatch_t2", "module": "tier2_enrich", "status": "submitted"},
+    ])
+    anthropic_client = _FakeAnthropicClient({"msgbatch_t2": "ended"})
+
+    should, reason = drain_batches._should_trigger_continuation(client, anthropic_client, drained_any=False)
+
+    assert should is True
+    assert "tier2" in reason
+    assert anthropic_client.messages.batches.retrieved_ids == ["msgbatch_t2"]
+
+
+def test_should_trigger_continuation_false_when_tier2_batch_still_in_progress(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+    client.seed("batch_submissions", [
+        {"batch_id": "msgbatch_t2", "module": "tier2_enrich", "status": "submitted"},
+    ])
+    anthropic_client = _FakeAnthropicClient({"msgbatch_t2": "in_progress"})
+
+    should, reason = drain_batches._should_trigger_continuation(client, anthropic_client, drained_any=False)
+
+    assert should is False
+    assert "nothing" in reason
+
+
+def test_should_trigger_continuation_checks_tier2_retry_module_too(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+    client.seed("batch_submissions", [
+        {"batch_id": "msgbatch_t2r", "module": "tier2_enrich_retry", "status": "claimed"},
+    ])
+    anthropic_client = _FakeAnthropicClient({"msgbatch_t2r": "ended"})
+
+    should, reason = drain_batches._should_trigger_continuation(client, anthropic_client, drained_any=False)
+
+    assert should is True
+
+
+def test_drain_triggers_continuation_run_when_something_applied(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+
+    def _fake_resume(anthropic_client, client_, *, module, requests, budget_seconds):
+        if module == "enrich_jobs":
+            return BatchOutcome(status="ended", batch_id="batch_1", results={"job-1": {"type": "succeeded"}})
+        return BatchOutcome(status="idle", batch_id=None)
+
+    monkeypatch.setattr(drain_batches, "resume_or_submit", _fake_resume)
+    monkeypatch.setattr(drain_batches, "_apply_enrich_jobs", lambda *a, **k: {"enriched": 1})
+    triggered_calls = []
+    monkeypatch.setattr(drain_batches, "_trigger_continuation_run", lambda: (triggered_calls.append(1), True)[1])
+
+    drain_batches.drain(client=client, anthropic_client=_FakeAnthropicClient())
+
+    assert triggered_calls == [1]
+
+
+def test_drain_skips_continuation_trigger_when_latest_run_complete(monkeypatch):
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="complete", started_at="2026-11-05T06:17:00+00:00")])
+    monkeypatch.setattr(drain_batches, "resume_or_submit", lambda *a, **k: BatchOutcome(status="idle", batch_id=None))
+
+    def _should_not_trigger():
+        raise AssertionError("must not trigger when the latest daily run is already complete")
+
+    monkeypatch.setattr(drain_batches, "_trigger_continuation_run", _should_not_trigger)
+
+    drain_batches.drain(client=client, anthropic_client=_FakeAnthropicClient())
+    # no assertion needed beyond "did not raise" — _should_not_trigger would have
+
+
+def test_drain_continuation_trigger_failure_does_not_fail_drain_cycle(monkeypatch):
+    """A failure deciding/triggering continuation must be isolated — the
+    drain cycle itself (which already succeeded) must still report
+    'complete', not 'failed'."""
+    from tests.conftest import FakeSupabaseClient
+    client = FakeSupabaseClient()
+    client.seed("pipeline_runs", [_daily_run_row(status="incomplete", started_at="2026-11-05T06:17:00+00:00")])
+    monkeypatch.setattr(drain_batches, "resume_or_submit", lambda *a, **k: BatchOutcome(status="idle", batch_id=None))
+
+    def _boom(*a, **k):
+        raise RuntimeError("gh CLI exploded")
+
+    monkeypatch.setattr(drain_batches, "_should_trigger_continuation", _boom)
+
+    result = drain_batches.drain(client=client, anthropic_client=_FakeAnthropicClient())
+
+    assert result["applied"] == {}
+    [drain_row] = [r for r in client.table("pipeline_runs").rows if r["run_id"] == result["run_id"]]
+    assert drain_row["status"] == "complete"  # the drain cycle itself, not the trigger decision
+
+
+def test_trigger_continuation_run_invokes_gh_cli(monkeypatch):
+    calls = []
+
+    class _FakeCompletedProcess:
+        returncode = 0
+        stderr = ""
+
+    def _fake_run(args, **kwargs):
+        calls.append(args)
+        return _FakeCompletedProcess()
+
+    monkeypatch.setattr(drain_batches.subprocess, "run", _fake_run)
+
+    assert drain_batches._trigger_continuation_run() is True
+    [args] = calls
+    assert args == ["gh", "workflow", "run", "daily.yml", "-f", "mode=continue"]
+
+
+def test_trigger_continuation_run_false_on_nonzero_exit(monkeypatch):
+    class _FakeCompletedProcess:
+        returncode = 1
+        stderr = "HTTP 404: Not Found"
+
+    monkeypatch.setattr(drain_batches.subprocess, "run", lambda *a, **k: _FakeCompletedProcess())
+
+    assert drain_batches._trigger_continuation_run() is False

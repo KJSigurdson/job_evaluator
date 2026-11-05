@@ -916,6 +916,77 @@ def test_finish_user_matching_tier2_pending_defers_digest(fake_client, monkeypat
 
     result = _finish_user_matching(fake_client, object(), user, prep, dry_run=False)
     assert result["notified"] is False
+    assert result["tier2_pending"] is True  # 2026-11-05: run() aggregates this into run_outcome
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 pending -> run_outcome='incomplete' (2026-11-05) — other users
+# still complete normally; only the run-level status is affected.
+# ---------------------------------------------------------------------------
+
+def test_run_tier2_pending_for_one_user_marks_run_incomplete_others_still_processed(fake_client, monkeypatch):
+    _seed_active_user(fake_client, consent_granted=True)  # u1
+    fake_client.seed("profiles", [_profile_row(user_id="u2")])
+    fake_client.seed("scoring_weights", [_weights_row(user_id="u2")])
+    fake_client.seed("user_consents", [{
+        "user_id": "u2", "consent_key": "data_storage", "granted": True, "created_at": "2026-01-01T00:00:00+00:00",
+    }])
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda client, user, jobs_pool, **k: _prep(user.user_id))
+    processed_users = []
+
+    def _fake_finish(client, anthropic_client, user, prep, **k):
+        processed_users.append(user.user_id)
+        if user.user_id == "u1":
+            return {"user_id": "u1", "tier1_scored": 1, "tier2_enriched": 0, "notified": False, "tier2_pending": True}
+        return {"user_id": "u2", "tier1_scored": 1, "tier2_enriched": 1, "notified": True}
+
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", _fake_finish)
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert set(processed_users) == {"u1", "u2"}  # u2 was NOT blocked by u1's pending Tier 2
+    assert result["status"] == "incomplete"
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["status"] == "incomplete"
+
+
+def test_run_no_tier2_pending_marks_run_complete(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    result = run(_client=fake_client, _anthropic_client=object())
+
+    assert result["status"] == "complete"
+
+
+def test_run_manual_mode_tier2_pending_sets_quota_failed_not_complete_or_stuck_running(fake_client, monkeypatch):
+    """The actual bug this guards against: without the dedicated
+    run_outcome=='incomplete' branch in the finally block, search_quota
+    would never be updated past 'running' (the 'complete' branch only
+    fires on run_outcome=='complete') — leaving the app spinning forever
+    on a search that's actually done-for-now."""
+    _seed_active_user(fake_client)
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep())
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [_candidate()])
+    monkeypatch.setattr(pipeline_v2, "run_tier2_enrich", lambda *a, **k: {
+        "status": "pending", "batch_id": "batch_x", "considered": 1, "enriched": 0,
+        "skipped_below_threshold": 0, "failed": 0,
+    })
+
+    result = run(only_user_id="u1", _client=fake_client, _anthropic_client=object())
+
+    assert result["status"] == "incomplete"
+    [quota_row] = fake_client.table("search_quota").rows
+    assert quota_row["status"] == "failed"
+    assert quota_row["status"] != "running"
+    assert quota_row["status"] != "complete"
 
 
 # ---------------------------------------------------------------------------
@@ -1140,6 +1211,65 @@ def test_run_scheduled_mode_calls_adapters_ingest_enrich_embed(fake_client, monk
     run(_client=fake_client, _anthropic_client=object())
 
     assert calls == ["adapter", "ingest", "enrich", "embed"]
+
+
+# ---------------------------------------------------------------------------
+# skip_fetch (continuation runs, daily.yml mode=continue) — 2026-11-05
+# ---------------------------------------------------------------------------
+
+def test_run_skip_fetch_never_calls_adapters_ingest_close_jobs(fake_client, monkeypatch):
+    """The whole point of a continuation run: skip adapters/ingest/
+    close_jobs entirely, but still run enrich_jobs()/
+    backfill_profile_embeddings() and the normal matching path."""
+    _seed_active_user(fake_client)
+    calls = []
+
+    def _should_not_run(*a, **k):
+        raise AssertionError("skip_fetch=True must never call this")
+
+    monkeypatch.setattr(pipeline_v2, "_ADAPTERS", [type("_BoomAdapter", (), {
+        "source_board": "boom", "fetch": lambda self: _should_not_run(),
+    })])
+    monkeypatch.setattr(pipeline_v2, "run_ingest", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "close_jobs", _should_not_run)
+    monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: (
+        calls.append("enrich"), {"selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True})[1])
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: (
+        calls.append("embed"), {"selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0})[1])
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    result = run(skip_fetch=True, _client=fake_client, _anthropic_client=object())
+
+    assert calls == ["enrich", "embed"]
+    assert result["ingest"] is None  # never ran — stays at its initialized None
+
+
+def test_run_skip_fetch_stamps_is_continuation_true(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: {
+        "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
+    })
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 0, "embedded": 0, "skipped_unchanged": 0, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "_prepare_tier1_request", lambda *a, **k: _prep(skipped="test"))
+    monkeypatch.setattr(pipeline_v2, "_finish_user_matching", lambda *a, **k: {"user_id": "u1", "skipped": "test"})
+
+    run(skip_fetch=True, _client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["is_continuation"] is True
+
+
+def test_run_normal_mode_stamps_is_continuation_false(fake_client, monkeypatch):
+    _seed_active_user(fake_client)
+    _patch_full_pipeline_noops(monkeypatch)
+
+    run(_client=fake_client, _anthropic_client=object())
+
+    [row] = fake_client.table("pipeline_runs").rows
+    assert row["is_continuation"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -1547,6 +1677,47 @@ def test_run_full_arm_includes_why_fits_end_to_end(fake_client, monkeypatch):
 
     [payload] = sent_payloads
     assert payload[0]["why_fits"] == "- Great fit"
+
+
+def test_run_skip_fetch_does_not_resend_already_notified_matches(fake_client, monkeypatch):
+    """Continuation runs use the exact same _send_queued_digest path as any
+    other run — an already-notified_at match must stay excluded, same as
+    it always has been (see the notified_at-IS-NULL queue design)."""
+    _seed_active_user(fake_client, profile_embedding="[0.1]")
+    fake_client.seed("jobs", [_job("job-already-sent"), _job("job-new")])
+    fake_client.seed("matches_v2", [
+        {
+            "id": "m-already-sent", "user_id": "u1", "job_id": "job-already-sent", "tier1_score": 80,
+            "tier2": {"why_fits": "- old"}, "created_at": "2026-11-01T00:00:00+00:00",
+            "notified_at": "2026-11-01T00:05:00+00:00",
+        },
+        {
+            "id": "m-new", "user_id": "u1", "job_id": "job-new", "tier1_score": 80,
+            "tier2": {"why_fits": "- new"}, "created_at": "2026-11-04T00:00:00+00:00", "notified_at": None,
+        },
+    ])
+    monkeypatch.setattr(pipeline_v2, "run_enrich_jobs", lambda **k: {
+        "selected": 0, "enriched": 0, "stale": 0, "embeddings_skipped": True,
+    })
+    monkeypatch.setattr(pipeline_v2, "backfill_profile_embeddings", lambda *a, **k: {
+        "selected": 1, "embedded": 0, "skipped_unchanged": 1, "skipped_empty": 0,
+    })
+    monkeypatch.setattr(pipeline_v2, "gate_survivors_with_rejections", lambda jobs, profile: ([], {}))
+    monkeypatch.setattr(pipeline_v2, "rerank_tier1_batch", lambda *a, **k: {"status": "complete", "scored": 0, "failed": 0})
+    monkeypatch.setattr(pipeline_v2, "fetch_tier2_candidates", lambda *a, **k: [])
+    sent_payloads = []
+    monkeypatch.setattr(
+        pipeline_v2, "send_match_digest",
+        lambda user_id, matches: (sent_payloads.append(matches), True)[1],
+    )
+
+    run(skip_fetch=True, _client=fake_client, _anthropic_client=object())
+
+    [payload] = sent_payloads
+    assert [m["url"] for m in payload] == ["https://example.org/job-new"]
+    rows_by_id = {r["id"]: r for r in fake_client.table("matches_v2").rows}
+    assert rows_by_id["m-already-sent"]["notified_at"] == "2026-11-01T00:05:00+00:00"  # untouched
+    assert rows_by_id["m-new"]["notified_at"] is not None  # now stamped
 
 
 def test_run_manual_mode_sets_quota_running_then_complete(fake_client, monkeypatch):

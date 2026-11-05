@@ -183,7 +183,7 @@ def _raise_if_source_unhealthy(broken_sources: list[str]) -> None:
         )
 
 
-def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool) -> None:
+def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool, is_continuation: bool = False) -> None:
     """Insert the `pipeline_runs` parent row for *run_id* — MUST happen before
     any run_metrics write this run makes (ingest/enrich/tier1/tier2/match all
     stamp run_metrics.run_id with this same run_id), because run_metrics.run_id
@@ -212,6 +212,7 @@ def _open_pipeline_run(client, *, run_id: str, trigger: str, dry_run: bool) -> N
         "status": "running",
         "started_at": datetime.now(timezone.utc).isoformat(),
         "trigger": trigger,
+        "is_continuation": is_continuation,
     }).execute()
 
 
@@ -604,8 +605,20 @@ def _finish_user_matching(
         # (each user's Tier 2 batch is independent, unlike Tier 1's single
         # shared submission). Whatever round 1 already committed for this
         # user is real; just skip the digest for now, resume next run.
+        #
+        # tier2_pending=True (2026-11-05): run() aggregates this across every
+        # user and marks the WHOLE run 'incomplete' if any user hit it — this
+        # one user's pending batch used to be completely invisible (the
+        # overall run still reported 'complete' even though a real batch was
+        # left unresolved with no automatic retriever — see
+        # drain_batches.py's _DRAIN_MODULES, which has never covered
+        # tier2_enrich). Other users still complete normally; this flag only
+        # affects the run-level status, never blocks the loop.
         log.info("User %s: Tier 2 pending (batch %s) — digest deferred to next run", user.user_id, tier2_result.get("batch_id"))
-        return {**base_result, "tier1_scored": tier1_scored, "tier2_enriched": tier2_result["enriched"], "notified": False}
+        return {
+            **base_result, "tier1_scored": tier1_scored, "tier2_enriched": tier2_result["enriched"],
+            "notified": False, "tier2_pending": True,
+        }
 
     return {
         **base_result, "tier1_scored": tier1_scored,
@@ -652,22 +665,36 @@ def _fetch_consented_user_ids(client, user_ids: list[str]) -> set[str]:
 
 
 def run(
-    *, dry_run: bool = False, only_user_id: str | None = None,
+    *, dry_run: bool = False, only_user_id: str | None = None, skip_fetch: bool = False,
     _client=None, _anthropic_client=None,
 ) -> dict:
     """Run the v2 pipeline. only_user_id=None is the scheduled/cron full
     pipeline; only_user_id=X is the manual DB-only single-user path (see
     module docstring for both). Returns a summary dict for reporting.
+
+    skip_fetch (only_user_id=None mode only — manual mode already skips
+    fetch/ingest unconditionally): a CONTINUATION run — daily.yml's
+    `mode=continue` dispatch input, see 2026-11-05's drainer-triggered-
+    continuation feature. Skips adapters/ingest/close_jobs (step 1/1b)
+    ONLY — enrich_jobs() and the bulk backfill_profile_embeddings() (steps
+    2-3) still run, so a batch drain_batches.py just retrieved (or one
+    that resolved on its own since the last run's poll budget ran out)
+    gets applied and matching proceeds for every active user, without
+    waiting for tomorrow's fresh scrape. Also stamps
+    pipeline_runs.is_continuation (see _open_pipeline_run) — the only
+    place that provenance flag is set.
     """
     client = _client if _client is not None else get_client()
     anthropic_client = _anthropic_client if _anthropic_client is not None else anthropic.Anthropic()
     track_quota = only_user_id is not None and not dry_run
     # Pessimistic by default, upgraded only once we're sure — matches v1's
-    # src/pipeline.py's run_status convention. 'incomplete' (distinct from
-    # 'failed') is reached only when enrichment itself returns 'pending' (its
-    # Batches API poll budget was exhausted, not an error) — see the pending
-    # gate below. only_user_id mode can never reach 'incomplete': it skips
-    # enrichment entirely (steps 1-3 below only run when only_user_id is None).
+    # src/pipeline.py's run_status convention. 'incomplete' is reached when
+    # enrichment or Tier 1 returns 'pending' (Batches API poll budget
+    # exhausted, not an error — see the pending gates below), OR when any
+    # user's Tier 2 is left pending (see the per-user loop) — only_user_id
+    # mode can reach 'incomplete' via the Tier 2 case now too (2026-11-05),
+    # though it still skips enrichment/Tier 1's pending gates entirely
+    # (steps 1-3 below only run when only_user_id is None).
     run_outcome = "failed"
     user_results: list[dict] = []  # defined before try/finally — _close_pipeline_run
                                     # in finally needs this even if we never reach the
@@ -682,7 +709,7 @@ def run(
         # MUST happen before anything writes run_metrics — every stage below
         # (ingest/enrich/tier1/tier2/match) stamps run_metrics.run_id with this
         # same run_id, and that column is a foreign key to pipeline_runs.run_id.
-        _open_pipeline_run(client, run_id=run_id, trigger=trigger, dry_run=dry_run)
+        _open_pipeline_run(client, run_id=run_id, trigger=trigger, dry_run=dry_run, is_continuation=skip_fetch)
 
         if track_quota:
             set_status(client, only_user_id, "running")
@@ -695,69 +722,70 @@ def run(
         # blocks ingest/enrich/matching for a healthy one or an active user.
         source_health_broken: list[str] = []
         if only_user_id is None:
-            active_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if enabled]
-            skipped_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if not enabled]
-            log.info("Adapters active: %s | skipped (disabled): %s", active_names, skipped_names)
+            if not skip_fetch:
+                active_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if enabled]
+                skipped_names = [cls.__name__ for cls, enabled in _ADAPTER_REGISTRY if not enabled]
+                log.info("Adapters active: %s | skipped (disabled): %s", active_names, skipped_names)
 
-            postings = []
-            fetch_log_rows = []
-            for adapter_cls in _ADAPTERS:
-                adapter = adapter_cls()
-                fetched_at = datetime.now(timezone.utc).isoformat()
-                try:
-                    result = adapter.fetch()
-                    postings.extend(result.postings)
-                    fetch_log_rows.append({
-                        "run_id": run_id, "source_board": adapter.source_board,
-                        "fetched": result.fetched, "nb_hits": result.nb_hits,
-                        "complete": result.complete, "fetched_at": fetched_at,
-                    })
-                    log.info(
-                        "Adapter %s fetched %d posting(s) (fetched=%d, nb_hits=%s, complete=%s)",
-                        adapter_cls.__name__, len(result.postings), result.fetched, result.nb_hits, result.complete,
+                postings = []
+                fetch_log_rows = []
+                for adapter_cls in _ADAPTERS:
+                    adapter = adapter_cls()
+                    fetched_at = datetime.now(timezone.utc).isoformat()
+                    try:
+                        result = adapter.fetch()
+                        postings.extend(result.postings)
+                        fetch_log_rows.append({
+                            "run_id": run_id, "source_board": adapter.source_board,
+                            "fetched": result.fetched, "nb_hits": result.nb_hits,
+                            "complete": result.complete, "fetched_at": fetched_at,
+                        })
+                        log.info(
+                            "Adapter %s fetched %d posting(s) (fetched=%d, nb_hits=%s, complete=%s)",
+                            adapter_cls.__name__, len(result.postings), result.fetched, result.nb_hits, result.complete,
+                        )
+                    except Exception:
+                        log.exception("Adapter %s failed to fetch — skipping this source", adapter_cls.__name__)
+                        fetch_log_rows.append({
+                            "run_id": run_id, "source_board": adapter.source_board,
+                            "fetched": 0, "nb_hits": None, "complete": False, "fetched_at": fetched_at,
+                        })
+
+                # source_fetch_log row per adapter per run, even on failure (see
+                # FetchResult's docstring) — written here, not inside ingest.py,
+                # since fetch-completeness is a property of the ADAPTER call, not
+                # of ingest()'s dedup step. Skipped in dry_run, same convention as
+                # every other write in this module.
+                if fetch_log_rows and not dry_run:
+                    client.table("source_fetch_log").insert(fetch_log_rows).execute()
+                    # Computed here (so "2 consecutive" includes the row just
+                    # inserted above) but NOT acted on yet — see
+                    # _raise_if_source_unhealthy()'s call sites below, all of
+                    # which come after ingest/enrich/matching/digest. Skipped
+                    # entirely in dry_run (no row was written this run to check
+                    # against).
+                    source_health_broken = _check_source_fetch_health(client, [cls.source_board for cls in _ADAPTERS])
+
+                ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
+                ingest_counts = ingest_counts_obj.as_dict()
+                log.info("Ingest: %s", ingest_counts)
+
+                if not dry_run:
+                    # complete_sources: derived from fetch_log_rows directly —
+                    # "this run's fetch was complete", not a historical
+                    # source_fetch_log query (see src.closure.plan_closures's
+                    # docstring on why that distinction matters for rule (a)).
+                    complete_sources = frozenset(r["source_board"] for r in fetch_log_rows if r["complete"])
+                    # disabled_boards: every registry entry NOT enabled (IAP,
+                    # today) — see closure.compute_closure_health()'s docstring
+                    # for why its jobs are reported separately from the
+                    # actionable closure-health signal, not folded into it.
+                    disabled_boards = frozenset(cls.source_board for cls, enabled in _ADAPTER_REGISTRY if not enabled)
+                    closure_result = close_jobs(
+                        client, complete_sources=complete_sources, disabled_boards=disabled_boards,
+                        run_id=run_id, trigger=trigger,
                     )
-                except Exception:
-                    log.exception("Adapter %s failed to fetch — skipping this source", adapter_cls.__name__)
-                    fetch_log_rows.append({
-                        "run_id": run_id, "source_board": adapter.source_board,
-                        "fetched": 0, "nb_hits": None, "complete": False, "fetched_at": fetched_at,
-                    })
-
-            # source_fetch_log row per adapter per run, even on failure (see
-            # FetchResult's docstring) — written here, not inside ingest.py,
-            # since fetch-completeness is a property of the ADAPTER call, not
-            # of ingest()'s dedup step. Skipped in dry_run, same convention as
-            # every other write in this module.
-            if fetch_log_rows and not dry_run:
-                client.table("source_fetch_log").insert(fetch_log_rows).execute()
-                # Computed here (so "2 consecutive" includes the row just
-                # inserted above) but NOT acted on yet — see
-                # _raise_if_source_unhealthy()'s call sites below, all of
-                # which come after ingest/enrich/matching/digest. Skipped
-                # entirely in dry_run (no row was written this run to check
-                # against).
-                source_health_broken = _check_source_fetch_health(client, [cls.source_board for cls in _ADAPTERS])
-
-            ingest_counts_obj = run_ingest(postings, client=client, dry_run=dry_run, run_id=run_id, trigger=trigger)
-            ingest_counts = ingest_counts_obj.as_dict()
-            log.info("Ingest: %s", ingest_counts)
-
-            if not dry_run:
-                # complete_sources: derived from fetch_log_rows directly —
-                # "this run's fetch was complete", not a historical
-                # source_fetch_log query (see src.closure.plan_closures's
-                # docstring on why that distinction matters for rule (a)).
-                complete_sources = frozenset(r["source_board"] for r in fetch_log_rows if r["complete"])
-                # disabled_boards: every registry entry NOT enabled (IAP,
-                # today) — see closure.compute_closure_health()'s docstring
-                # for why its jobs are reported separately from the
-                # actionable closure-health signal, not folded into it.
-                disabled_boards = frozenset(cls.source_board for cls, enabled in _ADAPTER_REGISTRY if not enabled)
-                closure_result = close_jobs(
-                    client, complete_sources=complete_sources, disabled_boards=disabled_boards,
-                    run_id=run_id, trigger=trigger,
-                )
-                log.info("Closure: %s", closure_result)
+                    log.info("Closure: %s", closure_result)
 
             enrich_result = run_enrich_jobs(
                 client=client, anthropic_client=anthropic_client, dry_run=dry_run,
@@ -892,12 +920,15 @@ def run(
         arms_by_user = _fetch_experiment_arms(
             client, [user.user_id for user in users], _APPLICATION_SUPPORT_EXPERIMENT,
         )
+        any_tier2_pending = False
         for user in users:
             result = _finish_user_matching(
                 client, anthropic_client, user, prep_by_user[user.user_id],
                 dry_run=dry_run, run_id=run_id, trigger=trigger,
                 arm=arms_by_user.get(user.user_id, _FULL_ARM),
             )
+            if result.get("tier2_pending"):
+                any_tier2_pending = True
             log.info("User %s: %s", user.user_id, result)
             user_results.append(result)
 
@@ -919,8 +950,15 @@ def run(
         # ALL already run for every healthy source and active user — does a
         # broken source actually fail the step.
         _raise_if_source_unhealthy(source_health_broken)
-        run_outcome = "complete"
-        return {"ingest": ingest_counts, "enrich": enrich_result, "users": user_results}
+        # any_tier2_pending: at least one user's own Tier 2 batch didn't
+        # finish within budget (see _finish_user_matching) — every OTHER
+        # user still completed normally (nothing in the loop above was
+        # skipped or blocked by this), but the run as a whole isn't done:
+        # a real, unresolved batch exists with no automatic retriever (see
+        # drain_batches.py — tier2_enrich is deliberately not one of its
+        # drained modules), so this must be visible, not silently 'complete'.
+        run_outcome = "incomplete" if any_tier2_pending else "complete"
+        return {"ingest": ingest_counts, "enrich": enrich_result, "users": user_results, "status": run_outcome}
 
     except Exception:
         if track_quota:
@@ -929,6 +967,26 @@ def run(
     finally:
         if track_quota and run_outcome == "complete":
             set_status(client, only_user_id, "complete", completed=True)
+        elif track_quota and run_outcome == "incomplete":
+            # Manual mode's one user hit a pending Tier 2 batch (see
+            # any_tier2_pending above) — track_quota was already set to
+            # 'running' at the top of this function, and without this
+            # branch it would NEVER be updated again (the 'complete' branch
+            # above only fires on run_outcome == 'complete'), leaving the
+            # app spinning on a search that's actually done-for-now.
+            # quota_store._VALID_STATUSES has no 'incomplete'/'pending'
+            # value — {not_started, queued, running, complete, failed} is
+            # the fixed vocabulary — so 'failed' is the nearest honest
+            # terminal state available: not a lie ('complete' would claim
+            # Tier 2/digest finished when they didn't), and it stops the
+            # spinner rather than leaving 'running' forever (manual mode has
+            # no automatic continuation — unlike the scheduled path, nothing
+            # will retry this for the user; re-running --only-user-id
+            # resumes the exact same outstanding batch via resume_or_submit,
+            # which is the retry path a 'failed' status should prompt).
+            # Flagged explicitly: this is a judgment call given the fixed
+            # vocabulary, not a perfect semantic fit.
+            set_status(client, only_user_id, "failed")
         _close_pipeline_run(
             client, run_id=run_id, status=run_outcome,
             user_count=len(user_results), dry_run=dry_run,
@@ -958,10 +1016,15 @@ if __name__ == "__main__":
         "--only-user-id", type=str, default=None, metavar="ID",
         help="Manual DB-only path: match+notify a single user, no scraping/enrichment; writes search_quota",
     )
+    parser.add_argument(
+        "--skip-fetch", action="store_true",
+        help="Continuation run (daily.yml mode=continue): skip adapters/ingest/close_jobs, "
+             "still apply any resolved enrich/Tier 1 batch and run matching->Tier 1->Tier 2->digest",
+    )
     args = parser.parse_args()
 
     from dotenv import load_dotenv
     load_dotenv()
 
-    result = run(dry_run=args.dry_run, only_user_id=args.only_user_id)
+    result = run(dry_run=args.dry_run, only_user_id=args.only_user_id, skip_fetch=args.skip_fetch)
     print(json.dumps(result, indent=2, default=str))

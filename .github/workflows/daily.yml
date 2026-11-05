@@ -1,6 +1,7 @@
 # EA Job Evaluator — daily pipeline (multi-user)
 #
-# Runs automatically at 06:00 UTC every day.
+# Runs automatically at 06:17 UTC every day (deliberately an odd minute, not
+# :00 — see "cron" below).
 #
 # True North v2 (src/pipeline_v2.py) is now the ACTIVE matching + digest-email
 # path — see the "Run pipeline v2" step below. v1 (src/pipeline.py, the
@@ -25,12 +26,28 @@
 #                             trigger path — no scraping/enrichment/embedding, just
 #                             gate→vector→Tier1→Tier2→digest for that one user
 #                             against already-enriched jobs (~$0.03/run).
+#   mode          = normal   →  the usual full run (fetch+ingest+close_jobs+
+#                             enrich+embed+match+digest).
+#   mode          = continue →  CONTINUATION run (--skip-fetch): skips
+#                             adapters/ingest/close_jobs entirely; still runs
+#                             enrich_jobs()/backfill_profile_embeddings() (so a
+#                             batch that resolved since the last run's poll
+#                             budget ran out gets applied) and the normal
+#                             match→Tier 1→Tier 2→digest path for every active
+#                             user. Normally triggered automatically by
+#                             src/drain_batches.py (`gh workflow run daily.yml
+#                             -f mode=continue`) after an 'incomplete' run, not
+#                             by hand — see that module for the exact
+#                             trigger/cap/running-guard conditions. Stamps
+#                             pipeline_runs.is_continuation=true.
 
 name: Daily pipeline
 
 on:
   schedule:
-    - cron: "0 6 * * *"   # 06:00 UTC — off-peak, avoids midnight-UTC drop rate
+    - cron: "17 6 * * *"   # 06:17 UTC — off-peak, odd minute (avoids every
+                            # :00/:30-aligned scheduled job on GitHub's fleet
+                            # landing in the same second)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -45,6 +62,13 @@ on:
         description: "One-off run scoped to a single user_id (leave empty for the normal multi-user run)"
         type: string
         default: ""
+      mode:
+        description: "'continue' skips adapters/ingest/close_jobs (a continuation run); 'normal' is the usual full run"
+        type: choice
+        options:
+          - normal
+          - continue
+        default: normal
 
 concurrency:
   group: ${{ github.workflow }}
@@ -126,4 +150,5 @@ jobs:
           ARGS=""
           [ "${{ inputs.dry_run }}" = "true" ]   && ARGS="$ARGS --dry-run"
           [ -n "${{ inputs.only_user_id }}" ]    && ARGS="$ARGS --only-user-id ${{ inputs.only_user_id }}"
+          [ "${{ inputs.mode }}" = "continue" ]  && ARGS="$ARGS --skip-fetch"
           python -m src.pipeline_v2 $ARGS
