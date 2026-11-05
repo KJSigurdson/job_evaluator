@@ -362,6 +362,27 @@ def test_tier2_enrich_upserts_on_user_id_job_id_conflict(fake_client):
     assert payload[0]["job_id"] == "job-1"
 
 
+def test_tier2_enrich_upsert_payload_never_includes_status(fake_client):
+    """matches_v2.status is frontend-owned (proposed/applied/screening/.../
+    withdrawn) — this upsert's on_conflict=user_id,job_id means ANY key in
+    this payload gets written on a conflict too, not just on a fresh
+    insert, so 'status' must NEVER appear here: a crash-recovery re-apply
+    of the exact same (user_id, job_id) pair must not reset a status the
+    user has since changed via the frontend back to whatever this payload
+    would say. New rows get their status entirely from the column's own
+    DEFAULT (the migration's job, not this code's), confirmed 2026-11-04
+    after matches_v2.status turned out to already exist live with no
+    migration file ever capturing it."""
+    anthropic_client = _FakeAnthropicClient(rounds=[
+        [_FakeResultItem("0", _FakeSucceededResult(_block(_valid_output_dict())))],
+    ])
+
+    run_tier2_enrich(fake_client, anthropic_client, candidates=[_candidate()])
+
+    [payload] = fake_client.table("matches_v2").upsert_calls
+    assert "status" not in payload[0]
+
+
 def test_tier2_enrich_writes_run_metrics_with_cost_from_actual_usage(fake_client):
     anthropic_client = _FakeAnthropicClient(rounds=[
         [_FakeResultItem("0", _FakeSucceededResult(
@@ -552,6 +573,18 @@ def test_reprocess_staged_parses_and_writes_without_api_call(fake_client):
     assert row["job_id"] == "job-1"
     assert row["tier1_score"] == 80
     assert row["tier2"]["org_summary"] == _valid_output_dict()["org_summary"]
+
+
+def test_reprocess_staged_upsert_payload_never_includes_status(fake_client):
+    """Same invariant as the live path's sibling test — the replay path
+    must be equally safe against resetting a real user's status on a
+    recovery re-apply."""
+    fake_client.seed("batch_results", [_staged_row()])
+
+    tier2_enrich.reprocess_staged(fake_client, "batch_1")
+
+    [payload] = fake_client.table("matches_v2").upsert_calls
+    assert "status" not in payload[0]
 
 
 def test_reprocess_staged_marks_rows_processed(fake_client):
