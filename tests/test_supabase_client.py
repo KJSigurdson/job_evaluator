@@ -7,6 +7,8 @@ via .range() until every row is collected.
 """
 from __future__ import annotations
 
+import httpx
+
 from src.supabase_client import (
     _IN_FILTER_CHUNK_SIZE,
     chunked_insert,
@@ -62,6 +64,95 @@ def test_fetch_all_respects_prior_filters(fake_client):
 
     assert len(rows) == 5
     assert all(r["id"] % 2 == 0 for r in rows)
+
+
+# ---------------------------------------------------------------------------
+# fetch_all — no offset=/limit= accumulation across pages (2026-11-06)
+#
+# FakeSupabaseClient's own .range() just overwrites an attribute each call,
+# so it can't reproduce this bug at all — these tests use a minimal stub
+# that reproduces the REAL postgrest-py 1.0.2 behavior instead: .range()
+# does `self.params = self.params.add(...)`, and httpx.QueryParams.add()
+# APPENDS a same-named key rather than replacing it. Confirmed for real in
+# a production log: a second .range() call on the same (mutated-in-place)
+# query object left `...&offset=0&offset=1000&limit=1000&limit=1000` in the
+# request URL for a `jobs` table page 2 fetch.
+# ---------------------------------------------------------------------------
+
+class _AccumulatingRangeQuery:
+    """Reproduces postgrest-py's actual .range() implementation exactly
+    (self.params = self.params.add(...)) so a regression here is caught by
+    the same mechanism that caused the real bug, not a simplified fake.
+
+    Tracks which page is next via len(params_per_call) — a shared MUTABLE
+    list — rather than a plain int counter attribute: fetch_all()'s fix is
+    copy.copy() per page, a shallow copy, so an int attribute (immutable)
+    would NOT be shared across copies and every copy would see page 0
+    forever (confirmed the hard way — this exact mistake hung the test
+    suite in an infinite loop). The list IS shared by reference under a
+    shallow copy, same as the real postgrest builder's `session`/`headers`
+    staying shared on purpose — this fake must honor the same shallow-copy
+    semantics it's meant to exercise.
+    """
+
+    def __init__(self, pages: list[list[dict]]):
+        self.params = httpx.QueryParams()
+        self._pages = pages
+        self.params_per_call: list[httpx.QueryParams] = []
+
+    def range(self, start: int, end: int) -> "_AccumulatingRangeQuery":
+        self.params = self.params.add("offset", start)
+        self.params = self.params.add("limit", end - start + 1)
+        return self
+
+    def execute(self):
+        idx = len(self.params_per_call)
+        self.params_per_call.append(self.params)
+        data = self._pages[idx] if idx < len(self._pages) else []
+        return type("_Resp", (), {"data": data})()
+
+
+def test_fetch_all_each_page_request_has_exactly_one_offset_and_one_limit():
+    pages = [[{"id": i} for i in range(1000)], [{"id": i} for i in range(1000, 1500)]]
+    query = _AccumulatingRangeQuery(pages)
+
+    rows = fetch_all(query, page_size=1000)
+
+    assert len(rows) == 1500
+    assert len(query.params_per_call) == 2
+    for params in query.params_per_call:
+        assert len(params.get_list("offset")) == 1
+        assert len(params.get_list("limit")) == 1
+
+
+def test_fetch_all_second_page_offset_and_limit_values_are_correct():
+    """Not just 'exactly one' — the single remaining value per page must be
+    THIS page's, not the first page's (which .add()'s append-only semantics
+    would otherwise leave as the first, lower-priority-but-still-present
+    entry if a naive fix just deduped instead of using a fresh query)."""
+    pages = [[{"id": i} for i in range(1000)], [{"id": i} for i in range(1000, 1300)]]
+    query = _AccumulatingRangeQuery(pages)
+
+    fetch_all(query, page_size=1000)
+
+    first_page_params, second_page_params = query.params_per_call
+    assert first_page_params.get("offset") == "0"
+    assert first_page_params.get("limit") == "1000"
+    assert second_page_params.get("offset") == "1000"
+    assert second_page_params.get("limit") == "1000"
+
+
+def test_fetch_all_three_pages_no_accumulation_on_any_page():
+    pages = [[{"id": i} for i in range(1000)], [{"id": i} for i in range(1000, 2000)], [{"id": i} for i in range(2000, 2100)]]
+    query = _AccumulatingRangeQuery(pages)
+
+    rows = fetch_all(query, page_size=1000)
+
+    assert len(rows) == 2100
+    assert len(query.params_per_call) == 3
+    for params in query.params_per_call:
+        assert len(params.get_list("offset")) == 1
+        assert len(params.get_list("limit")) == 1
 
 
 # ---------------------------------------------------------------------------

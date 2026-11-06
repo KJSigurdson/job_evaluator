@@ -1,6 +1,7 @@
 """Supabase client construction. Service-role key bypasses RLS — server-side use only."""
 from __future__ import annotations
 
+import copy
 import logging
 import os
 from datetime import datetime, timezone
@@ -48,11 +49,30 @@ def fetch_all(query, *, page_size: int = _PAGE_SIZE) -> list[dict]:
     especially critical for src/ingest.py's own-existing-jobs read, since an
     incomplete read there means real duplicate-insert/duplicate-alias bugs on
     the next run, not just an incomplete report.
+
+    Builds a FRESH shallow copy of *query* for every page rather than calling
+    .range() repeatedly on the same object — postgrest-py's .range() does
+    `self.params = self.params.add(...)` (confirmed by reading the installed
+    1.0.2 source), and httpx.QueryParams.add() APPENDS a key=value pair, it
+    never replaces one with the same name. Calling .range() a second time on
+    the SAME query object therefore left a SECOND offset=/limit= pair in the
+    request URL instead of overwriting the first — confirmed for real in a
+    production log (`...&offset=0&offset=1000&limit=1000&limit=1000`) for a
+    `jobs` table read that happened to still return the right page only
+    because PostgREST/Postgres take the LAST occurrence of a repeated query
+    param, not because the accumulation was harmless — an ever-growing URL
+    across pages on a large table. copy.copy() (shallow) is safe here
+    specifically because postgrest-py's own builder reassigns self.params to
+    a NEW QueryParams object on every .range() call rather than mutating one
+    in place (same reasoning: .add() returns a new object) — the shared
+    `session`/`headers` attributes a shallow copy leaves aliased are meant to
+    be shared (the underlying HTTP client, not per-page state).
     """
     rows: list[dict] = []
     start = 0
     while True:
-        page = query.range(start, start + page_size - 1).execute().data or []
+        page_query = copy.copy(query)
+        page = page_query.range(start, start + page_size - 1).execute().data or []
         rows.extend(page)
         if len(page) < page_size:
             break
