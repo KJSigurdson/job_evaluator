@@ -79,6 +79,7 @@ own call with a UNIFORM payload shape, never mixed into one heterogeneous upsert
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -98,6 +99,14 @@ log = logging.getLogger(__name__)
 # is fine to use for discovery/dedup, just not as the board of record for a
 # job's own description once a permitted board also carries it.
 _RESTRICTED_SOURCE_BOARDS = frozenset({"iap"})
+
+# URLs per touch_jobs_last_seen RPC call (see _write_unchanged_last_seen) —
+# deliberately NOT chunked_upsert's _WRITE_CHUNK_SIZE=500 convention: that
+# limit bounds a full-row upsert payload (jsonb enrichment blobs etc.) against
+# Postgres's statement timeout, whereas this call's payload is a single
+# text[] of bare canonical_urls with no other per-row columns — far smaller
+# per entry, so a larger chunk is safe.
+_TOUCH_CHUNK_SIZE = 1000
 
 
 @dataclass
@@ -150,6 +159,35 @@ def _fetch_existing_jobs(client) -> tuple[dict[str, dict], dict[str, str], dict[
     by_org_title = {org_title_key(row["org"] or "", row["title"] or ""): row["id"] for row in rows}
     by_id = {row["id"]: row for row in rows}
     return by_url, by_org_title, by_id
+
+
+def _write_unchanged_last_seen(client, canonical_urls: list[str], seen_at: str) -> None:
+    """Bump last_seen for every URL in *canonical_urls* via the
+    touch_jobs_last_seen(urls text[], seen_at timestamptz) RPC — chunked at
+    _TOUCH_CHUNK_SIZE, not chunked_upsert. This replaces a full-row upsert
+    whose only REAL effect was ever last_seen: unchanged_updates' other keys
+    (source_board/content_hash) are always set back to their own already-
+    stored value (see unchanged_updates' two call sites) — carried only
+    because upsert's INSERT branch validates NOT NULL columns even when the
+    ON CONFLICT DO UPDATE branch is the one that actually fires, not because
+    they ever change here. A dedicated RPC skips writing/validating those
+    columns at all.
+
+    touch_jobs_last_seen is expected to return a bare integer — the count of
+    rows actually touched (e.g. `select count(*) from updated` over a
+    `returning` CTE) — logged as-is per chunk, not substituted with
+    len(chunk) on a shape mismatch, so a real SQL-side discrepancy (e.g. a
+    URL deleted between this run's read and write) stays visible instead of
+    silently reporting as "fully touched"."""
+    for i in range(0, len(canonical_urls), _TOUCH_CHUNK_SIZE):
+        chunk = canonical_urls[i:i + _TOUCH_CHUNK_SIZE]
+        start = time.monotonic()
+        response = client.rpc("touch_jobs_last_seen", {"urls": chunk, "seen_at": seen_at}).execute()
+        elapsed_ms = (time.monotonic() - start) * 1000
+        log.info(
+            "touch_jobs_last_seen: touched=%r chunk_size=%d elapsed_ms=%.1f",
+            response.data, len(chunk), elapsed_ms,
+        )
 
 
 def ingest(
@@ -582,7 +620,7 @@ def ingest(
     if reopened_updates:
         chunked_upsert(client.table("jobs"), list(reopened_updates.values()), on_conflict="canonical_url")
     if unchanged_updates:
-        chunked_upsert(client.table("jobs"), list(unchanged_updates.values()), on_conflict="canonical_url")
+        _write_unchanged_last_seen(client, list(unchanged_updates.keys()), now)
     if new_aliases:
         chunked_upsert(client.table("job_aliases"), list(new_aliases.values()), on_conflict="alias_url")
 

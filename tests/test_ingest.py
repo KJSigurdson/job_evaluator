@@ -2,9 +2,43 @@
 against `jobs`/`job_aliases`/`run_metrics`."""
 from __future__ import annotations
 
+import pytest
+
 from src.adapters.base import JobPosting
 from src.ingest import IngestCounts, ingest
 from src.job_normalize import content_hash, normalize_job_url
+
+
+def _simulate_touch_jobs_last_seen(client):
+    """A realistic-enough fake of the real SQL function: bumps last_seen on
+    every seeded `jobs` row whose canonical_url is in the RPC's urls param,
+    returns the count actually touched. FakeSupabaseClient can't execute
+    real SQL, so without this, a test asserting last_seen actually changed
+    would see nothing happen (the default handler in
+    _default_touch_jobs_last_seen_rpc already installs this for the
+    `fake_client` fixture; tests that build their own FakeSupabaseClient()
+    directly must call this themselves — see its call sites below)."""
+    def _touch(params):
+        urls = set(params["urls"])
+        touched = 0
+        for row in client.table("jobs").rows:
+            if row["canonical_url"] in urls:
+                row["last_seen"] = params["seen_at"]
+                touched += 1
+        return touched
+    client.rpc_responses["touch_jobs_last_seen"] = _touch
+
+
+@pytest.fixture(autouse=True)
+def _default_touch_jobs_last_seen_rpc(fake_client):
+    """touch_jobs_last_seen is called for every ingest() run with at least
+    one 'unchanged'/cross-board/org-title-match touch. Installed by default
+    on every test's `fake_client` so a test that doesn't care about this
+    specific write still doesn't have to configure it (FakeSupabaseClient
+    raises on an unconfigured rpc_responses entry) — tests that DO care can
+    just read `fake_client.table("jobs").rows` afterward, same as any other
+    write in this file."""
+    _simulate_touch_jobs_last_seen(fake_client)
 
 
 def _posting(**overrides) -> JobPosting:
@@ -115,25 +149,94 @@ def test_ingest_unchanged_content_only_touches_last_seen(fake_client):
     assert fake_client.table("jobs").insert_calls == []
 
 
-def test_ingest_unchanged_upsert_payload_has_uniform_minimal_keys(fake_client):
-    """The NULL-fill regression this design exists to avoid: the unchanged-path
-    upsert payload must never reference org/title/status/enrichment/embedding/
-    enriched_at, so PostgREST's generated UPDATE clause can't touch any of them.
-    canonical_url/source_board/content_hash ARE required even though they're not
-    "changing" — Postgres validates NOT NULL on an upsert's INSERT branch
-    regardless of which branch the ON CONFLICT actually takes, so a NOT-NULL,
-    no-default column omitted here fails even a same-content, existing-row update
-    (confirmed the hard way against production)."""
+def test_ingest_unchanged_touch_rpc_call_carries_only_urls_and_seen_at(fake_client):
+    """The NULL-fill regression this design originally existed to avoid (a
+    full-row upsert whose payload could, by construction mistake, grow to
+    reference org/title/status/enrichment/embedding/enriched_at) is now
+    structurally impossible: touch_jobs_last_seen's RPC params are exactly
+    {urls, seen_at} — there is no payload shape for those columns to ever
+    leak into. Also confirms this path no longer goes through .upsert() at
+    all (see 2026-11-06's touch_jobs_last_seen RPC change)."""
     p = _posting()
+    canonical = normalize_job_url(p.url)
     fake_client.seed("jobs", [{
-        "id": "job-1", "canonical_url": normalize_job_url(p.url), "source_board": "80000_hours",
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
         "org": p.org, "title": p.title, "content_hash": content_hash(p.description),
     }])
 
     ingest([p], client=fake_client)
 
-    [payload] = fake_client.table("jobs").upsert_calls
-    assert set(payload[0].keys()) == {"canonical_url", "source_board", "content_hash", "last_seen"}
+    [(fn_name, params)] = fake_client.rpc_calls
+    assert fn_name == "touch_jobs_last_seen"
+    assert set(params.keys()) == {"urls", "seen_at"}
+    assert params["urls"] == [canonical]
+    assert fake_client.table("jobs").upsert_calls == []
+
+
+# ---------------------------------------------------------------------------
+# _write_unchanged_last_seen — chunking + per-chunk logging
+# ---------------------------------------------------------------------------
+
+def test_write_unchanged_last_seen_chunks_at_1000_urls(fake_client):
+    from src.ingest import _TOUCH_CHUNK_SIZE, _write_unchanged_last_seen
+
+    assert _TOUCH_CHUNK_SIZE == 1000
+    urls = [f"https://example.org/job-{i}" for i in range(2500)]
+    fake_client.rpc_responses["touch_jobs_last_seen"] = lambda params: len(params["urls"])
+
+    _write_unchanged_last_seen(fake_client, urls, "2026-11-06T00:00:00+00:00")
+
+    assert len(fake_client.rpc_calls) == 3  # 1000 + 1000 + 500
+    chunk_sizes = [len(params["urls"]) for _fn, params in fake_client.rpc_calls]
+    assert chunk_sizes == [1000, 1000, 500]
+    # every chunk is disjoint and their union is exactly the input, in order
+    assert [url for _fn, params in fake_client.rpc_calls for url in params["urls"]] == urls
+    for fn_name, params in fake_client.rpc_calls:
+        assert fn_name == "touch_jobs_last_seen"
+        assert params["seen_at"] == "2026-11-06T00:00:00+00:00"
+
+
+def test_write_unchanged_last_seen_single_chunk_under_limit(fake_client):
+    from src.ingest import _write_unchanged_last_seen
+
+    fake_client.rpc_responses["touch_jobs_last_seen"] = lambda params: len(params["urls"])
+    urls = ["https://example.org/job-1", "https://example.org/job-2"]
+
+    _write_unchanged_last_seen(fake_client, urls, "2026-11-06T00:00:00+00:00")
+
+    assert len(fake_client.rpc_calls) == 1
+    [(fn_name, params)] = fake_client.rpc_calls
+    assert params["urls"] == urls
+
+
+def test_write_unchanged_last_seen_logs_touched_count_and_elapsed_ms(fake_client, caplog):
+    from src.ingest import _write_unchanged_last_seen
+
+    fake_client.rpc_responses["touch_jobs_last_seen"] = lambda params: len(params["urls"])
+
+    with caplog.at_level("INFO"):
+        _write_unchanged_last_seen(fake_client, ["https://example.org/job-1"], "2026-11-06T00:00:00+00:00")
+
+    [record] = [r for r in caplog.records if "touch_jobs_last_seen" in r.message]
+    assert "touched=1" in record.message
+    assert "chunk_size=1" in record.message
+    assert "elapsed_ms=" in record.message
+
+
+def test_write_unchanged_last_seen_logs_rpc_return_as_is_not_chunk_size(fake_client, caplog):
+    """If the RPC reports fewer rows touched than URLs requested (e.g. a URL
+    deleted between this run's read and write), the log must show the REAL
+    number, never silently substitute len(chunk) and claim full success."""
+    from src.ingest import _write_unchanged_last_seen
+
+    fake_client.rpc_responses["touch_jobs_last_seen"] = lambda params: len(params["urls"]) - 1
+
+    with caplog.at_level("INFO"):
+        _write_unchanged_last_seen(fake_client, ["https://example.org/job-1", "https://example.org/job-2"], "now")
+
+    [record] = [r for r in caplog.records if "touch_jobs_last_seen" in r.message]
+    assert "touched=1" in record.message
+    assert "chunk_size=2" in record.message
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +409,7 @@ def test_ingest_same_canonical_url_twice_in_one_batch_does_not_double_insert():
     (which would crash on jobs.canonical_url's unique constraint in production)."""
     from tests.conftest import FakeSupabaseClient
     client = FakeSupabaseClient()
+    _simulate_touch_jobs_last_seen(client)
     p = _posting(url="https://jobs.80000hours.org/duplicated-listing")
 
     counts = ingest([p, p], client=client)
@@ -388,6 +492,7 @@ def test_ingest_same_new_canonical_url_three_times_differing_content_no_duplicat
 def test_ingest_same_alias_canonical_url_twice_in_one_batch_no_duplicate_upsert_key():
     from tests.conftest import FakeSupabaseClient
     client = FakeSupabaseClient()
+    _simulate_touch_jobs_last_seen(client)
     client.seed("jobs", [{
         "id": "job-1", "canonical_url": "https://jobs.80000hours.org/head-of-data",
         "source_board": "80000_hours", "org": "GiveDirectly", "title": "Head of Data",
@@ -436,20 +541,30 @@ def test_ingest_cross_board_same_url_does_not_flag_updated_or_touch_text(fake_cl
     assert fake_client.table("jobs").insert_calls == []
 
 
-def test_ingest_cross_board_upsert_payload_never_touches_status_or_text(fake_client):
+def test_ingest_cross_board_touch_never_changes_source_board_or_content_hash(fake_client):
+    """A cross-board rediscovery only ever touches last_seen now (via the
+    touch_jobs_last_seen RPC) — the stored row's source_board/content_hash
+    stay exactly as they were (the ORIGINAL owner's values), never
+    overwritten with the incoming posting's board/hash. Structurally
+    guaranteed by the new design: the RPC has no payload shape for those
+    columns to ever carry (see 2026-11-06's touch_jobs_last_seen change)."""
     p = _posting(source_board="probably_good")
+    canonical = normalize_job_url(p.url)
     fake_client.seed("jobs", [{
-        "id": "job-1", "canonical_url": normalize_job_url(p.url), "source_board": "80000_hours",
+        "id": "job-1", "canonical_url": canonical, "source_board": "80000_hours",
         "org": p.org, "title": p.title, "content_hash": "existing-hash",
         "raw_description": "existing text",
     }])
 
     ingest([p], client=fake_client)
 
-    [payload] = fake_client.table("jobs").upsert_calls
-    assert set(payload[0].keys()) == {"canonical_url", "source_board", "content_hash", "last_seen"}
-    assert payload[0]["source_board"] == "80000_hours"  # the ORIGINAL owner, not the incoming board
-    assert payload[0]["content_hash"] == "existing-hash"
+    [(fn_name, params)] = fake_client.rpc_calls
+    assert fn_name == "touch_jobs_last_seen"
+    assert params["urls"] == [canonical]
+    row = fake_client.table("jobs").rows[0]
+    assert row["source_board"] == "80000_hours"  # the ORIGINAL owner, not the incoming board
+    assert row["content_hash"] == "existing-hash"
+    assert fake_client.table("jobs").upsert_calls == []
 
 
 def test_ingest_third_board_in_same_batch_still_compares_against_original_owner(fake_client):
